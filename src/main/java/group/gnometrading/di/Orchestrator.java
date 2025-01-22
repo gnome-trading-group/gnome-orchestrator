@@ -9,6 +9,8 @@ import java.util.stream.IntStream;
 
 public abstract class Orchestrator {
 
+    protected static Class<? extends Orchestrator> instanceClass;
+
     private final Map<String, Object> singletonCache;
     private final Map<String, Method> providers;
 
@@ -19,7 +21,7 @@ public abstract class Orchestrator {
     }
 
     private void initialize() {
-        Method[] methods = this.getClass().getDeclaredMethods();
+        Method[] methods = this.getClass().getMethods();
         for (Method method : methods) {
             if (method.isAnnotationPresent(Provides.class)) {
                 String qualifier = getQualifier(method);
@@ -109,7 +111,8 @@ public abstract class Orchestrator {
 
     protected abstract void configure();
 
-    public static void main(String[] args) {
-        System.out.println("hi");
+    public static void main(String[] args) throws Exception {
+        Orchestrator orchestrator = instanceClass.getDeclaredConstructor().newInstance();
+        orchestrator.configure();
     }
 }

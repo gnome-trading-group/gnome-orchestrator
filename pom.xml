@@ -4,27 +4,13 @@
 
     <groupId>group.gnometrading</groupId>
     <artifactId>gnome-orchestrator</artifactId>
-    <version>1.0.1-SNAPSHOT</version>
+    <version>1.0.1</version>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
-
-    <scm>
-        <connection>scm:git:git@github.com:gnome-trading-group/gnome-orchestrator.git</connection>
-        <developerConnection>scm:git:git@github.com:gnome-trading-group/gnome-orchestrator.git</developerConnection>
-        <tag>HEAD</tag>
-    </scm>
-
-    <distributionManagement>
-        <repository>
-            <id>github</id>
-            <name>GitHub GTG Apache Maven Packages</name>
-            <url>https://maven.pkg.github.com/gnome-trading-group/gnome-orchestrator</url>
-        </repository>
-    </distributionManagement>
 
     <repositories>
         <repository>
@@ -34,7 +20,95 @@
         </repository>
     </repositories>
 
+
+    <profiles>
+        <profile>
+            <id>dev</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-simple</artifactId>
+                    <version>2.0.9</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>prod</id>
+            <dependencies>
+                <dependency>
+                    <groupId>net.openhft</groupId>
+                    <artifactId>chronicle-logger-slf4j-2</artifactId>
+                    <version>4.27ea0</version>
+                </dependency>
+            </dependencies>
+        </profile>
+
+        <!-- Profiles for OS -->
+        <profile>
+            <id>linux</id>
+            <activation>
+                <os>
+                    <family>unix</family>
+                </os>
+            </activation>
+            <properties>
+                <os.classifier>linux</os.classifier>
+            </properties>
+        </profile>
+        <profile>
+            <id>macos</id>
+            <activation>
+                <os>
+                    <family>mac</family>
+                </os>
+            </activation>
+            <properties>
+                <os.classifier>macos</os.classifier>
+            </properties>
+        </profile>
+        <profile>
+            <id>windows</id>
+            <activation>
+                <os>
+                    <family>windows</family>
+                </os>
+            </activation>
+            <properties>
+                <os.classifier>windows</os.classifier>
+            </properties>
+        </profile>
+    </profiles>
+
     <dependencies>
+        <dependency>
+            <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-strategies</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-registry</artifactId>
+            <version>1.0.3</version>
+        </dependency>
+        <dependency>
+            <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-networking</artifactId>
+            <version>1.0.35</version>
+            <classifier>${os.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-gateways</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-core</artifactId>
+            <version>1.0.27</version>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -53,6 +127,53 @@
             <version>5.14.2</version>
             <scope>test</scope>
         </dependency>
+<!--        <dependency>-->
+<!--            <groupId>net.openhft</groupId>-->
+<!--            <artifactId>chronicle-logger-slf4j-2</artifactId>-->
+<!--            <version>4.27ea0</version>-->
+<!--            <scope>runtime</scope>-->
+<!--        </dependency>-->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.9</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.16</version>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.0.2</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>${mainClass}</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.2</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

@@ -10,7 +10,7 @@ class OrchestratorTest {
         int total = 0;
 
         @Provides
-        Integer basicProvider() {
+        public Integer basicProvider() {
             return ++total;
         }
 
@@ -34,7 +34,7 @@ class OrchestratorTest {
 
         @Provides
         @Singleton
-        Integer basicProvider() {
+        public Integer basicProvider() {
             return ++total;
         }
 
@@ -57,13 +57,13 @@ class OrchestratorTest {
 
         @Provides
         @Named("the real real")
-        Integer orchestrator1() {
+        public Integer orchestrator1() {
             return 1;
         }
 
         @Provides
         @Named("the fake fake")
-        Integer orchestrator2() {
+        public Integer orchestrator2() {
             return 2;
         }
 
@@ -162,18 +162,18 @@ class OrchestratorTest {
 
         @Provides
         @Named("good string")
-        String provideGoodString() {
+        public String provideGoodString() {
             return "whats up man";
         }
 
         @Provides
-        String provideBadString() {
+        public String provideBadString() {
             return "im evil";
         }
 
         @Provides
         @Named("result")
-        String provideResult(@Named("good string") String input) {
+        public String provideResult(@Named("good string") String input) {
             return input + " -- not much";
         }
 
