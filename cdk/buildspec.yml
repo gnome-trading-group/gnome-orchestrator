@@ -1,0 +1,11 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "HELLO??"
+      - cd cdk
+      - npm ci
+  build:
+    commands:
+      - cdk synth
