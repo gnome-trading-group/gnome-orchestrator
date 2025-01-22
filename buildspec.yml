@@ -1,0 +1,13 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 14
+    commands:
+      cd cdk
+      npm ci
+  build:
+    commands:
+      # Build your CDK application
+      cdk synth
