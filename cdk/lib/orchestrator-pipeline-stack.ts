@@ -32,12 +32,12 @@ export class OrchestratorPipelineStack extends cdk.Stack {
         input: pipelines.CodePipelineSource.gitHub(config.GITHUB_REPO, config.GITHUB_BRANCH),
         installCommands: [
           "cd ./cdk",
-          "ls",
         ],
         commands: [ 
           "npm ci",
           "npx cdk synth"
-        ]
+        ],
+        primaryOutputDirectory: "cdk/cdk.out",
       }),
     });
     
