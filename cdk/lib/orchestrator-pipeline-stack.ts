@@ -31,7 +31,8 @@ export class OrchestratorPipelineStack extends cdk.Stack {
       synth: new pipelines.ShellStep("deploy", {
         input: pipelines.CodePipelineSource.gitHub(config.GITHUB_REPO, config.GITHUB_BRANCH),
         commands: [ 
-          "cd cdk",
+          "cd ./cdk",
+          "ls",
           "npm ci",
           "npx cdk synth"
         ]
