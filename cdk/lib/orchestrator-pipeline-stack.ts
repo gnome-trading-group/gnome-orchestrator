@@ -50,7 +50,27 @@ export class OrchestratorPipelineStack extends cdk.Stack {
             }
           } 
         })
-      }
+      },
+      codeBuildDefaults: {
+        partialBuildSpec: BuildSpec.fromObject({
+          env: {
+            variables: {
+              GITHUB_ACTOR: secret.secretValueFromJson('GITHUB_ACTOR').unsafeUnwrap(),
+              GITHUB_TOKEN: secret.secretValueFromJson('GITHUB_TOKEN').unsafeUnwrap(),
+            }
+          } 
+        })
+      },
+      synthCodeBuildDefaults: {
+        partialBuildSpec: BuildSpec.fromObject({
+          env: {
+            variables: {
+              GITHUB_ACTOR: secret.secretValueFromJson('GITHUB_ACTOR').unsafeUnwrap(),
+              GITHUB_TOKEN: secret.secretValueFromJson('GITHUB_TOKEN').unsafeUnwrap(),
+            }
+          } 
+        })
+      },
     });
 
     const dev = new AppStage(this, "Dev", {
