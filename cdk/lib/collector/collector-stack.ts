@@ -66,10 +66,10 @@ export class CollectorStack extends cdk.Stack {
         `$(aws ecr get-login --no-include-email --region ${this.region})`,
         `sudo docker pull ${dockerImageAsset.imageUri}`,
         `sudo docker run --shm-size=2gb
-        -e "MAIN_CLASS=${item[0]}" 
+        -e "MAIN_CLASS=${item[1]}" 
         -e "PROPERTIES_PATH=collector.properties" 
-        -e "LISTING_ID=${item[1]}"
-        -e "BUCKET_NAME=${bucket.bucketArn}"
+        -e "LISTING_ID=${item[0]}"
+        -e "BUCKET_NAME=${bucket.bucketName}"
         -d ` + dockerImageAsset.imageUri
     );
 

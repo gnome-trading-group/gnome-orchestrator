@@ -86,7 +86,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-strategies</artifactId>
-            <version>1.0.0</version>
+            <version>1.0.1</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -148,18 +148,6 @@
 
     <build>
         <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-jar-plugin</artifactId>
-                <version>3.0.2</version>
-                <configuration>
-                    <archive>
-                        <manifest>
-                            <mainClass>${mainClass}</mainClass>
-                        </manifest>
-                    </archive>
-                </configuration>
-            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>

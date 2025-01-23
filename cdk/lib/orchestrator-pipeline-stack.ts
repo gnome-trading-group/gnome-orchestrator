@@ -1,9 +1,11 @@
 import * as cdk from "aws-cdk-lib";
 import * as pipelines from "aws-cdk-lib/pipelines";
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as config from "./config";
 import { Construct } from "constructs";
 import { DockerStack } from "./docker-stack";
 import { CollectorStack } from "./collector/collector-stack";
+import { BuildSpec } from "aws-cdk-lib/aws-codebuild";
 
 class AppStage extends cdk.Stage {
 
@@ -24,6 +26,8 @@ class AppStage extends cdk.Stage {
 export class OrchestratorPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+    
+    const secret = secretsmanager.Secret.fromSecretNameV2(this, 'GithubMavenSecret', 'GITHUB_MAVEN');
 
     const pipeline = new pipelines.CodePipeline(this, "OrchestratorPipeline", {
       crossAccountKeys: true,
@@ -37,8 +41,18 @@ export class OrchestratorPipelineStack extends cdk.Stack {
         ],
         primaryOutputDirectory: "cdk/cdk.out",
       }),
+      assetPublishingCodeBuildDefaults: {
+        partialBuildSpec: BuildSpec.fromObject({
+          env: {
+            variables: {
+              GITHUB_ACTOR: secret.secretValueFromJson('GITHUB_ACTOR').unsafeUnwrap(),
+              GITHUB_TOKEN: secret.secretValueFromJson('GITHUB_TOKEN').unsafeUnwrap(),
+            }
+          } 
+        })
+      }
     });
-    
+
     const dev = new AppStage(this, "Dev", {
       env: config.ACCOUNTS.dev,
     })

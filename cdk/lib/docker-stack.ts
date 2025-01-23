@@ -11,6 +11,10 @@ export class DockerStack extends cdk.Stack {
 
     this.dockerImageAsset = new ecrAssets.DockerImageAsset(this, 'OrchestratorDockerImage', {
       directory: '../',
+      buildArgs: {
+        GITHUB_ACTOR: process.env.GITHUB_ACTOR ?? '',
+        GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? '',
+      },
     });
 
   }

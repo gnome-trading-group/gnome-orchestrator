@@ -5,13 +5,13 @@ services:
       args:
         GITHUB_ACTOR:
         GITHUB_TOKEN:
-        MAIN_CLASS: group.gnometrading.collectors.HyperliquidCollectorOrchestrator
     image: gnome-orchestrator:latest
     container_name: gnome-orchestrator
     environment:
       PROPERTIES_PATH: collector.properties
       LISTING_ID: 2
       BUCKET_NAME: market-data-collector
+      MAIN_CLASS: group.gnometrading.collectors.HyperliquidCollectorOrchestrator
     volumes:
       - ~/.aws/:/root/.aws:ro
     shm_size: '2gb'
