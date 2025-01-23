@@ -41,27 +41,7 @@ export class OrchestratorPipelineStack extends cdk.Stack {
         ],
         primaryOutputDirectory: "cdk/cdk.out",
       }),
-      assetPublishingCodeBuildDefaults: {
-        partialBuildSpec: BuildSpec.fromObject({
-          env: {
-            variables: {
-              GITHUB_ACTOR: secret.secretValueFromJson('GITHUB_ACTOR').unsafeUnwrap(),
-              GITHUB_TOKEN: secret.secretValueFromJson('GITHUB_TOKEN').unsafeUnwrap(),
-            }
-          } 
-        })
-      },
       codeBuildDefaults: {
-        partialBuildSpec: BuildSpec.fromObject({
-          env: {
-            variables: {
-              GITHUB_ACTOR: secret.secretValueFromJson('GITHUB_ACTOR').unsafeUnwrap(),
-              GITHUB_TOKEN: secret.secretValueFromJson('GITHUB_TOKEN').unsafeUnwrap(),
-            }
-          } 
-        })
-      },
-      synthCodeBuildDefaults: {
         partialBuildSpec: BuildSpec.fromObject({
           env: {
             variables: {
