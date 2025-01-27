@@ -39,7 +39,11 @@ export class CollectorStack extends cdk.Stack {
       vpc,
       allowAllOutbound: true,
     });
-    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.allTraffic(), 'Block all inbound', false);
+    securityGroup.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(22),
+      'Allow SSH access any IP'
+    );
 
     const role = new iam.Role(this, 'CollectorRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
@@ -109,6 +113,9 @@ export class CollectorStack extends cdk.Stack {
         -d ` + dockerImageAsset.imageUri
     );
 
+    // TODO: Only have a keypair on dev
+    const keyPair = ec2.KeyPair.fromKeyPairName(this, 'DefaultKeyPair', 'DefaultKeyPair');
+
     const instance = new ec2.Instance(this, `MarketCollectorListing${item[0]}`, {
       vpc,
       instanceType: ec2.InstanceType.of(
@@ -119,6 +126,7 @@ export class CollectorStack extends cdk.Stack {
       instanceName: `MarketCollectorListing${item[0]}`,
       securityGroup,
       role,
+      keyPair,
     });
 
     return instance;
