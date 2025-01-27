@@ -72,6 +72,7 @@ export class CollectorStack extends cdk.Stack {
   ) {
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
+        'echo "Running user data..."',
         'sudo yum update -y',
 
         // Install Docker
