@@ -84,24 +84,25 @@ export class CollectorStack extends cdk.Stack {
         // Install CloudWatchAgent
         'sudo yum install -y amazon-cloudwatch-agent',
         'sudo mkdir -p /etc/cloudwatch-agent',
-        `sudo cat << EOF > /etc/cloudwatch-agent/config.json
-        {
-          "logs": {
-            "logs_collected": {
-              "files": {
-                "collect_list": [
-                  {
-                    "file_path": "/var/lib/docker/containers/*/*.log",
-                    "log_group_name": "/collector/logs",
-                    "log_stream_name": "{instance_id}",
-                    "timestamp_format": "%Y-%m-%d %H:%M:%S"
-                  }
-                ]
-              }
-            }
+        // Do not modify these indents. You will regret it.
+        `cat <<EOF > /etc/cloudwatch-agent/config.json
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/lib/docker/containers/*/*.log",
+            "log_group_name": "/collector/logs",
+            "log_stream_name": "{instance_id}",
+            "timestamp_format": "%Y-%m-%d %H:%M:%S"
           }
-        }
-        EOF`,
+        ]
+      }
+    }
+  }
+}
+EOF`,
 
         // Start CloudWatchAgent
         'sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a start',
