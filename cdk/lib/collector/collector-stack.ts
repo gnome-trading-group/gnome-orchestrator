@@ -110,18 +110,18 @@ EOF`,
         // Start Docker
         `$(aws ecr get-login --no-include-email --region ${this.region})`,
         `sudo docker pull ${dockerImageAsset.imageUri}`,
-        `sudo docker run --shm-size=2gb
-        -e "MAIN_CLASS=${item[1]}" 
-        -e "PROPERTIES_PATH=collector.properties" 
-        -e "LISTING_ID=${item[0]}"
-        -e "BUCKET_NAME=${bucket.bucketName}"
+        `sudo docker run --shm-size=2gb \
+        -e "MAIN_CLASS=${item[1]}" \
+        -e "PROPERTIES_PATH=collector.properties" \
+        -e "LISTING_ID=${item[0]}" \
+        -e "BUCKET_NAME=${bucket.bucketName}" \
         -d ` + dockerImageAsset.imageUri
     );
 
     // TODO: Only have a keypair on dev
     const keyPair = ec2.KeyPair.fromKeyPairName(this, 'DefaultKeyPair', 'DefaultKeyPair');
 
-    const instance = new ec2.Instance(this, `MarketCollectorListingId${item[0]}-v2`, {
+    const instance = new ec2.Instance(this, `MarketCollectorListingId${item[0]}-v3`, {
       vpc,
       userData,
       instanceType: ec2.InstanceType.of(
