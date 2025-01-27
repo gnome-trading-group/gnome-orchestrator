@@ -120,7 +120,7 @@ export class CollectorStack extends cdk.Stack {
     // TODO: Only have a keypair on dev
     const keyPair = ec2.KeyPair.fromKeyPairName(this, 'DefaultKeyPair', 'DefaultKeyPair');
 
-    const instance = new ec2.Instance(this, `MarketCollectorListing${item[0]}`, {
+    const instance = new ec2.Instance(this, `MarketCollectorListingId${item[0]}-v2`, {
       vpc,
       userData,
       instanceType: ec2.InstanceType.of(
@@ -128,7 +128,7 @@ export class CollectorStack extends cdk.Stack {
           ec2.InstanceSize.MICRO
       ),
       machineImage: ec2.MachineImage.latestAmazonLinux2(),
-      instanceName: `MarketCollectorListingId${item[0]}-v1`,
+      instanceName: `MarketCollectorListingId${item[0]}`,
       securityGroup,
       role,
       keyPair,
