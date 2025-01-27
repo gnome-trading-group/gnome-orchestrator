@@ -128,7 +128,7 @@ export class CollectorStack extends cdk.Stack {
           ec2.InstanceSize.MICRO
       ),
       machineImage: ec2.MachineImage.latestAmazonLinux2(),
-      instanceName: `MarketCollectorListing${item[0]}`,
+      instanceName: `MarketCollectorListingId${item[0]}-v1`,
       securityGroup,
       role,
       keyPair,
