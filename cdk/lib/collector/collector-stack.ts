@@ -85,7 +85,7 @@ export class CollectorStack extends cdk.Stack {
         'sudo yum install -y amazon-cloudwatch-agent',
         'sudo mkdir -p /etc/cloudwatch-agent',
         // Do not modify these indents. You will regret it.
-        `cat <<EOF > /etc/cloudwatch-agent/config.json
+        `cat <<EOF > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 {
   "logs": {
     "logs_collected": {
@@ -121,7 +121,7 @@ EOF`,
     // TODO: Only have a keypair on dev
     const keyPair = ec2.KeyPair.fromKeyPairName(this, 'DefaultKeyPair', 'DefaultKeyPair');
 
-    const instance = new ec2.Instance(this, `MarketCollectorListingId${item[0]}-v3`, {
+    const instance = new ec2.Instance(this, `MarketCollectorListingId${item[0]}-v4`, {
       vpc,
       userData,
       instanceType: ec2.InstanceType.of(
