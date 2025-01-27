@@ -51,6 +51,9 @@ export class CollectorStack extends cdk.Stack {
     role.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchAgentServerPolicy')
     );
+    role.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryFullAccess')
+    );
     props.dockerImage.repository.grantRead(role)
     bucket.grantReadWrite(role);
 
@@ -79,8 +82,8 @@ export class CollectorStack extends cdk.Stack {
 
         // Install CloudWatchAgent
         'sudo yum install -y amazon-cloudwatch-agent',
-        'mkdir -p /etc/cloudwatch-agent',
-        `cat << EOF > /etc/cloudwatch-agent/config.json
+        'sudo mkdir -p /etc/cloudwatch-agent',
+        `sudo cat << EOF > /etc/cloudwatch-agent/config.json
         {
           "logs": {
             "logs_collected": {
