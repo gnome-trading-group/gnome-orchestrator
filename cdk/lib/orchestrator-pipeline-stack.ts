@@ -27,7 +27,9 @@ export class OrchestratorPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
     
-    const secret = secretsmanager.Secret.fromSecretNameV2(this, 'GithubMavenSecret', 'GITHUB_MAVEN');
+    const githubSecret = secretsmanager.Secret.fromSecretNameV2(this, 'GithubMavenSecret', 'GITHUB_MAVEN');
+    const dockerSecret = secretsmanager.Secret.fromSecretNameV2(this, 'DockerHubSecret', 'docker-hub-credentials');
+
 
     const pipeline = new pipelines.CodePipeline(this, "OrchestratorPipeline", {
       crossAccountKeys: true,
@@ -45,12 +47,15 @@ export class OrchestratorPipelineStack extends cdk.Stack {
         partialBuildSpec: BuildSpec.fromObject({
           env: {
             variables: {
-              GITHUB_ACTOR: secret.secretValueFromJson('GITHUB_ACTOR').unsafeUnwrap(),
-              GITHUB_TOKEN: secret.secretValueFromJson('GITHUB_TOKEN').unsafeUnwrap(),
+              GITHUB_ACTOR: githubSecret.secretValueFromJson('GITHUB_ACTOR').unsafeUnwrap(),
+              GITHUB_TOKEN: githubSecret.secretValueFromJson('GITHUB_TOKEN').unsafeUnwrap(),
             }
           } 
         })
       },
+      dockerCredentials: [
+        pipelines.DockerCredential.dockerHub(dockerSecret),
+      ],
     });
 
     const dev = new AppStage(this, "Dev", {
