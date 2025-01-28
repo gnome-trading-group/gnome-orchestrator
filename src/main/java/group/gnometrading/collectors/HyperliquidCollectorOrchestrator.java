@@ -9,7 +9,7 @@ import group.gnometrading.gateways.JSONWebSocketMarketInboundGateway;
 import group.gnometrading.gateways.MarketInboundGateway;
 import group.gnometrading.gateways.exchanges.hyperliquid.HyperliquidInboundGateway;
 import group.gnometrading.ipc.IPCManager;
-import group.gnometrading.networking.sockets.factory.NetSSLSocketFactory;
+import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
@@ -43,8 +43,8 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     public WebSocketClient provideWSClient(URI uri) throws IOException {
         return new WebSocketClientBuilder()
                 .withURI(uri)
-                .withSocketFactory(new NetSSLSocketFactory())
-                .withReadBufferSize(1 << 14)
+                .withSocketFactory(new NativeSSLSocketFactory())
+                .withReadBufferSize(1 << 19) // 512 kb
                 .build();
     }
 
