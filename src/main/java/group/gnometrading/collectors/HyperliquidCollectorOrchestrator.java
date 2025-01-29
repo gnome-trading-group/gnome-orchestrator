@@ -82,6 +82,6 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), Throwable::printStackTrace, null, marketUpdateCollector);
         AgentRunner.startOnThread(publicationAgentRunner);
         AgentRunner.startOnThread(subscriptionAgentRunner);
-        logger.info("Started everything up with listing {} on exchange {}.", listing.exchangeSecuritySymbol(), listing.exchangeId());
+        logger.info("Started everything up with listing {} on exchange {}!", listing.exchangeSecuritySymbol(), listing.exchangeId());
     }
 }
