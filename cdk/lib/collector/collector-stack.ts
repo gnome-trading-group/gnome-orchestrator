@@ -132,6 +132,7 @@ EOF`,
       securityGroup,
       role,
       keyPair,
+      userDataCausesReplacement: true,
     });
 
     return instance;
