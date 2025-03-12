@@ -9,6 +9,7 @@ import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.ipc.IPCManager;
 import group.gnometrading.resources.Properties;
+import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Listing;
 import io.aeron.Aeron;
 import io.aeron.driver.MediaDriver;
@@ -33,6 +34,17 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
     }
 
     @Provides
+    @Named("IDENTIFIER")
+    public String provideIdentifier() {
+        return System.getenv("IDENTIFIER");
+    }
+
+    @Provides
+    public SchemaType provideSchemaType() {
+        return SchemaType.findById(System.getenv("SCHEMA_TYPE"));
+    }
+
+    @Provides
     @Singleton
     public Properties provideProperties(@Named("PROPERTIES_PATH") String path) throws IOException {
         return new Properties(path);
@@ -42,8 +54,8 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
     @Singleton
     public Aeron provideAeron() {
         final MediaDriver.Context mediaDriverCtx = new MediaDriver.Context()
-                .dirDeleteOnStart(true);
-//                .aeronDirectoryName("/dev/shm/aeron");
+                .dirDeleteOnStart(true)
+                .aeronDirectoryName("/dev/shm/aeron");
 
         MediaDriver driver = MediaDriver.launch(mediaDriverCtx);
         return Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
@@ -78,14 +90,18 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
             IPCManager ipcManager,
             S3Client s3Client,
             Listing listing,
-            @Named("BUCKET_NAME") String bucketName
+            @Named("BUCKET_NAME") String bucketName,
+            @Named("IDENTIFIER") String identifier,
+            SchemaType schemaType
     ) {
         return new MarketUpdateCollector(
                 ipcManager,
                 STREAM_NAME,
                 s3Client,
                 listing,
-                bucketName
+                bucketName,
+                identifier,
+                schemaType
         );
     }
 }

@@ -72,14 +72,27 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         );
     }
 
+    public void handleInboundError(Throwable error) {
+        logger.info("Unknown error occurred in market inbound gateway", error);
+
+        logger.info("Clearing web socket buffers...");
+        WebSocketClient client = getInstance(WebSocketClient.class);
+        client.reset();
+    }
+
+    public void handleOutboundError(Throwable error) {
+        logger.info("Unknown error occurred in market update collector", error);
+        // TODO: What should we do here?
+    }
+
     @Override
     protected void configure() {
         MarketInboundGateway marketInboundGateway = getInstance(MarketInboundGateway.class);
         MarketUpdateCollector marketUpdateCollector = getInstance(MarketUpdateCollector.class);
         Listing listing = getInstance(Listing.class);
 
-        final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), Throwable::printStackTrace, null, marketInboundGateway);
-        final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), Throwable::printStackTrace, null, marketUpdateCollector);
+        final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleInboundError, null, marketInboundGateway);
+        final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleOutboundError, null, marketUpdateCollector);
         AgentRunner.startOnThread(publicationAgentRunner);
         AgentRunner.startOnThread(subscriptionAgentRunner);
         logger.info("Started everything up with listing {} on exchange {}!", listing.exchangeSecuritySymbol(), listing.exchangeId());
