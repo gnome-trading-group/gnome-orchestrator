@@ -14,6 +14,7 @@ services:
       SCHEMA_TYPE: mbp-10
       IDENTIFIER: local
       MAIN_CLASS: group.gnometrading.collectors.HyperliquidCollectorOrchestrator
+      AWS_PROFILE: AWSAdministratorAccess-443370708724
     volumes:
       - ~/.aws/:/root/.aws:ro
       - ./market-data:/app/market-data

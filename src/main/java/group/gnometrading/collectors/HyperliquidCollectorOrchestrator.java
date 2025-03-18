@@ -13,6 +13,7 @@ import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
+import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Listing;
 import io.aeron.Publication;
 import org.agrona.concurrent.AgentRunner;
@@ -59,16 +60,18 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     public MarketInboundGateway provideMarketInboundGateway(
             WebSocketClient webSocketClient,
             Publication publication,
+            SchemaType schemaType,
             Listing listing
     ) {
         return new HyperliquidInboundGateway(
-                webSocketClient,
                 publication,
                 new SystemEpochNanoClock(),
+                schemaType,
+                webSocketClient,
                 new JSONDecoder(),
+                new JSONEncoder(),
                 JSONWebSocketMarketInboundGateway.DEFAULT_WRITE_BUFFER_SIZE,
-                listing,
-                new JSONEncoder()
+                listing
         );
     }
 
@@ -90,11 +93,12 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         MarketInboundGateway marketInboundGateway = getInstance(MarketInboundGateway.class);
         MarketUpdateCollector marketUpdateCollector = getInstance(MarketUpdateCollector.class);
         Listing listing = getInstance(Listing.class);
+        SchemaType schemaType = getInstance(SchemaType.class);
 
         final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleInboundError, null, marketInboundGateway);
         final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleOutboundError, null, marketUpdateCollector);
         AgentRunner.startOnThread(publicationAgentRunner);
         AgentRunner.startOnThread(subscriptionAgentRunner);
-        logger.info("Started everything up with listing {} on exchange {}!", listing.exchangeSecuritySymbol(), listing.exchangeId());
+        logger.info("Started everything up with listing {} on exchange {} with schema {}", listing.exchangeSecuritySymbol(), listing.exchangeId(), schemaType);
     }
 }

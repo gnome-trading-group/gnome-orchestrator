@@ -13,6 +13,7 @@ import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Listing;
 import io.aeron.Aeron;
 import io.aeron.driver.MediaDriver;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.IOException;
@@ -37,6 +38,12 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
     @Named("IDENTIFIER")
     public String provideIdentifier() {
         return System.getenv("IDENTIFIER");
+    }
+
+    @Provides
+    @Named("AWS_PROFILE")
+    public String provideAWSProfileName() {
+        return System.getenv("AWS_PROFILE");
     }
 
     @Provides
@@ -68,8 +75,12 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
     }
 
     @Provides
-    public S3Client provideS3Client() {
-        return S3Client.builder().build();
+    public S3Client provideS3Client(@Named("AWS_PROFILE") String awsProfile) {
+        var builder = S3Client.builder();
+        if (awsProfile != null && !awsProfile.isEmpty()) {
+            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
+        }
+        return builder.build();
     }
 
     @Provides
