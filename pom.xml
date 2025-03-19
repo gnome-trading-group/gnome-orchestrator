@@ -76,33 +76,33 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-networking</artifactId>
-            <version>1.0.41</version>
+            <version>LATEST</version>
             <classifier>${os.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.0.4</version>
+            <version>LATEST</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-strategies</artifactId>
-            <version>1.0.6</version>
+            <version>LATEST</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-schemas</artifactId>
-            <version>1.0.3</version>
+            <version>LATEST</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>1.0.5</version>
+            <version>LATEST</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-core</artifactId>
-            <version>1.0.27</version>
+            <version>LATEST</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
