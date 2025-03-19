@@ -15,6 +15,7 @@ import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.utils.AgentUtils;
 import io.aeron.Publication;
 import org.agrona.concurrent.AgentRunner;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -97,8 +98,10 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
 
         final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleInboundError, null, marketInboundGateway);
         final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleOutboundError, null, marketUpdateCollector);
-        AgentRunner.startOnThread(publicationAgentRunner);
-        AgentRunner.startOnThread(subscriptionAgentRunner);
+
+        AgentUtils.startRunnerWithShutdownProtection(publicationAgentRunner);
+        AgentUtils.startRunnerWithShutdownProtection(subscriptionAgentRunner);
+
         logger.info("Started everything up with listing {} on exchange {} with schema {}", listing.exchangeSecuritySymbol(), listing.exchangeId(), schemaType);
     }
 }
