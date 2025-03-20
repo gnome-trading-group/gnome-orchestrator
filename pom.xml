@@ -4,7 +4,7 @@
 
     <groupId>group.gnometrading</groupId>
     <artifactId>gnome-orchestrator</artifactId>
-    <version>1.0.8-SNAPSHOT</version>
+    <version>1.0.8</version>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -15,7 +15,7 @@
     <scm>
         <connection>scm:git:git@github.com:gnome-trading-group/gnome-orchestrator.git</connection>
         <developerConnection>scm:git:git@github.com:gnome-trading-group/gnome-orchestrator.git</developerConnection>
-        <tag>HEAD</tag>
+        <tag>gnome-orchestrator-1.0.8</tag>
     </scm>
 
     <distributionManagement>
