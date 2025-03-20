@@ -26,4 +26,7 @@ WORKDIR /app
 COPY --from=builder /app/target/gnome-orchestrator-*.jar app.jar
 
 ENV MAIN_CLASS=""
-ENTRYPOINT java "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED" -cp app.jar ${MAIN_CLASS}
+
+COPY docker-entry.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
