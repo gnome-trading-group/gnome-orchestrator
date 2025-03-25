@@ -6,6 +6,7 @@ services:
         GITHUB_ACTOR:
         GITHUB_TOKEN:
     image: gnome-orchestrator:latest
+    privileged: true
     container_name: gnome-orchestrator
     environment:
       PROPERTIES_PATH: collector.properties

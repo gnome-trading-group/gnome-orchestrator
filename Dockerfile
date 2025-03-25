@@ -19,7 +19,9 @@ RUN mvn clean package -DskipTests
 # Step 2: Run the container
 FROM --platform=linux/amd64 ubuntu:24.04
 
-RUN apt-get update && apt-get install -y openjdk-17-jdk
+RUN apt update && apt install -y openjdk-17-jdk
+
+# RUN apt install -y tcpdump
 
 WORKDIR /app
 
