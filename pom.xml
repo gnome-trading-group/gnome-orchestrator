@@ -76,7 +76,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-networking</artifactId>
-            <version>1.0.48</version>
+            <version>1.0.49</version>
             <classifier>${os.classifier}</classifier>
         </dependency>
         <dependency>

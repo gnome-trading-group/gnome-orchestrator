@@ -46,7 +46,7 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         return new WebSocketClientBuilder()
                 .withURI(uri)
                 .withSocketFactory(new NativeSSLSocketFactory())
-                .withReadBufferSize(1 << 15) // 512 kb
+                .withReadBufferSize(1 << 19) // 512 kb
                 .build();
     }
 
@@ -80,11 +80,6 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         logger.info("Unknown error occurred in market inbound gateway", error);
 
         logger.info("Clearing web socket buffers...");
-        try {
-            Thread.sleep(10 * 60 * 1000);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
         WebSocketClient client = getInstance(WebSocketClient.class);
         client.reset();
     }
