@@ -109,7 +109,7 @@ public abstract class Orchestrator {
         }
     }
 
-    protected abstract void configure();
+    protected void configure() { /* Default NO-OP */ }
 
     public static void main(String[] args) throws Exception {
         Orchestrator orchestrator = instanceClass.getDeclaredConstructor().newInstance();
