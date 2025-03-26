@@ -53,7 +53,7 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     @Provides
     @Singleton
     public Publication providePublication(IPCManager ipcManager) {
-        return ipcManager.addPublication(STREAM_NAME);
+        return ipcManager.addExclusivePublication(STREAM_NAME);
     }
 
     @Singleton
