@@ -2,7 +2,7 @@ package group.gnometrading.collectors;
 
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
-import group.gnometrading.collector.MarketUpdateCollector;
+import group.gnometrading.collector.BulkMarketDataCollector;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
@@ -10,15 +10,16 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.ipc.IPCManager;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.SchemaType;
+import group.gnometrading.shared.AWSModule;
 import group.gnometrading.sm.Listing;
 import io.aeron.Aeron;
 import io.aeron.driver.MediaDriver;
-import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.IOException;
+import java.time.Clock;
 
-public abstract class DefaultCollectorOrchestrator extends Orchestrator {
+public abstract class DefaultCollectorOrchestrator extends Orchestrator implements AWSModule {
 
     protected static final String STREAM_NAME = "collector";
 
@@ -41,14 +42,8 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
     }
 
     @Provides
-    @Named("AWS_PROFILE")
-    public String provideAWSProfileName() {
-        return System.getenv("AWS_PROFILE");
-    }
-
-    @Provides
-    public SchemaType provideSchemaType() {
-        return SchemaType.findById(System.getenv("SCHEMA_TYPE"));
+    public Clock provideClock() {
+        return Clock.systemUTC();
     }
 
     @Provides
@@ -75,15 +70,6 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
     }
 
     @Provides
-    public S3Client provideS3Client(@Named("AWS_PROFILE") String awsProfile) {
-        var builder = S3Client.builder();
-        if (awsProfile != null && !awsProfile.isEmpty()) {
-            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
-        }
-        return builder.build();
-    }
-
-    @Provides
     @Singleton
     public SecurityMaster provideSecurityMaster(Properties properties) {
         return new SecurityMaster(new RegistryConnection(properties));
@@ -97,7 +83,8 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
 
     @Provides
     @Singleton
-    public MarketUpdateCollector provideMarketUpdateCollector(
+    public BulkMarketDataCollector provideBulkMarketDataCollector(
+            Clock clock,
             IPCManager ipcManager,
             S3Client s3Client,
             Listing listing,
@@ -105,7 +92,8 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator {
             @Named("IDENTIFIER") String identifier,
             SchemaType schemaType
     ) {
-        return new MarketUpdateCollector(
+        return new BulkMarketDataCollector(
+                clock,
                 ipcManager,
                 STREAM_NAME,
                 s3Client,

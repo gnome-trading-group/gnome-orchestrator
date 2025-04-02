@@ -2,7 +2,7 @@ package group.gnometrading.collectors;
 
 import group.gnometrading.codecs.json.JSONDecoder;
 import group.gnometrading.codecs.json.JSONEncoder;
-import group.gnometrading.collector.MarketUpdateCollector;
+import group.gnometrading.collector.BulkMarketDataCollector;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.JSONWebSocketMarketInboundGateway;
@@ -76,6 +76,11 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         );
     }
 
+    @Provides
+    public SchemaType provideSchemaType() {
+        return SchemaType.MBP_10;
+    }
+
     public void handleInboundError(Throwable error) {
         logger.info("Unknown error occurred in market inbound gateway", error);
 
@@ -92,7 +97,7 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     @Override
     protected void configure() {
         MarketInboundGateway marketInboundGateway = getInstance(MarketInboundGateway.class);
-        MarketUpdateCollector marketUpdateCollector = getInstance(MarketUpdateCollector.class);
+        BulkMarketDataCollector marketUpdateCollector = getInstance(BulkMarketDataCollector.class);
         Listing listing = getInstance(Listing.class);
         SchemaType schemaType = getInstance(SchemaType.class);
 

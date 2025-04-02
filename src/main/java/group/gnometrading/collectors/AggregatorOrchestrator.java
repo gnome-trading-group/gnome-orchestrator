@@ -2,8 +2,9 @@ package group.gnometrading.collectors;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import group.gnometrading.di.OrchestratorLambda;
+import group.gnometrading.shared.AWSModule;
 
-public class AggregatorOrchestrator extends OrchestratorLambda<Void, Void> {
+public class AggregatorOrchestrator extends OrchestratorLambda<Void, Void> implements AWSModule {
 
     static {
         instanceClass = AggregatorOrchestrator.class;
