@@ -36,12 +36,6 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
     }
 
     @Provides
-    @Named("IDENTIFIER")
-    public String provideIdentifier() {
-        return System.getenv("IDENTIFIER");
-    }
-
-    @Provides
     public Clock provideClock() {
         return Clock.systemUTC();
     }
@@ -89,7 +83,6 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
             S3Client s3Client,
             Listing listing,
             @Named("BUCKET_NAME") String bucketName,
-            @Named("IDENTIFIER") String identifier,
             SchemaType schemaType
     ) {
         return new BulkMarketDataCollector(
@@ -99,7 +92,6 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
                 s3Client,
                 listing,
                 bucketName,
-                identifier,
                 schemaType
         );
     }
