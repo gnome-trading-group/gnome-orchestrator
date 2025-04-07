@@ -84,9 +84,13 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     public void handleInboundError(Throwable error) {
         logger.info("Unknown error occurred in market inbound gateway", error);
 
-        logger.info("Clearing web socket buffers...");
+        logger.info("Reconnecting WebSocket client...");
         WebSocketClient client = getInstance(WebSocketClient.class);
-        client.reset();
+        try {
+            client.reconnect();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     public void handleOutboundError(Throwable error) {
