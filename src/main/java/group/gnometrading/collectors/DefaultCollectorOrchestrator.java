@@ -2,6 +2,7 @@ package group.gnometrading.collectors;
 
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collector.BulkMarketDataCollector;
+import group.gnometrading.collector.HeartbeatTask;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
@@ -19,6 +20,7 @@ import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.AgentRunner;
+import org.agrona.concurrent.SleepingMillisIdleStrategy;
 import org.agrona.concurrent.YieldingIdleStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,15 +29,29 @@ import software.amazon.awssdk.services.s3.S3Client;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 public abstract class DefaultCollectorOrchestrator extends Orchestrator implements AWSModule, SecurityMasterModule {
 
     private static final Logger logger = LoggerFactory.getLogger(DefaultCollectorOrchestrator.class);
+    private static final long HEARTBEAT_INTERVAL = TimeUnit.SECONDS.toMillis(15);
 
     @Provides
     @Named("OUTPUT_BUCKET")
     public String provideBucketName() {
         return System.getenv("OUTPUT_BUCKET");
+    }
+
+    @Provides
+    @Named("CONTROLLER_URL")
+    public String provideControllerURL() {
+        return System.getenv("CONTROLLER_URL");
+    }
+
+    @Provides
+    @Named("CONTROLLER_API_KEY")
+    public String provideControllerAPIKey() {
+        return System.getenv("CONTROLLER_API_KEY");
     }
 
     @Provides
@@ -70,6 +86,16 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
             output.add(securityMaster.getListing(Integer.parseInt(listingId)));
         }
         return output;
+    }
+
+    private HeartbeatTask createHeartbeatTask(
+            Listing listing
+    ) {
+        return new HeartbeatTask(
+                getInstance(String.class, "CONTROLLER_URL"),
+                getInstance(String.class, "CONTROLLER_API_KEY"),
+                listing
+        );
     }
 
     private BulkMarketDataCollector createBulkMarketDataCollector(
@@ -118,12 +144,15 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
 
             MarketInboundGateway marketInboundGateway = createInboundGateway(ipcManager.addExclusivePublication(streamName), listing);
             BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(ipcManager.addSubscription(streamName), listing);
+            HeartbeatTask heartbeatTask = createHeartbeatTask(listing);
 
             final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this.handleInboundError(marketInboundGateway), null, marketInboundGateway);
             final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleOutboundError, null, bulkMarketDataCollector);
+            final var heartbeatAgentRunner = new AgentRunner(new SleepingMillisIdleStrategy(HEARTBEAT_INTERVAL), Throwable::printStackTrace, null, heartbeatTask);
 
             AgentUtils.startRunnerWithShutdownProtection(publicationAgentRunner);
             AgentUtils.startRunnerWithShutdownProtection(subscriptionAgentRunner);
+            AgentRunner.startOnThread(heartbeatAgentRunner);
 
             logger.info("Started listing {} on exchange {} with schema {} on class {}",
                     listing.exchangeSecuritySymbol(),

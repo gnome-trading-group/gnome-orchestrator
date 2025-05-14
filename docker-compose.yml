@@ -11,11 +11,14 @@ services:
     environment:
       LISTING_IDS: 1
       OUTPUT_BUCKET: gnome-market-data-dev
+      CONTROLLER_URL: vfrw3nc037.execute-api.us-east-1.amazonaws.com
+      CONTROLLER_API_KEY: hPwjA5UPkk2quShy8Dwod84LRgbDa7UC2uDTr2iX
       REGISTRY_URL: i3116oczxe.execute-api.us-east-1.amazonaws.com
       REGISTRY_API_KEY: 9WPV7CfeqXa578yVYlxdG3kCPFzACr7YaMU0UVma
-      STAGE: dev
-      AWS_PROFILE: AWSAdministratorAccess-443370708724
       MAIN_CLASS: group.gnometrading.collectors.DelegatingCollectorOrchestrator
+      STAGE: dev
+
+      AWS_PROFILE: AWSAdministratorAccess-443370708724
     volumes:
       - ~/.aws/:/root/.aws:ro
       - ./market-data:/app/market-data
