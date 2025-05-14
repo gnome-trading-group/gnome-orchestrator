@@ -1,6 +1,5 @@
 package group.gnometrading.collectors;
 
-import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collector.BulkMarketDataCollector;
 import group.gnometrading.di.Named;
@@ -9,9 +8,9 @@ import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.MarketInboundGateway;
 import group.gnometrading.ipc.IPCManager;
-import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.AWSModule;
+import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.utils.AgentUtils;
 import io.aeron.Aeron;
@@ -25,36 +24,23 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
 
-import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 
-public abstract class DefaultCollectorOrchestrator extends Orchestrator implements AWSModule {
+public abstract class DefaultCollectorOrchestrator extends Orchestrator implements AWSModule, SecurityMasterModule {
 
     private static final Logger logger = LoggerFactory.getLogger(DefaultCollectorOrchestrator.class);
 
     @Provides
-    @Named("PROPERTIES_PATH")
-    public String providePropertiesPath() {
-        return System.getenv("PROPERTIES_PATH");
-    }
-
-    @Provides
-    @Named("BUCKET_NAME")
+    @Named("OUTPUT_BUCKET")
     public String provideBucketName() {
-        return System.getenv("BUCKET_NAME");
+        return System.getenv("OUTPUT_BUCKET");
     }
 
     @Provides
     public Clock provideClock() {
         return Clock.systemUTC();
-    }
-
-    @Provides
-    @Singleton
-    public Properties provideProperties(@Named("PROPERTIES_PATH") String path) throws IOException {
-        return new Properties(path);
     }
 
     @Provides
@@ -72,12 +58,6 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
     @Singleton
     public IPCManager provideIPCManager(Aeron aeron) {
         return new IPCManager(aeron);
-    }
-
-    @Provides
-    @Singleton
-    public SecurityMaster provideSecurityMaster(Properties properties) {
-        return new SecurityMaster(new RegistryConnection(properties));
     }
 
     @Provides
@@ -101,7 +81,7 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
                 getInstance(Clock.class),
                 getInstance(S3Client.class),
                 listing,
-                getInstance(String.class, "BUCKET_NAME"),
+                getInstance(String.class, "OUTPUT_BUCKET"),
                 defaultSchemaType()
         );
     }
@@ -128,7 +108,7 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
 
     @Override
     @SuppressWarnings("unchecked")
-    protected void configure() {
+    public void configure() {
         logger.info("Beginning collector for: {}", this.getClass().getSimpleName());
         List<Listing> listings = this.getInstance(List.class, "LISTINGS");
         IPCManager ipcManager = getInstance(IPCManager.class);

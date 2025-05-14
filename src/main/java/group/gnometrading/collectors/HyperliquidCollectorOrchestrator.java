@@ -11,6 +11,7 @@ import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.SchemaType;
+import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.sm.Listing;
 import io.aeron.Publication;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -19,7 +20,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 
-public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrator {
+public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrator implements PropertiesModule {
 
     static {
         instanceClass = HyperliquidCollectorOrchestrator.class;

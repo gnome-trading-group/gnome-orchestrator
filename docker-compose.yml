@@ -9,14 +9,13 @@ services:
     privileged: true
     container_name: gnome-orchestrator
     environment:
-      PROPERTIES_PATH: collector.properties
-      LISTING_IDS: 1,2,3,4,1
-      BUCKET_NAME: market-data-collector
-      IDENTIFIER: local
-      MAIN_CLASS: group.gnometrading.collectors.HyperliquidCollectorOrchestrator
-      INPUT_BUCKET: temp-data-12345
-      OUTPUT_BUCKET: market-data-consolidated-dev
+      LISTING_IDS: 1
+      OUTPUT_BUCKET: gnome-market-data-dev
+      REGISTRY_URL: i3116oczxe.execute-api.us-east-1.amazonaws.com
+      REGISTRY_API_KEY: 9WPV7CfeqXa578yVYlxdG3kCPFzACr7YaMU0UVma
+      STAGE: dev
       AWS_PROFILE: AWSAdministratorAccess-443370708724
+      MAIN_CLASS: group.gnometrading.collectors.DelegatingCollectorOrchestrator
     volumes:
       - ~/.aws/:/root/.aws:ro
       - ./market-data:/app/market-data

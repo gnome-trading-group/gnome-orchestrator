@@ -15,7 +15,7 @@ class OrchestratorTest {
         }
 
         @Override
-        protected void configure() {}
+        public void configure() {}
     }
 
     @Test
@@ -39,7 +39,7 @@ class OrchestratorTest {
         }
 
         @Override
-        protected void configure() {}
+        public void configure() {}
     }
 
     @Test
@@ -68,7 +68,7 @@ class OrchestratorTest {
         }
 
         @Override
-        protected void configure() {}
+        public void configure() {}
     }
 
     @Test
@@ -98,7 +98,7 @@ class OrchestratorTest {
 
     static class DefaultOrchestrator extends Orchestrator {
         @Override
-        protected void configure() {}
+        public void configure() {}
     }
 
     @Test
@@ -178,7 +178,7 @@ class OrchestratorTest {
         }
 
         @Override
-        protected void configure() {}
+        public void configure() {}
     }
 
     @Test
