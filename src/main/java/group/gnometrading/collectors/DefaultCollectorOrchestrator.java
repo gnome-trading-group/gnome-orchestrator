@@ -18,9 +18,7 @@ import io.aeron.Aeron;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
-import org.agrona.ErrorHandler;
 import org.agrona.concurrent.AgentRunner;
-import org.agrona.concurrent.SleepingMillisIdleStrategy;
 import org.agrona.concurrent.YieldingIdleStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -119,17 +117,16 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
 
     protected abstract SchemaType defaultSchemaType();
 
-    private ErrorHandler handleInboundError(MarketInboundGateway gateway) {
-        return (error) -> {
-            logger.info("Unknown error occurred in market inbound gateway", error);
-            logger.info("Marking the inbound gateway for reconnection...");
-            gateway.markReconnect();
-        };
+    private void handleInboundError(Throwable error) {
+        logger.info("Unknown error occurred in market inbound gateway", error);
+        // TODO: What shutdown protection should we add?
+        System.exit(1);
     }
 
     private void handleOutboundError(Throwable error) {
         logger.info("Unknown error occurred in market update collector", error);
-        // TODO: What should we do here?
+        // TODO: What shutdown protection should we add?
+        System.exit(1);
     }
 
     @Override
@@ -144,15 +141,12 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
 
             MarketInboundGateway marketInboundGateway = createInboundGateway(ipcManager.addExclusivePublication(streamName), listing);
             BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(ipcManager.addSubscription(streamName), listing);
-            HeartbeatTask heartbeatTask = createHeartbeatTask(listing);
 
-            final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this.handleInboundError(marketInboundGateway), null, marketInboundGateway);
+            final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleInboundError, null, marketInboundGateway);
             final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleOutboundError, null, bulkMarketDataCollector);
-            final var heartbeatAgentRunner = new AgentRunner(new SleepingMillisIdleStrategy(HEARTBEAT_INTERVAL), Throwable::printStackTrace, null, heartbeatTask);
 
             AgentUtils.startRunnerWithShutdownProtection(publicationAgentRunner);
             AgentUtils.startRunnerWithShutdownProtection(subscriptionAgentRunner);
-            AgentRunner.startOnThread(heartbeatAgentRunner);
 
             logger.info("Started listing {} on exchange {} with schema {} on class {}",
                     listing.exchangeSecuritySymbol(),
