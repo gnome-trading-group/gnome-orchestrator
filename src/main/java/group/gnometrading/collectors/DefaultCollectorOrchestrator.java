@@ -2,7 +2,6 @@ package group.gnometrading.collectors;
 
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collector.BulkMarketDataCollector;
-import group.gnometrading.collector.HeartbeatTask;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
@@ -13,11 +12,11 @@ import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.AWSModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
-import group.gnometrading.utils.AgentUtils;
 import io.aeron.Aeron;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
+import org.agrona.ErrorHandler;
 import org.agrona.concurrent.AgentRunner;
 import org.agrona.concurrent.YieldingIdleStrategy;
 import org.slf4j.Logger;
@@ -27,12 +26,11 @@ import software.amazon.awssdk.services.s3.S3Client;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public abstract class DefaultCollectorOrchestrator extends Orchestrator implements AWSModule, SecurityMasterModule {
 
     private static final Logger logger = LoggerFactory.getLogger(DefaultCollectorOrchestrator.class);
-    private static final long HEARTBEAT_INTERVAL = TimeUnit.SECONDS.toMillis(15);
 
     @Provides
     @Named("OUTPUT_BUCKET")
@@ -86,16 +84,6 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
         return output;
     }
 
-    private HeartbeatTask createHeartbeatTask(
-            Listing listing
-    ) {
-        return new HeartbeatTask(
-                getInstance(String.class, "CONTROLLER_URL"),
-                getInstance(String.class, "CONTROLLER_API_KEY"),
-                listing
-        );
-    }
-
     private BulkMarketDataCollector createBulkMarketDataCollector(
             Subscription subscription,
             Listing listing
@@ -117,10 +105,17 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
 
     protected abstract SchemaType defaultSchemaType();
 
-    private void handleInboundError(Throwable error) {
-        logger.info("Unknown error occurred in market inbound gateway", error);
-        // TODO: What shutdown protection should we add?
-        System.exit(1);
+    private ErrorHandler handleInboundError(MarketInboundGateway gateway, AtomicInteger errorCounter) {
+        return (error) -> {
+          logger.info("Unknown error occurred in market inbound gateway", error);
+          int errorNum = errorCounter.incrementAndGet();
+          if (errorNum > 5) {
+              logger.info("Maximum errors thrown. Exiting program");
+              System.exit(1);
+              return;
+          }
+          gateway.markReconnect();
+        };
     }
 
     private void handleOutboundError(Throwable error) {
@@ -142,11 +137,12 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
             MarketInboundGateway marketInboundGateway = createInboundGateway(ipcManager.addExclusivePublication(streamName), listing);
             BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(ipcManager.addSubscription(streamName), listing);
 
-            final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleInboundError, null, marketInboundGateway);
+            AtomicInteger errorCounter = new AtomicInteger(0);
+            final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this.handleInboundError(marketInboundGateway, errorCounter), null, marketInboundGateway);
             final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleOutboundError, null, bulkMarketDataCollector);
 
-            AgentUtils.startRunnerWithShutdownProtection(publicationAgentRunner);
-            AgentUtils.startRunnerWithShutdownProtection(subscriptionAgentRunner);
+            AgentRunner.startOnThread(publicationAgentRunner);
+            AgentRunner.startOnThread(subscriptionAgentRunner);
 
             logger.info("Started listing {} on exchange {} with schema {} on class {}",
                     listing.exchangeSecuritySymbol(),
