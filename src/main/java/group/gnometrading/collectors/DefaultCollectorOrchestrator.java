@@ -1,24 +1,23 @@
 package group.gnometrading.collectors;
 
+import com.lmax.disruptor.*;
+import com.lmax.disruptor.dsl.Disruptor;
+import com.lmax.disruptor.dsl.ProducerType;
+import com.lmax.disruptor.util.DaemonThreadFactory;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collector.BulkMarketDataCollector;
+import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.MarketInboundGateway;
-import group.gnometrading.ipc.IPCManager;
+import group.gnometrading.schemas.Schema;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.AWSModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
-import io.aeron.Aeron;
-import io.aeron.Publication;
-import io.aeron.Subscription;
-import io.aeron.driver.MediaDriver;
 import org.agrona.ErrorHandler;
-import org.agrona.concurrent.AgentRunner;
-import org.agrona.concurrent.YieldingIdleStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -31,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public abstract class DefaultCollectorOrchestrator extends Orchestrator implements AWSModule, SecurityMasterModule {
 
     private static final Logger logger = LoggerFactory.getLogger(DefaultCollectorOrchestrator.class);
+    public static final int DEFAULT_RING_BUFFER_SIZE = 1024;
 
     @Provides
     @Named("OUTPUT_BUCKET")
@@ -57,23 +57,6 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
 
     @Provides
     @Singleton
-    public Aeron provideAeron() {
-        final MediaDriver.Context mediaDriverCtx = new MediaDriver.Context()
-                .dirDeleteOnStart(true)
-                .aeronDirectoryName("/dev/shm/aeron");
-
-        MediaDriver driver = MediaDriver.launch(mediaDriverCtx);
-        return Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
-    }
-
-    @Provides
-    @Singleton
-    public IPCManager provideIPCManager(Aeron aeron) {
-        return new IPCManager(aeron);
-    }
-
-    @Provides
-    @Singleton
     @Named("LISTINGS")
     public List<Listing> provideListings(SecurityMaster securityMaster) {
         List<Listing> output = new ArrayList<>();
@@ -84,12 +67,8 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
         return output;
     }
 
-    private BulkMarketDataCollector createBulkMarketDataCollector(
-            Subscription subscription,
-            Listing listing
-    ) {
+    private BulkMarketDataCollector createBulkMarketDataCollector(Listing listing) {
         return new BulkMarketDataCollector(
-                subscription,
                 getInstance(Clock.class),
                 getInstance(S3Client.class),
                 listing,
@@ -98,10 +77,22 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
         );
     }
 
+    private Disruptor<Schema<?, ?>> createDisruptor() {
+        return new Disruptor<>(
+                createEventFactory(),
+                DEFAULT_RING_BUFFER_SIZE,
+                DaemonThreadFactory.INSTANCE,
+                ProducerType.SINGLE,
+                new YieldingWaitStrategy()
+        );
+    }
+
     protected abstract MarketInboundGateway createInboundGateway(
-        Publication publication,
-        Listing listing
+            RingBuffer<Schema<?, ?>> ringBuffer,
+            Listing listing
     );
+
+    protected abstract EventFactory<Schema<?, ?>> createEventFactory();
 
     protected abstract SchemaType defaultSchemaType();
 
@@ -118,31 +109,25 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
         };
     }
 
-    private void handleOutboundError(Throwable error) {
-        logger.info("Unknown error occurred in market update collector", error);
-        // TODO: What shutdown protection should we add?
-        System.exit(1);
-    }
-
     @Override
     @SuppressWarnings("unchecked")
     public void configure() {
         logger.info("Beginning collector for: {}", this.getClass().getSimpleName());
         List<Listing> listings = this.getInstance(List.class, "LISTINGS");
-        IPCManager ipcManager = getInstance(IPCManager.class);
 
         for (Listing listing : listings) {
-            String streamName = "collector#" + listing.listingId();
+            Disruptor<Schema<?, ?>> disruptor = createDisruptor();
 
-            MarketInboundGateway marketInboundGateway = createInboundGateway(ipcManager.addExclusivePublication(streamName), listing);
-            BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(ipcManager.addSubscription(streamName), listing);
+            MarketInboundGateway marketInboundGateway = createInboundGateway(disruptor.getRingBuffer(), listing);
+            BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(listing);
 
             AtomicInteger errorCounter = new AtomicInteger(0);
-            final var publicationAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this.handleInboundError(marketInboundGateway, errorCounter), null, marketInboundGateway);
-            final var subscriptionAgentRunner = new AgentRunner(new YieldingIdleStrategy(), this::handleOutboundError, null, bulkMarketDataCollector);
+            GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, errorCounter));
 
-            AgentRunner.startOnThread(publicationAgentRunner);
-            AgentRunner.startOnThread(subscriptionAgentRunner);
+            disruptor.handleEventsWith(bulkMarketDataCollector);
+            GnomeAgentRunner.startOnThread(marketInboundRunner);
+
+            disruptor.start();
 
             logger.info("Started listing {} on exchange {} with schema {} on class {}",
                     listing.exchangeSecuritySymbol(),

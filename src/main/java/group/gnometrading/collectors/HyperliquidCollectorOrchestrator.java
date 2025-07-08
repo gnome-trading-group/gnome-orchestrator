@@ -1,5 +1,7 @@
 package group.gnometrading.collectors;
 
+import com.lmax.disruptor.EventFactory;
+import com.lmax.disruptor.RingBuffer;
 import group.gnometrading.codecs.json.JSONDecoder;
 import group.gnometrading.codecs.json.JSONEncoder;
 import group.gnometrading.di.Provides;
@@ -10,10 +12,11 @@ import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
+import group.gnometrading.schemas.MBP10Schema;
+import group.gnometrading.schemas.Schema;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.sm.Listing;
-import io.aeron.Publication;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
 import java.io.IOException;
@@ -41,18 +44,22 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     }
 
     @Override
-    protected MarketInboundGateway createInboundGateway(Publication publication, Listing listing) {
+    protected MarketInboundGateway createInboundGateway(RingBuffer<Schema<?, ?>> ringBuffer, Listing listing) {
         WebSocketClient webSocketClient = getInstance(WebSocketClient.class);
         return new HyperliquidInboundGateway(
-                publication,
+                ringBuffer,
                 new SystemEpochNanoClock(),
-                defaultSchemaType(),
                 webSocketClient,
                 new JSONDecoder(),
                 new JSONEncoder(),
                 JSONWebSocketMarketInboundGateway.DEFAULT_WRITE_BUFFER_SIZE,
                 listing
         );
+    }
+
+    @Override
+    protected EventFactory<Schema<?, ?>> createEventFactory() {
+        return MBP10Schema::new;
     }
 
     @Override
