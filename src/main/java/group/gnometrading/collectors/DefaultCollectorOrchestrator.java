@@ -11,13 +11,20 @@ import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
-import group.gnometrading.gateways.MarketInboundGateway;
+import group.gnometrading.gateways.inbound.MarketInboundGateway;
+import group.gnometrading.gateways.inbound.MarketInboundGatewayConfig;
+import group.gnometrading.gateways.inbound.SocketReader;
+import group.gnometrading.gateways.inbound.SocketWriter;
 import group.gnometrading.schemas.Schema;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.AWSModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
 import org.agrona.ErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.EpochNanoClock;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.SystemEpochNanoClock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -27,7 +34,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public abstract class DefaultCollectorOrchestrator extends Orchestrator implements AWSModule, SecurityMasterModule {
+public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orchestrator implements AWSModule, SecurityMasterModule {
 
     private static final Logger logger = LoggerFactory.getLogger(DefaultCollectorOrchestrator.class);
     public static final int DEFAULT_RING_BUFFER_SIZE = 1024;
@@ -56,6 +63,16 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
     }
 
     @Provides
+    public EpochClock provideEpochClock() {
+        return new SystemEpochClock();
+    }
+
+    @Provides
+    public EpochNanoClock provideEpochNanoClock() {
+        return new SystemEpochNanoClock();
+    }
+
+    @Provides
     @Singleton
     @Named("LISTINGS")
     public List<Listing> provideListings(SecurityMaster securityMaster) {
@@ -77,7 +94,7 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
         );
     }
 
-    private Disruptor<Schema<?, ?>> createDisruptor() {
+    private Disruptor<T> createDisruptor() {
         return new Disruptor<>(
                 createEventFactory(),
                 DEFAULT_RING_BUFFER_SIZE,
@@ -87,12 +104,17 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
         );
     }
 
-    protected abstract MarketInboundGateway createInboundGateway(
-            RingBuffer<Schema<?, ?>> ringBuffer,
+    protected abstract SocketReader<T> createSocketReader(
+            RingBuffer<T> ringBuffer,
+            SocketWriter socketWriter,
             Listing listing
     );
 
-    protected abstract EventFactory<Schema<?, ?>> createEventFactory();
+    protected abstract MarketInboundGatewayConfig getInboundGatewayConfig();
+
+    protected abstract SocketWriter createSocketWriter();
+
+    protected abstract EventFactory<T> createEventFactory();
 
     protected abstract SchemaType defaultSchemaType();
 
@@ -105,7 +127,7 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
               System.exit(1);
               return;
           }
-          gateway.markReconnect();
+          gateway.forceReconnect();
         };
     }
 
@@ -116,16 +138,27 @@ public abstract class DefaultCollectorOrchestrator extends Orchestrator implemen
         List<Listing> listings = this.getInstance(List.class, "LISTINGS");
 
         for (Listing listing : listings) {
-            Disruptor<Schema<?, ?>> disruptor = createDisruptor();
+            Disruptor<T> disruptor = createDisruptor();
 
-            MarketInboundGateway marketInboundGateway = createInboundGateway(disruptor.getRingBuffer(), listing);
+            SocketWriter socketWriter = createSocketWriter();
+            SocketReader<T> socketReader = createSocketReader(disruptor.getRingBuffer(), socketWriter, listing);
+            EpochClock epochClock = getInstance(EpochClock.class);
+            MarketInboundGatewayConfig config = getInboundGatewayConfig();
+
+            MarketInboundGateway marketInboundGateway = new MarketInboundGateway(
+                    config, socketReader, epochClock
+            );
             BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(listing);
 
             AtomicInteger errorCounter = new AtomicInteger(0);
             GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, errorCounter));
+            GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, handleInboundError(marketInboundGateway, errorCounter));
+            GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, handleInboundError(marketInboundGateway, errorCounter));
 
             disruptor.handleEventsWith(bulkMarketDataCollector);
             GnomeAgentRunner.startOnThread(marketInboundRunner);
+            GnomeAgentRunner.startOnThread(socketReaderRunner);
+            GnomeAgentRunner.startOnThread(socketWriterRunner);
 
             disruptor.start();
 
