@@ -15,6 +15,9 @@ import group.gnometrading.gateways.inbound.MarketInboundGateway;
 import group.gnometrading.gateways.inbound.MarketInboundGatewayConfig;
 import group.gnometrading.gateways.inbound.SocketReader;
 import group.gnometrading.gateways.inbound.SocketWriter;
+import group.gnometrading.logging.ConsoleLogger;
+import group.gnometrading.logging.LogMessage;
+import group.gnometrading.logging.Logger;
 import group.gnometrading.schemas.Schema;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.AWSModule;
@@ -25,8 +28,6 @@ import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.time.Clock;
@@ -36,7 +37,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orchestrator implements AWSModule, SecurityMasterModule {
 
-    private static final Logger logger = LoggerFactory.getLogger(DefaultCollectorOrchestrator.class);
     public static final int DEFAULT_RING_BUFFER_SIZE = 1024;
 
     @Provides
@@ -63,6 +63,12 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
     }
 
     @Provides
+    @Singleton
+    public Logger provideLogger(EpochNanoClock epochClock) {
+        return new ConsoleLogger(epochClock);
+    }
+
+    @Provides
     public EpochClock provideEpochClock() {
         return new SystemEpochClock();
     }
@@ -86,6 +92,7 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
 
     private BulkMarketDataCollector createBulkMarketDataCollector(Listing listing) {
         return new BulkMarketDataCollector(
+                getInstance(Logger.class),
                 getInstance(Clock.class),
                 getInstance(S3Client.class),
                 listing,
@@ -105,6 +112,7 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
     }
 
     protected abstract SocketReader<T> createSocketReader(
+            Logger logger,
             RingBuffer<T> ringBuffer,
             SocketWriter socketWriter,
             Listing listing
@@ -118,30 +126,31 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
 
     protected abstract SchemaType defaultSchemaType();
 
-    private ErrorHandler handleInboundError(MarketInboundGateway gateway, AtomicInteger errorCounter) {
+    private ErrorHandler handleInboundError(MarketInboundGateway gateway, Logger logger, AtomicInteger errorCounter) {
         return (error) -> {
-          logger.info("Unknown error occurred in market inbound gateway", error);
-          int errorNum = errorCounter.incrementAndGet();
-          if (errorNum > 5) {
-              logger.info("Maximum errors thrown. Exiting program");
-              System.exit(1);
-              return;
-          }
-          gateway.forceReconnect();
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in market inbound gateway: %s", error.getMessage());
+            int errorNum = errorCounter.incrementAndGet();
+            if (errorNum > 5) {
+                logger.log(LogMessage.FATAL_ERROR_EXITING);
+                System.exit(1);
+                return;
+            }
+            gateway.forceReconnect();
         };
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public void configure() {
-        logger.info("Beginning collector for: {}", this.getClass().getSimpleName());
+        Logger logger = getInstance(Logger.class);
+        logger.logf(LogMessage.DEBUG, "Configuring collector for: %s", this.getClass().getSimpleName());
         List<Listing> listings = this.getInstance(List.class, "LISTINGS");
 
         for (Listing listing : listings) {
             Disruptor<T> disruptor = createDisruptor();
 
             SocketWriter socketWriter = createSocketWriter();
-            SocketReader<T> socketReader = createSocketReader(disruptor.getRingBuffer(), socketWriter, listing);
+            SocketReader<T> socketReader = createSocketReader(logger, disruptor.getRingBuffer(), socketWriter, listing);
             EpochClock epochClock = getInstance(EpochClock.class);
             MarketInboundGatewayConfig config = getInboundGatewayConfig();
 
@@ -151,9 +160,9 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
             BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(listing);
 
             AtomicInteger errorCounter = new AtomicInteger(0);
-            GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, errorCounter));
-            GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, handleInboundError(marketInboundGateway, errorCounter));
-            GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, handleInboundError(marketInboundGateway, errorCounter));
+            GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, logger, errorCounter));
+            GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, handleInboundError(marketInboundGateway, logger, errorCounter));
+            GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, handleInboundError(marketInboundGateway, logger, errorCounter));
 
             disruptor.handleEventsWith(bulkMarketDataCollector);
             GnomeAgentRunner.startOnThread(marketInboundRunner);
@@ -162,7 +171,7 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
 
             disruptor.start();
 
-            logger.info("Started listing {} on exchange {} with schema {} on class {}",
+            logger.logf(LogMessage.DEBUG, "Started listing %s on exchange %s with schema %s on class %s",
                     listing.exchangeSecuritySymbol(),
                     listing.exchangeId(),
                     defaultSchemaType(),
@@ -170,6 +179,6 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
             );
         }
 
-        logger.info("Finished configuring collector");
+        logger.logf(LogMessage.DEBUG, "Finished configuring collector");
     }
 }

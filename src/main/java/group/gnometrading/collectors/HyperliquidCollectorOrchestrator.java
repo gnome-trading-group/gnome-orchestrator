@@ -11,6 +11,7 @@ import group.gnometrading.gateways.inbound.MarketInboundGatewayConfig;
 import group.gnometrading.gateways.inbound.SocketReader;
 import group.gnometrading.gateways.inbound.SocketWriter;
 import group.gnometrading.gateways.inbound.exchanges.hyperliquid.HyperliquidSocketReader;
+import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
@@ -54,6 +55,7 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
 
     @Override
     protected SocketReader<MBP10Schema> createSocketReader(
+            Logger logger,
             RingBuffer<MBP10Schema> ringBuffer,
             SocketWriter socketWriter,
             Listing listing
@@ -61,6 +63,7 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         WebSocketClient webSocketClient = getInstance(WebSocketClient.class);
         EpochNanoClock epochNanoClock = getInstance(EpochNanoClock.class);
         return new HyperliquidSocketReader(
+                logger,
                 ringBuffer,
                 epochNanoClock,
                 socketWriter,

@@ -88,7 +88,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-networking</artifactId>
-            <version>1.0.60</version>
+            <version>1.0.61</version>
             <classifier>${os.classifier}</classifier>
         </dependency>
         <dependency>
@@ -99,7 +99,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-strategies</artifactId>
-            <version>1.1.1</version>
+            <version>1.1.2</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -109,12 +109,17 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>1.0.13</version>
+            <version>1.0.15</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-core</artifactId>
             <version>1.2.7</version>
+        </dependency>
+        <dependency>
+            <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-logging</artifactId>
+            <version>1.0.2</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -138,17 +143,6 @@
             <artifactId>mockito-junit-jupiter</artifactId>
             <version>5.14.2</version>
             <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-simple</artifactId>
-            <version>2.0.9</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
-            <version>2.0.16</version>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
