@@ -5,7 +5,7 @@ import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import com.lmax.disruptor.util.DaemonThreadFactory;
 import group.gnometrading.SecurityMaster;
-import group.gnometrading.collector.BulkMarketDataCollector;
+import group.gnometrading.collector.MarketDataCollector;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
@@ -90,8 +90,8 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
         return output;
     }
 
-    private BulkMarketDataCollector createBulkMarketDataCollector(Listing listing) {
-        return new BulkMarketDataCollector(
+    private MarketDataCollector createMarketDataCollector(Listing listing) {
+        return new MarketDataCollector(
                 getInstance(Logger.class),
                 getInstance(Clock.class),
                 getInstance(S3Client.class),
@@ -157,7 +157,7 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
             MarketInboundGateway marketInboundGateway = new MarketInboundGateway(
                     config, socketReader, epochClock
             );
-            BulkMarketDataCollector bulkMarketDataCollector = createBulkMarketDataCollector(listing);
+            MarketDataCollector bulkMarketDataCollector = createMarketDataCollector(listing);
 
             AtomicInteger errorCounter = new AtomicInteger(0);
             GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, logger, errorCounter));
