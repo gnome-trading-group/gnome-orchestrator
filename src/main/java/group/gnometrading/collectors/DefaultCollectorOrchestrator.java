@@ -126,16 +126,25 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
 
     protected abstract SchemaType defaultSchemaType();
 
-    private ErrorHandler handleInboundError(MarketInboundGateway gateway, Logger logger, AtomicInteger errorCounter) {
+    private ErrorHandler handleInboundError(MarketInboundGateway gateway, Logger logger, List<Long> errorTimestamps) {
         return (error) -> {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in market inbound gateway: %s", error.getMessage());
-            int errorNum = errorCounter.incrementAndGet();
-            if (errorNum > 5) {
-                logger.log(LogMessage.FATAL_ERROR_EXITING);
-                System.exit(1);
-                return;
+
+
+            long currentTime = System.currentTimeMillis();
+            synchronized (errorTimestamps) {
+                errorTimestamps.add(currentTime);
+
+                // Remove errors older than 1 minute
+                errorTimestamps.removeIf(timestamp -> currentTime - timestamp > 60_000);
+
+                if (errorTimestamps.size() >= 10) {
+                    logger.log(LogMessage.FATAL_ERROR_EXITING);
+                    System.exit(1);
+                    return;
+                }
+                gateway.forceReconnect();
             }
-            gateway.forceReconnect();
         };
     }
 
@@ -159,10 +168,10 @@ public abstract class DefaultCollectorOrchestrator<T extends Schema> extends Orc
             );
             MarketDataCollector bulkMarketDataCollector = createMarketDataCollector(listing);
 
-            AtomicInteger errorCounter = new AtomicInteger(0);
-            GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, logger, errorCounter));
-            GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, handleInboundError(marketInboundGateway, logger, errorCounter));
-            GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, handleInboundError(marketInboundGateway, logger, errorCounter));
+            List<Long> errorTimestamps = new ArrayList<>();
+            GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, logger, errorTimestamps));
+            GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, handleInboundError(marketInboundGateway, logger, errorTimestamps));
+            GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, handleInboundError(marketInboundGateway, logger, errorTimestamps));
 
             disruptor.handleEventsWith(bulkMarketDataCollector);
             GnomeAgentRunner.startOnThread(marketInboundRunner);
