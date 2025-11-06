@@ -5,12 +5,16 @@ import group.gnometrading.collector.MarketDataAggregator;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.OrchestratorLambda;
 import group.gnometrading.di.Provides;
+import group.gnometrading.di.Singleton;
+import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.shared.AWSModule;
+import org.agrona.concurrent.EpochNanoClock;
+import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
-public class AggregatorOrchestrator extends OrchestratorLambda<Void, Void> implements AWSModule {
+public class AggregatorOrchestrator extends OrchestratorLambda<Object, Void> implements AWSModule {
 
     static {
         instanceClass = AggregatorOrchestrator.class;
@@ -29,6 +33,17 @@ public class AggregatorOrchestrator extends OrchestratorLambda<Void, Void> imple
     }
 
     @Provides
+    @Singleton
+    public Logger provideLogger(EpochNanoClock epochClock) {
+        return new ConsoleLogger(epochClock);
+    }
+
+    @Provides
+    public EpochNanoClock provideEpochNanoClock() {
+        return new SystemEpochNanoClock();
+    }
+
+    @Provides
     public MarketDataAggregator provideMarketDataAggregator(
             Logger logger,
             S3Client s3Client,
@@ -40,7 +55,7 @@ public class AggregatorOrchestrator extends OrchestratorLambda<Void, Void> imple
     }
 
     @Override
-    protected Void execute(Void input, Context context) {
+    protected Void execute(Object input, Context context) {
         MarketDataAggregator marketDataAggregator = getInstance(MarketDataAggregator.class);
         marketDataAggregator.runAggregator();
         return null;
