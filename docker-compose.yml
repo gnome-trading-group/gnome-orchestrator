@@ -1,5 +1,5 @@
 services:
-  app:
+  collector:
     build:
       context: .
       args:
@@ -7,18 +7,40 @@ services:
         GITHUB_TOKEN:
     image: gnome-orchestrator:latest
     privileged: true
-    container_name: gnome-orchestrator
+    container_name: gnome-orchestrator-collector
     environment:
       LISTING_IDS: 1
       OUTPUT_BUCKET: gnome-market-data-dev
-      CONTROLLER_URL: vfrw3nc037.execute-api.us-east-1.amazonaws.com
-      CONTROLLER_API_KEY: hPwjA5UPkk2quShy8Dwod84LRgbDa7UC2uDTr2iX
       REGISTRY_URL: i3116oczxe.execute-api.us-east-1.amazonaws.com
       REGISTRY_API_KEY: 9WPV7CfeqXa578yVYlxdG3kCPFzACr7YaMU0UVma
       MAIN_CLASS: group.gnometrading.collectors.DelegatingCollectorOrchestrator
       STAGE: dev
 
       AWS_PROFILE: AWSAdministratorAccess-443370708724
+    volumes:
+      - ~/.aws/:/root/.aws:ro
+      - ./market-data:/app/market-data
+    shm_size: '4gb'
+
+  testing:
+    build:
+      context: .
+      args:
+        GITHUB_ACTOR:
+        GITHUB_TOKEN:
+    image: gnome-orchestrator:latest
+    privileged: true
+    container_name: gnome-orchestrator-testing
+    environment:
+      LISTING: 1
+      REGISTRY_URL: i3116oczxe.execute-api.us-east-1.amazonaws.com
+      REGISTRY_API_KEY: 9WPV7CfeqXa578yVYlxdG3kCPFzACr7YaMU0UVma
+      MAIN_CLASS: group.gnometrading.testing.MarketDataWriterOrchestrator
+      STAGE: dev
+      HOST: localhost
+      PORT: 8050
+      OUTPUT: /app/market-data/output.bin
+      DURATION: 10
     volumes:
       - ~/.aws/:/root/.aws:ro
       - ./market-data:/app/market-data

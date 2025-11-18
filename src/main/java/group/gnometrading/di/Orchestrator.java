@@ -11,12 +11,16 @@ public abstract class Orchestrator {
 
     protected static Class<? extends Orchestrator> instanceClass;
 
-    private final Map<String, Object> singletonCache;
-    private final Map<String, Method> providers;
+    protected final Map<String, Object> singletonCache;
+    protected final Map<String, Method> providers;
+    protected final Map<String, Orchestrator> providerInstances;
+    protected String[] cliArgs;
 
     public Orchestrator() {
         this.singletonCache = new HashMap<>();
         this.providers = new HashMap<>();
+        this.providerInstances = new HashMap<>();
+        this.cliArgs = null;
         initialize();
     }
 
@@ -26,6 +30,7 @@ public abstract class Orchestrator {
             if (method.isAnnotationPresent(Provides.class)) {
                 String qualifier = getQualifier(method);
                 this.providers.put(qualifier, method);
+                this.providerInstances.put(qualifier, this);
             }
         }
     }
@@ -80,10 +85,11 @@ public abstract class Orchestrator {
 
         if (providers.containsKey(qualifier)) {
             Method provider = providers.get(qualifier);
+            Orchestrator owner = providerInstances.get(qualifier);
             try {
                 provider.setAccessible(true);
                 var params = getParameters(provider);
-                T instance = type.cast(provider.invoke(this, params));
+                T instance = type.cast(provider.invoke(owner, params));
                 if (provider.isAnnotationPresent(Singleton.class)) {
                     singletonCache.put(qualifier, instance);
                 }
@@ -109,10 +115,40 @@ public abstract class Orchestrator {
         }
     }
 
+    /**
+     * Create a child orchestrator that inherits all the bindings of the parent.
+     *
+     * @param orchestratorClass the child orchestrator class
+     * @param <T> the child orchestrator type
+     * @return the child orchestrator instance
+     */
+    protected <T extends Orchestrator> T createChildOrchestrator(Class<T> orchestratorClass) {
+        try {
+            T child = orchestratorClass.getDeclaredConstructor().newInstance();
+            child.providers.putAll(this.providers);
+            child.providerInstances.putAll(this.providerInstances);
+            child.singletonCache.putAll(this.singletonCache);
+            child.cliArgs = this.cliArgs;
+
+            child.configure();
+
+            return child;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create child orchestrator for class: " + orchestratorClass.getName(), e);
+        }
+    }
+
+    @Provides
+    @Named("CLI_ARGS")
+    public String[] provideCLIArgs() {
+        return this.cliArgs;
+    }
+
     public void configure() { /* Default NO-OP */ }
 
     public static void main(String[] args) throws Exception {
         Orchestrator orchestrator = instanceClass.getDeclaredConstructor().newInstance();
+        orchestrator.cliArgs = args;
         orchestrator.configure();
     }
 }

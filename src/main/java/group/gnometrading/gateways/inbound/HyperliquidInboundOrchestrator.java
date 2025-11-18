@@ -1,4 +1,4 @@
-package group.gnometrading.collectors;
+package group.gnometrading.gateways.inbound;
 
 import com.lmax.disruptor.EventFactory;
 import com.lmax.disruptor.RingBuffer;
@@ -6,19 +6,15 @@ import group.gnometrading.codecs.json.JSONDecoder;
 import group.gnometrading.codecs.json.JSONEncoder;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
-import group.gnometrading.gateways.inbound.JSONWebSocketWriter;
-import group.gnometrading.gateways.inbound.MarketInboundGatewayConfig;
-import group.gnometrading.gateways.inbound.SocketReader;
-import group.gnometrading.gateways.inbound.SocketWriter;
 import group.gnometrading.gateways.inbound.exchanges.hyperliquid.HyperliquidSocketReader;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.MBP10Schema;
 import group.gnometrading.schemas.SchemaType;
-import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.sm.Listing;
 import org.agrona.concurrent.EpochNanoClock;
 
@@ -26,11 +22,12 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 
-public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrator<MBP10Schema> implements PropertiesModule {
+public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<MBP10Schema> {
 
     static {
-        instanceClass = HyperliquidCollectorOrchestrator.class;
+        instanceClass = HyperliquidInboundOrchestrator.class;
     }
+
 
     @Provides
     public URI provideURI(Properties properties) throws URISyntaxException {
@@ -38,11 +35,16 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     }
 
     @Provides
+    public GnomeSocketFactory provideSocketFactory() {
+        return new NativeSSLSocketFactory();
+    }
+
+    @Provides
     @Singleton
-    public WebSocketClient provideWSClient(URI uri) throws IOException {
+    public WebSocketClient provideWSClient(URI uri, GnomeSocketFactory socketFactory) throws IOException {
         return new WebSocketClientBuilder()
                 .withURI(uri)
-                .withSocketFactory(new NativeSSLSocketFactory())
+                .withSocketFactory(socketFactory)
                 .withReadBufferSize(1 << 19) // 512 kb
                 .build();
     }
@@ -79,7 +81,7 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
     }
 
     @Override
-    protected SchemaType defaultSchemaType() {
+    public SchemaType defaultSchemaType() {
         return SchemaType.MBP_10;
     }
 
@@ -88,4 +90,5 @@ public class HyperliquidCollectorOrchestrator extends DefaultCollectorOrchestrat
         return new MarketInboundGatewayConfig.Builder()
                 .build();
     }
+
 }
