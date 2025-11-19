@@ -117,7 +117,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         MarketInboundGatewayConfig config = getInboundGatewayConfig();
 
         MarketInboundGateway marketInboundGateway = new MarketInboundGateway(
-                config, socketReader, epochClock
+                logger, config, socketReader, epochClock
         );
 
         List<Long> errorTimestamps = new ArrayList<>();

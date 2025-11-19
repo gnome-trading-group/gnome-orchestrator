@@ -69,9 +69,9 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
                 ringBuffer,
                 epochNanoClock,
                 socketWriter,
+                listing,
                 webSocketClient,
-                new JSONDecoder(),
-                listing
+                new JSONDecoder()
         );
     }
 
