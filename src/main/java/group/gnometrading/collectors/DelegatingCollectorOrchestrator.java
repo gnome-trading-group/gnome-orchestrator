@@ -21,8 +21,6 @@ import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.time.Clock;
-import java.util.ArrayList;
-import java.util.List;
 
 public class DelegatingCollectorOrchestrator extends Orchestrator implements SecurityMasterModule, PropertiesModule, AWSModule {
 
@@ -47,15 +45,14 @@ public class DelegatingCollectorOrchestrator extends Orchestrator implements Sec
     }
 
     @Provides
-    @Singleton
-    @Named("LISTINGS")
-    public List<Listing> provideListings(Properties properties, SecurityMaster securityMaster) {
-        List<Listing> output = new ArrayList<>();
-        String listingIds = properties.getStringProperty("listing.ids");
-        for (String listingId : listingIds.split(",")) {
-            output.add(securityMaster.getListing(Integer.parseInt(listingId)));
-        }
-        return output;
+    @Named("LISTING_ID")
+    public Integer provideListingId(Properties properties) {
+        return properties.getIntProperty("listing");
+    }
+
+    @Provides
+    public Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
+        return securityMaster.getListing(listingId);
     }
 
     @Provides
@@ -64,37 +61,33 @@ public class DelegatingCollectorOrchestrator extends Orchestrator implements Sec
         return properties.getStringProperty("output.bucket");
     }
 
-    private MarketDataCollector createMarketDataCollector(Listing listing, SchemaType schemaType) {
+    private MarketDataCollector createMarketDataCollector(SchemaType schemaType) {
         return new MarketDataCollector(
                 getInstance(Logger.class),
                 getInstance(Clock.class),
                 getInstance(S3Client.class),
-                listing,
+                getInstance(Listing.class),
                 getInstance(String.class, "OUTPUT_BUCKET"),
                 schemaType
         );
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public void configure() {
         final Logger logger = getInstance(Logger.class);
-        final List<Listing> listings = this.getInstance(List.class, "LISTINGS");
         final SecurityMaster securityMaster = this.getInstance(SecurityMaster.class);
+        final Listing listing = getInstance(Listing.class);
 
-        for (Listing listing : listings) {
-            final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing, securityMaster);
-            final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-            final MarketDataCollector marketDataCollector = createMarketDataCollector(listing, orchestrator.defaultSchemaType());
-            orchestrator.configureGatewayForListing(listing, marketDataCollector);
+        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing, securityMaster);
+        final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
+        final MarketDataCollector marketDataCollector = createMarketDataCollector(orchestrator.getDefaultSchemaType());
+        orchestrator.configureGatewayForListing(marketDataCollector);
 
-            logger.logf(LogMessage.DEBUG, "Started listing %s on exchange %s with schema %s on class %s",
-                    listing.exchangeSecuritySymbol(),
-                    listing.exchangeId(),
-                    orchestrator.defaultSchemaType(),
-                    orchestratorClass.getSimpleName()
-            );
-        }
-        logger.logf(LogMessage.DEBUG, "Finished configuring collectors");
+        logger.logf(LogMessage.DEBUG, "Started listing %s on exchange %s with schema %s on class %s",
+                listing.exchangeSecuritySymbol(),
+                listing.exchangeId(),
+                orchestrator.getDefaultSchemaType(),
+                orchestratorClass.getSimpleName()
+        );
     }
 }

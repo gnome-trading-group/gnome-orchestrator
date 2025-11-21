@@ -9,6 +9,7 @@ import com.lmax.disruptor.dsl.ProducerType;
 import com.lmax.disruptor.util.DaemonThreadFactory;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
@@ -59,7 +60,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     @Singleton
     public Disruptor<T> provideDisruptor() {
         return new Disruptor<>(
-                createEventFactory(),
+                provideEventFactory(),
                 DEFAULT_RING_BUFFER_SIZE,
                 DaemonThreadFactory.INSTANCE,
                 ProducerType.SINGLE,
@@ -67,22 +68,52 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         );
     }
 
-    protected abstract SocketReader<T> createSocketReader(
-            Logger logger,
-            RingBuffer<T> ringBuffer,
-            SocketWriter socketWriter,
-            Listing listing
-    );
+    @Provides
+    @Singleton
+    public RingBuffer<T> provideRingBuffer(Disruptor<T> disruptor) {
+        return disruptor.getRingBuffer();
+    }
 
-    protected abstract MarketInboundGatewayConfig getInboundGatewayConfig();
+    @Provides
+    @Singleton
+    public abstract SocketReader<T> provideSocketReader();
 
-    protected abstract SocketWriter createSocketWriter();
+    @Provides
+    public abstract MarketInboundGatewayConfig provideMarketInboundGatewayConfig();
 
-    protected abstract EventFactory<T> createEventFactory();
+    @Provides
+    @Singleton
+    public abstract SocketWriter provideSocketWriter();
 
-    public abstract SchemaType defaultSchemaType();
+    @Provides
+    public abstract EventFactory<T> provideEventFactory();
 
-    private ErrorHandler handleInboundError(MarketInboundGateway gateway, Logger logger, List<Long> errorTimestamps) {
+    public abstract SchemaType getDefaultSchemaType();
+
+    @Provides
+    @Singleton
+    public MarketInboundGateway provideMarketInboundGateway() {
+        return new MarketInboundGateway(
+                getInstance(Logger.class),
+                getInstance(MarketInboundGatewayConfig.class),
+                getInstance(SocketReader.class),
+                getInstance(EpochClock.class)
+        );
+    }
+
+    @Provides
+    @Singleton
+    @Named("ERROR_TIMESTAMPS")
+    public List<Long> provideErrorTimestamps() {
+        return new ArrayList<>();
+    }
+
+    @Provides
+    public ErrorHandler provideInboundErrorHandler() {
+        MarketInboundGateway gateway = getInstance(MarketInboundGateway.class);
+        Logger logger = getInstance(Logger.class);
+        List<Long> errorTimestamps = getInstance(List.class, "ERROR_TIMESTAMPS");
+
         return (error) -> {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in market inbound gateway: %s", error.getMessage());
 
@@ -105,25 +136,20 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     }
 
     @SuppressWarnings("unchecked")
-    public void configureGatewayForListing(Listing listing, EventHandler<? super T> consumer) {
+    public void configureGatewayForListing(EventHandler<? super T> consumer) {
         Logger logger = getInstance(Logger.class);
+        Listing listing = getInstance(Listing.class);
         logger.logf(LogMessage.DEBUG, "Configuring listing gateway for: %d", listing.listingId());
 
         Disruptor<T> disruptor = getInstance(Disruptor.class);
+        SocketWriter socketWriter = getInstance(SocketWriter.class);
+        SocketReader<T> socketReader = getInstance(SocketReader.class);
+        MarketInboundGateway marketInboundGateway = getInstance(MarketInboundGateway.class);
 
-        SocketWriter socketWriter = createSocketWriter();
-        SocketReader<T> socketReader = createSocketReader(logger, disruptor.getRingBuffer(), socketWriter, listing);
-        EpochClock epochClock = getInstance(EpochClock.class);
-        MarketInboundGatewayConfig config = getInboundGatewayConfig();
-
-        MarketInboundGateway marketInboundGateway = new MarketInboundGateway(
-                logger, config, socketReader, epochClock
-        );
-
-        List<Long> errorTimestamps = new ArrayList<>();
-        GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, handleInboundError(marketInboundGateway, logger, errorTimestamps));
-        GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, handleInboundError(marketInboundGateway, logger, errorTimestamps));
-        GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, handleInboundError(marketInboundGateway, logger, errorTimestamps));
+        ErrorHandler errorHandler = getInstance(ErrorHandler.class);
+        GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, errorHandler);
+        GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, errorHandler);
+        GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, errorHandler);
 
         disruptor.handleEventsWith(consumer);
         GnomeAgentRunner.startOnThread(marketInboundRunner);

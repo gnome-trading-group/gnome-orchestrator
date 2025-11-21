@@ -7,7 +7,6 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.resources.Properties;
 
 import java.io.IOException;
-import java.util.Arrays;
 
 public interface PropertiesModule {
 
@@ -23,7 +22,6 @@ public interface PropertiesModule {
             @Named("CLI_ARGS") String[] cliArgs
     ) throws IOException {
         final String path = "orchestrator.%s.properties".formatted(stage.getStageName());
-        System.out.println("Loading properties from " + path + " and args: " + Arrays.toString(cliArgs));
         return new Properties(path, cliArgs);
     }
 

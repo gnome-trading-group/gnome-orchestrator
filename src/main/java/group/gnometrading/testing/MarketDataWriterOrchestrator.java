@@ -6,6 +6,7 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
+import group.gnometrading.gateways.inbound.MarketInboundGatewayConfig;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -15,6 +16,7 @@ import group.gnometrading.resources.Properties;
 import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
+import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
@@ -68,12 +70,6 @@ public class MarketDataWriterOrchestrator extends Orchestrator implements Securi
     }
 
     @Provides
-    @Named("DURATION")
-    public Integer provideDuration(Properties properties) {
-        return properties.getIntProperty("duration");
-    }
-
-    @Provides
     public URI provideURI(@Named("HOST") String host, @Named("PORT") Integer port) throws URISyntaxException {
         return new URI(null, host + ":" + port, null, null, null);
     }
@@ -83,27 +79,38 @@ public class MarketDataWriterOrchestrator extends Orchestrator implements Securi
         return new NativeSocketFactory();
     }
 
+    @Provides
+    public MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
+        return new MarketInboundGatewayConfig.Builder()
+                .withMaxReconnectAttempts(1)
+                .build();
+    }
+
+    @Provides
+    @Singleton
+    public MarketDataWriter provideMarketDataWriter(Logger logger, @Named("OUTPUT_PATH") String outputPath) {
+        return new MarketDataWriter(logger, outputPath);
+    }
+
+    @Provides
+    public ErrorHandler provideErrorHandler() {
+        Logger logger = getInstance(Logger.class);
+        return (error) -> {
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Exiting due to expected socket closure: %s", error);
+            System.exit(0);
+        };
+    }
+
     @Override
     public void configure() {
         final Logger logger = getInstance(Logger.class);
-        final MarketDataWriter writer = new MarketDataWriter(
-                logger,
-                getInstance(String.class, "OUTPUT_PATH")
-        );
+        final MarketDataWriter writer = getInstance(MarketDataWriter.class);
         final Listing listing = getInstance(Listing.class);
         final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
 
         final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing, securityMaster);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-        orchestrator.configureGatewayForListing(listing, writer);
-
-        try {
-            Thread.sleep(getInstance(Integer.class, "DURATION") * 1000L);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
-        logger.logf(LogMessage.DEBUG, "Finished writing market data");
-        System.exit(0);
+        orchestrator.configureGatewayForListing(writer);
     }
 
 }

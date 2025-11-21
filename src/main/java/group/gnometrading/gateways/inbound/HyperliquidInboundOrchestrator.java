@@ -50,43 +50,43 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
     }
 
     @Override
-    protected SocketWriter createSocketWriter() {
+    @Provides
+    @Singleton
+    public SocketWriter provideSocketWriter() {
         WebSocketClient webSocketClient = getInstance(WebSocketClient.class);
         return new JSONWebSocketWriter(webSocketClient, new JSONEncoder());
     }
 
     @Override
-    protected SocketReader<MBP10Schema> createSocketReader(
-            Logger logger,
-            RingBuffer<MBP10Schema> ringBuffer,
-            SocketWriter socketWriter,
-            Listing listing
-    ) {
-        WebSocketClient webSocketClient = getInstance(WebSocketClient.class);
-        EpochNanoClock epochNanoClock = getInstance(EpochNanoClock.class);
+    @Provides
+    @Singleton
+    @SuppressWarnings("unchecked")
+    public SocketReader<MBP10Schema> provideSocketReader() {
         return new HyperliquidSocketReader(
-                logger,
-                ringBuffer,
-                epochNanoClock,
-                socketWriter,
-                listing,
-                webSocketClient,
+                getInstance(Logger.class),
+                getInstance(RingBuffer.class),
+                getInstance(EpochNanoClock.class),
+                getInstance(SocketWriter.class),
+                getInstance(Listing.class),
+                getInstance(WebSocketClient.class),
                 new JSONDecoder()
         );
     }
 
     @Override
-    protected EventFactory<MBP10Schema> createEventFactory() {
+    @Provides
+    public EventFactory<MBP10Schema> provideEventFactory() {
         return MBP10Schema::new;
     }
 
     @Override
-    public SchemaType defaultSchemaType() {
+    public SchemaType getDefaultSchemaType() {
         return SchemaType.MBP_10;
     }
 
     @Override
-    protected MarketInboundGatewayConfig getInboundGatewayConfig() {
+    @Provides
+    public MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
         return new MarketInboundGatewayConfig.Builder()
                 .build();
     }

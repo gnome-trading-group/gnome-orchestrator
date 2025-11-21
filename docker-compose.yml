@@ -9,7 +9,7 @@ services:
     privileged: true
     container_name: gnome-orchestrator-collector
     environment:
-      LISTING_IDS: 1
+      LISTING: 1
       OUTPUT_BUCKET: gnome-market-data-dev
       REGISTRY_URL: i3116oczxe.execute-api.us-east-1.amazonaws.com
       REGISTRY_API_KEY: 9WPV7CfeqXa578yVYlxdG3kCPFzACr7YaMU0UVma
@@ -31,8 +31,8 @@ services:
     image: gnome-orchestrator:latest
     privileged: true
     container_name: gnome-orchestrator-testing
-#    ports:
-#      - "8765:8765"
+    ports:
+      - "8765:8765"
     network_mode: host
     environment:
       LISTING: 1
@@ -41,7 +41,6 @@ services:
       HOST: host.docker.internal
       PORT: 8765
       OUTPUT: /app/market-data/output.bin
-      DURATION: 10
     volumes:
       - ~/.aws/:/root/.aws:ro
       - ./market-data:/app/market-data
