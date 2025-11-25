@@ -42,6 +42,9 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
             case "Hyperliquid" -> {
                 return HyperliquidInboundOrchestrator.class;
             }
+            case "Lighter" -> {
+                return LighterInboundOrchestrator.class;
+            }
             default -> throw new IllegalArgumentException("Unmapped exchange: " + exchange.exchangeName());
         }
     }
