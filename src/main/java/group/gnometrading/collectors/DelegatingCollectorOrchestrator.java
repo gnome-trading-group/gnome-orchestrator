@@ -1,7 +1,7 @@
 package group.gnometrading.collectors;
 
 import group.gnometrading.SecurityMaster;
-import group.gnometrading.collector.MarketDataCollector;
+import group.gnometrading.collector.BulkMarketDataCollector;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
@@ -61,8 +61,8 @@ public class DelegatingCollectorOrchestrator extends Orchestrator implements Sec
         return properties.getStringProperty("output.bucket");
     }
 
-    private MarketDataCollector createMarketDataCollector(SchemaType schemaType) {
-        return new MarketDataCollector(
+    private BulkMarketDataCollector createBulkMarketDataCollector(SchemaType schemaType) {
+        return new BulkMarketDataCollector(
                 getInstance(Logger.class),
                 getInstance(Clock.class),
                 getInstance(S3Client.class),
@@ -80,7 +80,7 @@ public class DelegatingCollectorOrchestrator extends Orchestrator implements Sec
 
         final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing, securityMaster);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-        final MarketDataCollector marketDataCollector = createMarketDataCollector(orchestrator.getDefaultSchemaType());
+        final BulkMarketDataCollector marketDataCollector = createBulkMarketDataCollector(orchestrator.getDefaultSchemaType());
         orchestrator.configureGatewayForListing(marketDataCollector);
 
         logger.logf(LogMessage.DEBUG, "Started listing %s on exchange %s with schema %s on class %s",
