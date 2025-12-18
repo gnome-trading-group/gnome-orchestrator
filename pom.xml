@@ -94,22 +94,22 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.0.7</version>
+            <version>1.0.9</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-strategies</artifactId>
-            <version>1.1.6</version>
+            <version>1.1.7</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-schemas</artifactId>
-            <version>1.0.17</version>
+            <version>1.0.20</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>1.0.21</version>
+            <version>1.0.22</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>

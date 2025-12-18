@@ -16,7 +16,6 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.schemas.Schema;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
@@ -90,8 +89,6 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     public abstract EventFactory<T> provideEventFactory();
-
-    public abstract SchemaType getDefaultSchemaType();
 
     @Provides
     @Singleton

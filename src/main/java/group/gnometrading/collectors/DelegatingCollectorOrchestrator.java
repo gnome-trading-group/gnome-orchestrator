@@ -11,7 +11,6 @@ import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.shared.AWSModule;
 import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.shared.SecurityMasterModule;
@@ -61,15 +60,15 @@ public class DelegatingCollectorOrchestrator extends Orchestrator implements Sec
         return properties.getStringProperty("output.bucket");
     }
 
-    private MarketDataCollector createMarketDataCollector(SchemaType schemaType) {
-        return new MarketDataCollector(
-                getInstance(Logger.class),
-                getInstance(Clock.class),
-                getInstance(S3Client.class),
-                getInstance(Listing.class),
-                getInstance(String.class, "OUTPUT_BUCKET"),
-                schemaType
-        );
+    @Provides
+    public MarketDataCollector provideMarketDataCollector(
+            Logger logger,
+            Clock clock,
+            S3Client s3Client,
+            Listing listing,
+            @Named("OUTPUT_BUCKET") String outputBucket
+    ) {
+        return new MarketDataCollector(logger, clock, s3Client, listing, outputBucket);
     }
 
     @Override
@@ -80,13 +79,13 @@ public class DelegatingCollectorOrchestrator extends Orchestrator implements Sec
 
         final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing, securityMaster);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-        final MarketDataCollector marketDataCollector = createMarketDataCollector(orchestrator.getDefaultSchemaType());
+        final MarketDataCollector marketDataCollector = getInstance(MarketDataCollector.class);
         orchestrator.configureGatewayForListing(marketDataCollector);
 
         logger.logf(LogMessage.DEBUG, "Started listing %s on exchange %s with schema %s on class %s",
                 listing.exchangeSecuritySymbol(),
                 listing.exchangeId(),
-                orchestrator.getDefaultSchemaType(),
+                listing.schemaType(),
                 orchestratorClass.getSimpleName()
         );
     }

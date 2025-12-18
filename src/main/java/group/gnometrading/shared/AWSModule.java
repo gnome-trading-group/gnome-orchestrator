@@ -4,7 +4,7 @@ import group.gnometrading.di.Named;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
-import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
 public interface AWSModule {
@@ -27,11 +27,12 @@ public interface AWSModule {
 
     @Provides
     @Singleton
-    default CloudWatchClient provideCloudWatchClient(@Named("AWS_PROFILE") String awsProfile) {
-        var builder = CloudWatchClient.builder();
+    default DynamoDbClient provideDynamoDbClient(@Named("AWS_PROFILE") String awsProfile) {
+        var builder = DynamoDbClient.builder();
         if (awsProfile != null && !awsProfile.isEmpty()) {
             builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
         }
         return builder.build();
     }
+
 }

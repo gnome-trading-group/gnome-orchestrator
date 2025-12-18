@@ -14,7 +14,6 @@ import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.MBP10Schema;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Listing;
 import org.agrona.concurrent.EpochNanoClock;
 
@@ -77,11 +76,6 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
     @Provides
     public EventFactory<MBP10Schema> provideEventFactory() {
         return MBP10Schema::new;
-    }
-
-    @Override
-    public SchemaType getDefaultSchemaType() {
-        return SchemaType.MBP_10;
     }
 
     @Override
