@@ -103,12 +103,10 @@ public class MarketDataWriterOrchestrator extends Orchestrator implements Securi
 
     @Override
     public void configure() {
-        final Logger logger = getInstance(Logger.class);
         final MarketDataWriter writer = getInstance(MarketDataWriter.class);
         final Listing listing = getInstance(Listing.class);
-        final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
 
-        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing, securityMaster);
+        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
         orchestrator.configureGatewayForListing(writer);
     }

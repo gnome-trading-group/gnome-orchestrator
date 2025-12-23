@@ -32,19 +32,15 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     public static final int DEFAULT_RING_BUFFER_SIZE = 1024;
 
-    public static Class<? extends DefaultInboundOrchestrator<?>> findInboundOrchestrator(
-            final Listing listing,
-            final SecurityMaster securityMaster
-    ) {
-        final Exchange exchange = securityMaster.getExchange(listing.exchangeId());
-        switch (exchange.exchangeName()) {
+    public static Class<? extends DefaultInboundOrchestrator<?>> findInboundOrchestrator(final Listing listing) {
+        switch (listing.exchange().exchangeName()) {
             case "Hyperliquid" -> {
                 return HyperliquidInboundOrchestrator.class;
             }
             case "Lighter" -> {
                 return LighterInboundOrchestrator.class;
             }
-            default -> throw new IllegalArgumentException("Unmapped exchange: " + exchange.exchangeName());
+            default -> throw new IllegalArgumentException("Unmapped exchange: " + listing.exchange().exchangeName());
         }
     }
 

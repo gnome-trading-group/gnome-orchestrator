@@ -74,18 +74,17 @@ public class DelegatingCollectorOrchestrator extends Orchestrator implements Sec
     @Override
     public void configure() {
         final Logger logger = getInstance(Logger.class);
-        final SecurityMaster securityMaster = this.getInstance(SecurityMaster.class);
         final Listing listing = getInstance(Listing.class);
 
-        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing, securityMaster);
+        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
         final MarketDataCollector marketDataCollector = getInstance(MarketDataCollector.class);
         orchestrator.configureGatewayForListing(marketDataCollector);
 
         logger.logf(LogMessage.DEBUG, "Started listing %s on exchange %s with schema %s on class %s",
-                listing.exchangeSecuritySymbol(),
-                listing.exchangeId(),
-                listing.schemaType(),
+                listing.security().symbol(),
+                listing.exchange().exchangeName(),
+                listing.exchange().schemaType(),
                 orchestratorClass.getSimpleName()
         );
     }
