@@ -15,6 +15,7 @@ import group.gnometrading.resources.Properties;
 import group.gnometrading.shared.AWSModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import org.agrona.concurrent.EpochNanoClock;
+import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
@@ -48,6 +49,11 @@ public class AggregatorOrchestrator extends OrchestratorLambda<Object, Void> imp
     @Named("COLLECTORS_METADATA_TABLE")
     public String provideCollectorsMistingMetadataTable(Properties properties) {
         return properties.getStringProperty("collectors.metadata.table");
+    }
+
+    @Provides
+    public EpochNanoClock provideEpochNanoClock() {
+        return new SystemEpochNanoClock();
     }
 
     @Provides
