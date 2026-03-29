@@ -15,5 +15,4 @@ public interface SecurityMasterModule extends PropertiesModule {
         final String apiKey = properties.getStringProperty("registry.api_key");
         return new SecurityMaster(new RegistryConnection(url, apiKey));
     }
-
 }

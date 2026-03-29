@@ -2,8 +2,8 @@ package group.gnometrading.gateways.inbound;
 
 import com.lmax.disruptor.EventFactory;
 import com.lmax.disruptor.RingBuffer;
-import group.gnometrading.codecs.json.JSONDecoder;
-import group.gnometrading.codecs.json.JSONEncoder;
+import group.gnometrading.codecs.json.JsonDecoder;
+import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.inbound.exchanges.hyperliquid.HyperliquidSocketReader;
@@ -13,34 +13,32 @@ import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.schemas.MBP10Schema;
+import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.sm.Listing;
-import org.agrona.concurrent.EpochNanoClock;
-
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import org.agrona.concurrent.EpochNanoClock;
 
-public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<MBP10Schema> {
+public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10Schema> {
 
     static {
         instanceClass = HyperliquidInboundOrchestrator.class;
     }
 
-
     @Provides
-    public URI provideURI(Properties properties) throws URISyntaxException {
+    public final URI provideUri(Properties properties) throws URISyntaxException {
         return new URI(properties.getStringProperty("hyperliquid.ws.url"));
     }
 
     @Provides
-    public GnomeSocketFactory provideSocketFactory() {
+    public final GnomeSocketFactory provideSocketFactory() {
         return new NativeSSLSocketFactory();
     }
 
     @Provides
     @Singleton
-    public WebSocketClient provideWSClient(URI uri, GnomeSocketFactory socketFactory) throws IOException {
+    public final WebSocketClient provideWsClient(URI uri, GnomeSocketFactory socketFactory) throws IOException {
         return new WebSocketClientBuilder()
                 .withURI(uri)
                 .withSocketFactory(socketFactory)
@@ -51,16 +49,16 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
     @Override
     @Provides
     @Singleton
-    public SocketWriter provideSocketWriter() {
+    public final SocketWriter provideSocketWriter() {
         WebSocketClient webSocketClient = getInstance(WebSocketClient.class);
-        return new JSONWebSocketWriter(webSocketClient, new JSONEncoder());
+        return new JsonWebSocketWriter(webSocketClient, new JsonEncoder());
     }
 
     @Override
     @Provides
     @Singleton
     @SuppressWarnings("unchecked")
-    public SocketReader<MBP10Schema> provideSocketReader() {
+    public final SocketReader<Mbp10Schema> provideSocketReader() {
         return new HyperliquidSocketReader(
                 getInstance(Logger.class),
                 getInstance(RingBuffer.class),
@@ -68,21 +66,18 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
                 getInstance(SocketWriter.class),
                 getInstance(Listing.class),
                 getInstance(WebSocketClient.class),
-                new JSONDecoder()
-        );
+                new JsonDecoder());
     }
 
     @Override
     @Provides
-    public EventFactory<MBP10Schema> provideEventFactory() {
-        return MBP10Schema::new;
+    public final EventFactory<Mbp10Schema> provideEventFactory() {
+        return Mbp10Schema::new;
     }
 
     @Override
     @Provides
-    public MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
-        return new MarketInboundGatewayConfig.Builder()
-                .build();
+    public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
+        return new MarketInboundGatewayConfig.Builder().build();
     }
-
 }

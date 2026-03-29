@@ -8,27 +8,23 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
-public interface AWSModule {
+public interface AwsModule {
 
     @Provides
     @Named("AWS_PROFILE")
-    default String provideAWSProfileName() {
+    default String provideAwsProfileName() {
         return System.getenv("AWS_PROFILE");
     }
 
     @Provides
-    default Region provideAWSRegion() {
+    default Region provideAwsRegion() {
         return Region.of(System.getenv().getOrDefault("AWS_REGION", "us-east-1"));
     }
 
     @Provides
     @Singleton
-    default S3Client provideS3Client(
-            @Named("AWS_PROFILE") String awsProfile, Region awsRegion
-    ) {
-        var builder = S3Client.builder()
-                .region(awsRegion)
-                .crossRegionAccessEnabled(true);
+    default S3Client provideS3Client(@Named("AWS_PROFILE") String awsProfile, Region awsRegion) {
+        var builder = S3Client.builder().region(awsRegion).crossRegionAccessEnabled(true);
         if (awsProfile != null && !awsProfile.isEmpty()) {
             builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
         }
@@ -37,15 +33,11 @@ public interface AWSModule {
 
     @Provides
     @Singleton
-    default DynamoDbClient provideDynamoDbClient(
-            @Named("AWS_PROFILE") String awsProfile,
-            Region awsRegion
-    ) {
+    default DynamoDbClient provideDynamoDbClient(@Named("AWS_PROFILE") String awsProfile, Region awsRegion) {
         var builder = DynamoDbClient.builder().region(awsRegion);
         if (awsProfile != null && !awsProfile.isEmpty()) {
             builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
         }
         return builder.build();
     }
-
 }

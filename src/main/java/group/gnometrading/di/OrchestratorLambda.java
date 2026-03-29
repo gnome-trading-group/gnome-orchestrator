@@ -7,7 +7,7 @@ import group.gnometrading.annotations.VisibleForTesting;
 public abstract class OrchestratorLambda<I, O> extends Orchestrator implements RequestHandler<I, O> {
 
     @Override
-    public O handleRequest(I input, Context context) {
+    public final O handleRequest(I input, Context context) {
         this.configure();
         return execute(input, context);
     }
@@ -16,7 +16,8 @@ public abstract class OrchestratorLambda<I, O> extends Orchestrator implements R
 
     @VisibleForTesting
     public static void main(String[] args) throws Exception {
-        OrchestratorLambda orchestrator = (OrchestratorLambda) instanceClass.getDeclaredConstructor().newInstance();
+        OrchestratorLambda orchestrator =
+                (OrchestratorLambda) instanceClass.getDeclaredConstructor().newInstance();
         orchestrator.handleRequest(null, null);
     }
 }

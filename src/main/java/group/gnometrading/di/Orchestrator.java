@@ -37,7 +37,8 @@ public abstract class Orchestrator {
 
     private String getQualifier(Method method) {
         if (method.isAnnotationPresent(Named.class)) {
-            return method.getReturnType().getName() + "@" + method.getAnnotation(Named.class).value();
+            return method.getReturnType().getName() + "@"
+                    + method.getAnnotation(Named.class).value();
         }
         return method.getReturnType().getName();
     }
@@ -73,11 +74,11 @@ public abstract class Orchestrator {
         }
     }
 
-    protected <T> T getInstance(Class<T> type) {
+    protected final <T> T getInstance(Class<T> type) {
         return getInstance(type, null);
     }
 
-    protected <T> T getInstance(Class<T> type, String name) {
+    protected final <T> T getInstance(Class<T> type, String name) {
         String qualifier = name != null ? type.getName() + "@" + name : type.getName();
         if (singletonCache.containsKey(qualifier)) {
             return type.cast(singletonCache.get(qualifier));
@@ -134,17 +135,20 @@ public abstract class Orchestrator {
 
             return child;
         } catch (Exception e) {
-            throw new RuntimeException("Failed to create child orchestrator for class: " + orchestratorClass.getName(), e);
+            throw new RuntimeException(
+                    "Failed to create child orchestrator for class: " + orchestratorClass.getName(), e);
         }
     }
 
     @Provides
     @Named("CLI_ARGS")
-    public String[] provideCLIArgs() {
+    public final String[] provideCliArgs() {
         return this.cliArgs;
     }
 
-    public void configure() { /* Default NO-OP */ }
+    public void configure() {
+        /* Default NO-OP */
+    }
 
     public static void main(String[] args) throws Exception {
         Orchestrator orchestrator = instanceClass.getDeclaredConstructor().newInstance();

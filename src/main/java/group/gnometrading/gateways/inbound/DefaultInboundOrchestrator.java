@@ -7,7 +7,6 @@ import com.lmax.disruptor.YieldingWaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import com.lmax.disruptor.util.DaemonThreadFactory;
-import group.gnometrading.SecurityMaster;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
@@ -17,18 +16,17 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.schemas.Schema;
 import group.gnometrading.shared.SecurityMasterModule;
-import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import java.util.ArrayList;
+import java.util.List;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
-import java.util.ArrayList;
-import java.util.List;
-
-public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orchestrator implements SecurityMasterModule {
+public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orchestrator
+        implements SecurityMasterModule {
 
     public static final int DEFAULT_RING_BUFFER_SIZE = 1024;
 
@@ -40,35 +38,35 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
             case "Lighter" -> {
                 return LighterInboundOrchestrator.class;
             }
-            default -> throw new IllegalArgumentException("Unmapped exchange: " + listing.exchange().exchangeName());
+            default -> throw new IllegalArgumentException(
+                    "Unmapped exchange: " + listing.exchange().exchangeName());
         }
     }
 
     @Provides
-    public EpochClock provideEpochClock() {
+    public final EpochClock provideEpochClock() {
         return new SystemEpochClock();
     }
 
     @Provides
-    public EpochNanoClock provideEpochNanoClock() {
+    public final EpochNanoClock provideEpochNanoClock() {
         return new SystemEpochNanoClock();
     }
 
     @Provides
     @Singleton
-    public Disruptor<T> provideDisruptor() {
+    public final Disruptor<T> provideDisruptor() {
         return new Disruptor<>(
                 provideEventFactory(),
                 DEFAULT_RING_BUFFER_SIZE,
                 DaemonThreadFactory.INSTANCE,
                 ProducerType.SINGLE,
-                new YieldingWaitStrategy()
-        );
+                new YieldingWaitStrategy());
     }
 
     @Provides
     @Singleton
-    public RingBuffer<T> provideRingBuffer(Disruptor<T> disruptor) {
+    public final RingBuffer<T> provideRingBuffer(Disruptor<T> disruptor) {
         return disruptor.getRingBuffer();
     }
 
@@ -88,31 +86,29 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     @Singleton
-    public MarketInboundGateway provideMarketInboundGateway() {
+    public final MarketInboundGateway provideMarketInboundGateway() {
         return new MarketInboundGateway(
                 getInstance(Logger.class),
                 getInstance(MarketInboundGatewayConfig.class),
                 getInstance(SocketReader.class),
-                getInstance(EpochClock.class)
-        );
+                getInstance(EpochClock.class));
     }
 
     @Provides
     @Singleton
     @Named("ERROR_TIMESTAMPS")
-    public List<Long> provideErrorTimestamps() {
+    public final List<Long> provideErrorTimestamps() {
         return new ArrayList<>();
     }
 
     @Provides
-    public ErrorHandler provideInboundErrorHandler() {
+    public final ErrorHandler provideInboundErrorHandler() {
         MarketInboundGateway gateway = getInstance(MarketInboundGateway.class);
         Logger logger = getInstance(Logger.class);
         List<Long> errorTimestamps = getInstance(List.class, "ERROR_TIMESTAMPS");
 
         return (error) -> {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in market inbound gateway: %s", error.getMessage());
-
 
             long currentTime = System.currentTimeMillis();
             synchronized (errorTimestamps) {
@@ -132,7 +128,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     }
 
     @SuppressWarnings("unchecked")
-    public void configureGatewayForListing(EventHandler<? super T> consumer) {
+    public final void configureGatewayForListing(EventHandler<? super T> consumer) {
         Logger logger = getInstance(Logger.class);
         Listing listing = getInstance(Listing.class);
         logger.logf(LogMessage.DEBUG, "Configuring listing gateway for: %d", listing.listingId());

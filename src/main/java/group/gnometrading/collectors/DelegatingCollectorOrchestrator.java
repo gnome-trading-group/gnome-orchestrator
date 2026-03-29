@@ -11,81 +11,82 @@ import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.shared.AWSModule;
+import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
+import java.time.Clock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.s3.S3Client;
 
-import java.time.Clock;
-
-public class DelegatingCollectorOrchestrator extends Orchestrator implements SecurityMasterModule, PropertiesModule, AWSModule {
+public class DelegatingCollectorOrchestrator extends Orchestrator
+        implements SecurityMasterModule, PropertiesModule, AwsModule {
 
     static {
         instanceClass = DelegatingCollectorOrchestrator.class;
     }
 
     @Provides
-    public Clock provideClock() {
+    public final Clock provideClock() {
         return Clock.systemUTC();
     }
 
     @Provides
-    public EpochNanoClock provideEpochNanoClock() {
+    public final EpochNanoClock provideEpochNanoClock() {
         return new SystemEpochNanoClock();
     }
 
     @Provides
     @Singleton
-    public Logger provideLogger(EpochNanoClock epochClock) {
+    public final Logger provideLogger(EpochNanoClock epochClock) {
         return new ConsoleLogger(epochClock);
     }
 
     @Provides
     @Named("LISTING_ID")
-    public Integer provideListingId(Properties properties) {
+    public final Integer provideListingId(Properties properties) {
         return properties.getIntProperty("listing");
     }
 
     @Provides
-    public Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
+    public final Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
         return securityMaster.getListing(listingId);
     }
 
     @Provides
     @Named("OUTPUT_BUCKET")
-    public String provideOutputBucket(Properties properties) {
+    public final String provideOutputBucket(Properties properties) {
         return properties.getStringProperty("output.bucket");
     }
 
     @Provides
-    public MarketDataCollector provideMarketDataCollector(
+    public final MarketDataCollector provideMarketDataCollector(
             Logger logger,
             Clock clock,
             S3Client s3Client,
             Listing listing,
-            @Named("OUTPUT_BUCKET") String outputBucket
-    ) {
+            @Named("OUTPUT_BUCKET") String outputBucket) {
         return new MarketDataCollector(logger, clock, s3Client, listing, outputBucket);
     }
 
     @Override
-    public void configure() {
+    public final void configure() {
         final Logger logger = getInstance(Logger.class);
         final Listing listing = getInstance(Listing.class);
 
-        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing);
+        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
+                DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
         final MarketDataCollector marketDataCollector = getInstance(MarketDataCollector.class);
         orchestrator.configureGatewayForListing(marketDataCollector);
 
-        logger.logf(LogMessage.DEBUG, "Started listing %s on exchange %s with schema %s on class %s",
+        logger.logf(
+                LogMessage.DEBUG,
+                "Started listing %s on exchange %s with schema %s on class %s",
                 listing.security().symbol(),
                 listing.exchange().exchangeName(),
                 listing.exchange().schemaType(),
-                orchestratorClass.getSimpleName()
-        );
+                orchestratorClass.getSimpleName());
     }
 }

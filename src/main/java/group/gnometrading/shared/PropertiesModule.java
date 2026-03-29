@@ -5,7 +5,6 @@ import group.gnometrading.di.Named;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.resources.Properties;
-
 import java.io.IOException;
 
 public interface PropertiesModule {
@@ -17,12 +16,8 @@ public interface PropertiesModule {
 
     @Provides
     @Singleton
-    default Properties provideProperties(
-            Stage stage,
-            @Named("CLI_ARGS") String[] cliArgs
-    ) throws IOException {
+    default Properties provideProperties(Stage stage, @Named("CLI_ARGS") String[] cliArgs) throws IOException {
         final String path = "orchestrator.%s.properties".formatted(stage.getStageName());
         return new Properties(path, cliArgs);
     }
-
 }

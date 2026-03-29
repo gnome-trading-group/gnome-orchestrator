@@ -16,12 +16,11 @@ import group.gnometrading.resources.Properties;
 import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
+import java.net.URI;
+import java.net.URISyntaxException;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
-
-import java.net.URI;
-import java.net.URISyntaxException;
 
 public class MarketDataWriterOrchestrator extends Orchestrator implements SecurityMasterModule, PropertiesModule {
 
@@ -30,57 +29,57 @@ public class MarketDataWriterOrchestrator extends Orchestrator implements Securi
     }
 
     @Provides
-    public EpochNanoClock provideEpochNanoClock() {
+    public final EpochNanoClock provideEpochNanoClock() {
         return new SystemEpochNanoClock();
     }
 
     @Provides
     @Singleton
-    public Logger provideLogger(EpochNanoClock epochClock) {
+    public final Logger provideLogger(EpochNanoClock epochClock) {
         return new ConsoleLogger(epochClock);
     }
 
     @Provides
     @Named("LISTING_ID")
-    public Integer provideListingId(Properties properties) {
+    public final Integer provideListingId(Properties properties) {
         return properties.getIntProperty("listing");
     }
 
     @Provides
-    public Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
+    public final Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
         return securityMaster.getListing(listingId);
     }
 
     @Provides
     @Named("HOST")
-    public String provideHost(Properties properties) {
+    public final String provideHost(Properties properties) {
         return properties.getStringProperty("host");
     }
 
     @Provides
     @Named("PORT")
-    public Integer providePort(Properties properties) {
+    public final Integer providePort(Properties properties) {
         return properties.getIntProperty("port");
     }
 
     @Provides
     @Named("OUTPUT_PATH")
-    public String provideFilePath(Properties properties) {
+    public final String provideFilePath(Properties properties) {
         return properties.getStringProperty("output");
     }
 
     @Provides
-    public URI provideURI(@Named("HOST") String host, @Named("PORT") Integer port) throws URISyntaxException {
+    public final URI provideUri(@Named("HOST") String host, @Named("PORT") Integer port) throws URISyntaxException {
         return new URI(null, host + ":" + port, null, null, null);
     }
 
     @Provides
-    public GnomeSocketFactory provideSocketFactory() {
+    public final GnomeSocketFactory provideSocketFactory() {
         return new NativeSocketFactory();
     }
 
     @Provides
-    public MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
+    public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
         return new MarketInboundGatewayConfig.Builder()
                 .withMaxReconnectAttempts(1)
                 .build();
@@ -88,12 +87,12 @@ public class MarketDataWriterOrchestrator extends Orchestrator implements Securi
 
     @Provides
     @Singleton
-    public MarketDataWriter provideMarketDataWriter(Logger logger, @Named("OUTPUT_PATH") String outputPath) {
+    public final MarketDataWriter provideMarketDataWriter(Logger logger, @Named("OUTPUT_PATH") String outputPath) {
         return new MarketDataWriter(logger, outputPath);
     }
 
     @Provides
-    public ErrorHandler provideErrorHandler() {
+    public final ErrorHandler provideErrorHandler() {
         Logger logger = getInstance(Logger.class);
         return (error) -> {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Exiting due to expected socket closure: %s", error);
@@ -102,13 +101,13 @@ public class MarketDataWriterOrchestrator extends Orchestrator implements Securi
     }
 
     @Override
-    public void configure() {
+    public final void configure() {
         final MarketDataWriter writer = getInstance(MarketDataWriter.class);
         final Listing listing = getInstance(Listing.class);
 
-        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass = DefaultInboundOrchestrator.findInboundOrchestrator(listing);
+        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
+                DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
         orchestrator.configureGatewayForListing(writer);
     }
-
 }

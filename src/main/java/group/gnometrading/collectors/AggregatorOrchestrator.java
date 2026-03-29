@@ -12,16 +12,16 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.shared.AWSModule;
+import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.SecurityMasterModule;
+import java.time.Clock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
-import java.time.Clock;
-
-public class AggregatorOrchestrator extends OrchestratorLambda<Object, Void> implements AWSModule, SecurityMasterModule {
+public class AggregatorOrchestrator extends OrchestratorLambda<Object, Void>
+        implements AwsModule, SecurityMasterModule {
 
     static {
         instanceClass = AggregatorOrchestrator.class;
@@ -29,80 +29,76 @@ public class AggregatorOrchestrator extends OrchestratorLambda<Object, Void> imp
 
     @Provides
     @Named("OUTPUT_BUCKET")
-    public String provideOutputBucket(Properties properties) {
+    public final String provideOutputBucket(Properties properties) {
         return properties.getStringProperty("output.bucket");
     }
 
     @Provides
     @Named("INPUT_BUCKET")
-    public String provideInputBucket(Properties properties) {
+    public final String provideInputBucket(Properties properties) {
         return properties.getStringProperty("input.bucket");
     }
 
     @Provides
     @Named("ARCHIVE_BUCKET")
-    public String provideArchiveBucket(Properties properties) {
+    public final String provideArchiveBucket(Properties properties) {
         return properties.getStringProperty("archive.bucket");
     }
 
     @Provides
     @Named("COLLECTORS_METADATA_TABLE")
-    public String provideCollectorsMistingMetadataTable(Properties properties) {
+    public final String provideCollectorsMistingMetadataTable(Properties properties) {
         return properties.getStringProperty("collectors.metadata.table");
     }
 
     @Provides
-    public EpochNanoClock provideEpochNanoClock() {
+    public final EpochNanoClock provideEpochNanoClock() {
         return new SystemEpochNanoClock();
     }
 
     @Provides
     @Singleton
-    public Logger provideLogger(EpochNanoClock epochClock) {
+    public final Logger provideLogger(EpochNanoClock epochClock) {
         return new ConsoleLogger(epochClock);
     }
 
     @Provides
-    public Clock provideClock() {
+    public final Clock provideClock() {
         return Clock.systemUTC();
     }
 
     @Provides
-    public MarketDataMerger provideMarketDataMerger(
+    public final MarketDataMerger provideMarketDataMerger(
             Logger logger,
             Clock clock,
             S3Client s3Client,
             SecurityMaster securityMaster,
             @Named("INPUT_BUCKET") String inputBucket,
             @Named("OUTPUT_BUCKET") String outputBucket,
-            @Named("ARCHIVE_BUCKET") String archiveBucket
-    ) {
+            @Named("ARCHIVE_BUCKET") String archiveBucket) {
         return new MarketDataMerger(logger, clock, s3Client, securityMaster, inputBucket, outputBucket, archiveBucket);
     }
 
     @Provides
-    public MarketDataTransformer provideMarketDataTransformer(
+    public final MarketDataTransformer provideMarketDataTransformer(
             Logger logger,
             Clock clock,
             S3Client s3Client,
             DynamoDbClient dynamoDbClient,
             @Named("COLLECTORS_METADATA_TABLE") String collectorsMetadataTable,
-            @Named("OUTPUT_BUCKET") String outputBucket
-    ) {
-        return new MarketDataTransformer(logger, clock, s3Client, dynamoDbClient, collectorsMetadataTable, outputBucket);
+            @Named("OUTPUT_BUCKET") String outputBucket) {
+        return new MarketDataTransformer(
+                logger, clock, s3Client, dynamoDbClient, collectorsMetadataTable, outputBucket);
     }
 
     @Provides
-    public MarketDataAggregator provideMarketDataAggregator(
-            Logger logger,
-            MarketDataMerger marketDataMerger,
-            MarketDataTransformer marketDataTransformer
-    ) {
+    public final MarketDataAggregator provideMarketDataAggregator(
+            Logger logger, MarketDataMerger marketDataMerger, MarketDataTransformer marketDataTransformer) {
         return new MarketDataAggregator(logger, marketDataMerger, marketDataTransformer);
     }
 
     @Override
-    protected Void execute(Object input, Context context) {
+    protected final Void execute(Object input, Context context) {
         MarketDataAggregator marketDataAggregator = getInstance(MarketDataAggregator.class);
         marketDataAggregator.run();
         return null;

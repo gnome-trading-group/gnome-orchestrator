@@ -1,8 +1,8 @@
 package group.gnometrading.di;
 
-import org.junit.jupiter.api.Test;
-
 import static org.junit.jupiter.api.Assertions.*;
+
+import org.junit.jupiter.api.Test;
 
 class OrchestratorTest {
 
@@ -125,10 +125,10 @@ class OrchestratorTest {
 
         @Inject
         public ConstructorWithParams(Integer inject) {
-             this.inject = inject;
+            this.inject = inject;
         }
     }
-    
+
     @Test
     void testConstructorWithInject() {
         var orchestrator = new BasicOrchestrator();
