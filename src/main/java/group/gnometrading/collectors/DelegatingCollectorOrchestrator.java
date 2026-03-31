@@ -7,6 +7,7 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
+import group.gnometrading.health.HealthCheckServer;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -15,7 +16,10 @@ import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
+import java.io.IOException;
 import java.time.Clock;
+import java.util.concurrent.TimeUnit;
+
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -80,6 +84,16 @@ public class DelegatingCollectorOrchestrator extends Orchestrator
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
         final MarketDataCollector marketDataCollector = getInstance(MarketDataCollector.class);
         orchestrator.configureGatewayForListing(marketDataCollector);
+
+        final long maxStaleNanos = TimeUnit.SECONDS.toNanos(90);
+        try {
+            new HealthCheckServer(8080, () -> {
+                long lastEvent = marketDataCollector.lastEventNanos;
+                return lastEvent == 0L || (System.nanoTime() - lastEvent) < maxStaleNanos;
+            }).start();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
 
         logger.logf(
                 LogMessage.DEBUG,
