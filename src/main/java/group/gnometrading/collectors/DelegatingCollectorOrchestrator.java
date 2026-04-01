@@ -19,7 +19,6 @@ import group.gnometrading.sm.Listing;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.concurrent.TimeUnit;
-
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -88,9 +87,10 @@ public class DelegatingCollectorOrchestrator extends Orchestrator
         final long maxStaleNanos = TimeUnit.SECONDS.toNanos(90);
         try {
             new HealthCheckServer(8080, () -> {
-                long lastEvent = marketDataCollector.lastEventNanos;
-                return lastEvent == 0L || (System.nanoTime() - lastEvent) < maxStaleNanos;
-            }).start();
+                        long lastEvent = marketDataCollector.lastEventNanos;
+                        return lastEvent == 0L || (System.nanoTime() - lastEvent) < maxStaleNanos;
+                    })
+                    .start();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
