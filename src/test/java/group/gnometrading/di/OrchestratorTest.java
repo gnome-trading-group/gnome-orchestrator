@@ -6,6 +6,110 @@ import org.junit.jupiter.api.Test;
 
 class OrchestratorTest {
 
+    static class CountingModule extends Module {
+        static int installCount = 0;
+
+        @Provides
+        public String provideString() {
+            installCount++;
+            return "from module";
+        }
+    }
+
+    static class DependentModule extends Module {
+        @Override
+        protected Module[] includes() {
+            return new Module[] {new CountingModule()};
+        }
+
+        @Provides
+        public Integer provideInteger(String s) {
+            return s.length();
+        }
+    }
+
+    static class ModuleOrchestrator extends Orchestrator {
+        @Override
+        public void configure() {
+            install(new CountingModule());
+        }
+    }
+
+    static class TransitiveModuleOrchestrator extends Orchestrator {
+        @Override
+        public void configure() {
+            install(new DependentModule());
+        }
+    }
+
+    static class OwnProviderOrchestrator extends Orchestrator {
+        @Provides
+        public String provideString() {
+            return "from orchestrator";
+        }
+
+        @Override
+        public void configure() {
+            install(new CountingModule());
+        }
+    }
+
+    static class ChildOrchestrator extends Orchestrator {
+        @Override
+        public void configure() {
+            install(new DependentModule());
+        }
+    }
+
+    static class ParentOrchestrator extends Orchestrator {
+        @Override
+        public void configure() {
+            install(new CountingModule());
+        }
+    }
+
+    @Test
+    void testInstallModule() {
+        var orchestrator = new ModuleOrchestrator();
+        orchestrator.configure();
+        assertEquals("from module", orchestrator.getInstance(String.class));
+    }
+
+    @Test
+    void testIdempotentInstall() {
+        CountingModule.installCount = 0;
+        var orchestrator = new ModuleOrchestrator();
+        orchestrator.configure();
+        orchestrator.install(new CountingModule());
+        orchestrator.getInstance(String.class);
+        assertEquals(1, CountingModule.installCount);
+    }
+
+    @Test
+    void testTransitiveIncludes() {
+        var orchestrator = new TransitiveModuleOrchestrator();
+        orchestrator.configure();
+        assertEquals("from module", orchestrator.getInstance(String.class));
+        assertEquals(11, orchestrator.getInstance(Integer.class));
+    }
+
+    @Test
+    void testOrchestratorProviderWinsOverModule() {
+        var orchestrator = new OwnProviderOrchestrator();
+        orchestrator.configure();
+        assertEquals("from orchestrator", orchestrator.getInstance(String.class));
+    }
+
+    @Test
+    void testChildInheritsParentInstalledModules() {
+        CountingModule.installCount = 0;
+        var parent = new ParentOrchestrator();
+        parent.configure();
+        var child = parent.createChildOrchestrator(ChildOrchestrator.class);
+        child.getInstance(String.class);
+        assertEquals(1, CountingModule.installCount);
+    }
+
     class BasicOrchestrator extends Orchestrator {
         int total = 0;
 

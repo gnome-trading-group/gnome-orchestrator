@@ -1,7 +1,5 @@
 package group.gnometrading.gateways.inbound;
 
-import com.lmax.disruptor.EventFactory;
-import com.lmax.disruptor.RingBuffer;
 import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.di.Provides;
@@ -14,6 +12,8 @@ import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.sequencer.GlobalSequence;
+import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Listing;
 import java.io.IOException;
 import java.net.URI;
@@ -58,21 +58,23 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
     @Provides
     @Singleton
     @SuppressWarnings("unchecked")
+    public final SequencedRingBuffer<Mbp10Schema> provideSequencedRingBuffer() {
+        return new SequencedRingBuffer<>(Mbp10Schema::new, getInstance(GlobalSequence.class));
+    }
+
+    @Override
+    @Provides
+    @Singleton
+    @SuppressWarnings("unchecked")
     public final SocketReader<Mbp10Schema> provideSocketReader() {
         return new HyperliquidSocketReader(
                 getInstance(Logger.class),
-                getInstance(RingBuffer.class),
+                getInstance(SequencedRingBuffer.class),
                 getInstance(EpochNanoClock.class),
                 getInstance(SocketWriter.class),
                 getInstance(Listing.class),
                 getInstance(WebSocketClient.class),
                 new JsonDecoder());
-    }
-
-    @Override
-    @Provides
-    public final EventFactory<Mbp10Schema> provideEventFactory() {
-        return Mbp10Schema::new;
     }
 
     @Override

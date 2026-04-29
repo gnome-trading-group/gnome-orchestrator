@@ -12,8 +12,8 @@ import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
+import group.gnometrading.sequencer.SchemaEventAdapter;
 import group.gnometrading.shared.AwsModule;
-import group.gnometrading.shared.PropertiesModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
 import java.io.IOException;
@@ -23,8 +23,7 @@ import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.s3.S3Client;
 
-public class DelegatingCollectorOrchestrator extends Orchestrator
-        implements SecurityMasterModule, PropertiesModule, AwsModule {
+public class DelegatingCollectorOrchestrator extends Orchestrator {
 
     static {
         instanceClass = DelegatingCollectorOrchestrator.class;
@@ -75,6 +74,7 @@ public class DelegatingCollectorOrchestrator extends Orchestrator
 
     @Override
     public final void configure() {
+        install(new SecurityMasterModule(), new AwsModule());
         final Logger logger = getInstance(Logger.class);
         final Listing listing = getInstance(Listing.class);
 
@@ -82,7 +82,7 @@ public class DelegatingCollectorOrchestrator extends Orchestrator
                 DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
         final MarketDataCollector marketDataCollector = getInstance(MarketDataCollector.class);
-        orchestrator.configureGatewayForListing(marketDataCollector);
+        orchestrator.configureGatewayForListing(new SchemaEventAdapter(marketDataCollector));
 
         final long maxStaleNanos = TimeUnit.SECONDS.toNanos(90);
         try {

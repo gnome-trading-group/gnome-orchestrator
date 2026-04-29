@@ -1,12 +1,5 @@
 package group.gnometrading.gateways.inbound;
 
-import com.lmax.disruptor.EventFactory;
-import com.lmax.disruptor.EventHandler;
-import com.lmax.disruptor.RingBuffer;
-import com.lmax.disruptor.YieldingWaitStrategy;
-import com.lmax.disruptor.dsl.Disruptor;
-import com.lmax.disruptor.dsl.ProducerType;
-import com.lmax.disruptor.util.DaemonThreadFactory;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
@@ -15,7 +8,10 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.schemas.Schema;
-import group.gnometrading.shared.SecurityMasterModule;
+import group.gnometrading.sequencer.GlobalSequence;
+import group.gnometrading.sequencer.SequencedEventHandler;
+import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.shared.RiskModule;
 import group.gnometrading.sm.Listing;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,8 +21,12 @@ import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
-public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orchestrator
-        implements SecurityMasterModule {
+public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orchestrator {
+
+    @Override
+    public final void configure() {
+        install(new RiskModule());
+    }
 
     public static final int DEFAULT_RING_BUFFER_SIZE = 1024;
 
@@ -45,7 +45,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     public final EpochClock provideEpochClock() {
-        return new SystemEpochClock();
+        return SystemEpochClock.INSTANCE;
     }
 
     @Provides
@@ -55,20 +55,13 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     @Singleton
-    public final Disruptor<T> provideDisruptor() {
-        return new Disruptor<>(
-                provideEventFactory(),
-                DEFAULT_RING_BUFFER_SIZE,
-                DaemonThreadFactory.INSTANCE,
-                ProducerType.SINGLE,
-                new YieldingWaitStrategy());
+    public final GlobalSequence provideGlobalSequence() {
+        return new GlobalSequence();
     }
 
     @Provides
     @Singleton
-    public final RingBuffer<T> provideRingBuffer(Disruptor<T> disruptor) {
-        return disruptor.getRingBuffer();
-    }
+    public abstract SequencedRingBuffer<T> provideSequencedRingBuffer();
 
     @Provides
     @Singleton
@@ -80,9 +73,6 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     @Provides
     @Singleton
     public abstract SocketWriter provideSocketWriter();
-
-    @Provides
-    public abstract EventFactory<T> provideEventFactory();
 
     @Provides
     @Singleton
@@ -128,12 +118,12 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     }
 
     @SuppressWarnings("unchecked")
-    public final void configureGatewayForListing(EventHandler<? super T> consumer) {
+    public final void configureGatewayForListing(SequencedEventHandler consumer) {
         Logger logger = getInstance(Logger.class);
         Listing listing = getInstance(Listing.class);
         logger.logf(LogMessage.DEBUG, "Configuring listing gateway for: %d", listing.listingId());
 
-        Disruptor<T> disruptor = getInstance(Disruptor.class);
+        SequencedRingBuffer<T> sequencedRingBuffer = getInstance(SequencedRingBuffer.class);
         SocketWriter socketWriter = getInstance(SocketWriter.class);
         SocketReader<T> socketReader = getInstance(SocketReader.class);
         MarketInboundGateway marketInboundGateway = getInstance(MarketInboundGateway.class);
@@ -143,10 +133,10 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, errorHandler);
         GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, errorHandler);
 
-        disruptor.handleEventsWith(consumer);
+        sequencedRingBuffer.handleEventsWith(consumer);
         GnomeAgentRunner.startOnThread(marketInboundRunner);
         GnomeAgentRunner.startOnThread(socketReaderRunner);
         GnomeAgentRunner.startOnThread(socketWriterRunner);
-        disruptor.start();
+        sequencedRingBuffer.start();
     }
 }

@@ -13,7 +13,7 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSocketFactory;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.shared.PropertiesModule;
+import group.gnometrading.sequencer.SchemaEventAdapter;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
 import java.net.URI;
@@ -22,7 +22,7 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
-public class MarketDataWriterOrchestrator extends Orchestrator implements SecurityMasterModule, PropertiesModule {
+public class MarketDataWriterOrchestrator extends Orchestrator {
 
     static {
         instanceClass = MarketDataWriterOrchestrator.class;
@@ -102,12 +102,13 @@ public class MarketDataWriterOrchestrator extends Orchestrator implements Securi
 
     @Override
     public final void configure() {
+        install(new SecurityMasterModule());
         final MarketDataWriter writer = getInstance(MarketDataWriter.class);
         final Listing listing = getInstance(Listing.class);
 
         final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
                 DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-        orchestrator.configureGatewayForListing(writer);
+        orchestrator.configureGatewayForListing(new SchemaEventAdapter(writer));
     }
 }

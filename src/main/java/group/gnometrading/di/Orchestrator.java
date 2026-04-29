@@ -4,7 +4,9 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.IntStream;
 
 public abstract class Orchestrator {
@@ -13,13 +15,15 @@ public abstract class Orchestrator {
 
     protected final Map<String, Object> singletonCache;
     protected final Map<String, Method> providers;
-    protected final Map<String, Orchestrator> providerInstances;
+    protected final Map<String, Object> providerInstances;
+    final Set<Class<? extends Module>> installedModules;
     protected String[] cliArgs;
 
     public Orchestrator() {
         this.singletonCache = new HashMap<>();
         this.providers = new HashMap<>();
         this.providerInstances = new HashMap<>();
+        this.installedModules = new HashSet<>();
         this.cliArgs = null;
         initialize();
     }
@@ -86,7 +90,7 @@ public abstract class Orchestrator {
 
         if (providers.containsKey(qualifier)) {
             Method provider = providers.get(qualifier);
-            Orchestrator owner = providerInstances.get(qualifier);
+            Object owner = providerInstances.get(qualifier);
             try {
                 provider.setAccessible(true);
                 var params = getParameters(provider);
@@ -129,6 +133,7 @@ public abstract class Orchestrator {
             child.providers.putAll(this.providers);
             child.providerInstances.putAll(this.providerInstances);
             child.singletonCache.putAll(this.singletonCache);
+            child.installedModules.addAll(this.installedModules);
             child.cliArgs = this.cliArgs;
 
             child.configure();
@@ -137,6 +142,32 @@ public abstract class Orchestrator {
         } catch (Exception e) {
             throw new RuntimeException(
                     "Failed to create child orchestrator for class: " + orchestratorClass.getName(), e);
+        }
+    }
+
+    protected final void install(Module... modules) {
+        for (Module module : modules) {
+            installModule(module);
+        }
+    }
+
+    private void installModule(Module module) {
+        Class<? extends Module> moduleClass = module.getClass();
+        if (installedModules.contains(moduleClass)) {
+            return;
+        }
+        installedModules.add(moduleClass);
+        for (Module dependency : module.includes()) {
+            installModule(dependency);
+        }
+        for (Method method : moduleClass.getMethods()) {
+            if (method.isAnnotationPresent(Provides.class)) {
+                String qualifier = getQualifier(method);
+                if (!providers.containsKey(qualifier)) {
+                    providers.put(qualifier, method);
+                    providerInstances.put(qualifier, module);
+                }
+            }
         }
     }
 

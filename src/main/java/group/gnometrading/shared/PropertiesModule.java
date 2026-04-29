@@ -1,22 +1,23 @@
 package group.gnometrading.shared;
 
 import group.gnometrading.constants.Stage;
+import group.gnometrading.di.Module;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.resources.Properties;
 import java.io.IOException;
 
-public interface PropertiesModule {
+public class PropertiesModule extends Module {
 
     @Provides
-    default Stage provideStage() {
+    public final Stage provideStage() {
         return Stage.fromStageName(System.getenv("STAGE"));
     }
 
     @Provides
     @Singleton
-    default Properties provideProperties(Stage stage, @Named("CLI_ARGS") String[] cliArgs) throws IOException {
+    public final Properties provideProperties(Stage stage, @Named("CLI_ARGS") String[] cliArgs) throws IOException {
         final String path = "orchestrator.%s.properties".formatted(stage.getStageName());
         return new Properties(path, cliArgs);
     }
