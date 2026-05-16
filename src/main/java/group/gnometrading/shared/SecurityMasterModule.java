@@ -15,7 +15,6 @@ public class SecurityMasterModule extends Module {
     }
 
     @Provides
-    @Singleton
     public final RegistryConnection provideRegistryConnection(Properties properties) {
         return new RegistryConnection(
                 properties.getStringProperty("registry.url"), properties.getStringProperty("registry.api_key"));
