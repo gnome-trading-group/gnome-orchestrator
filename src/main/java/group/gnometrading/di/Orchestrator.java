@@ -3,6 +3,7 @@ package group.gnometrading.di;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -128,6 +129,25 @@ public abstract class Orchestrator {
      * @return the child orchestrator instance
      */
     protected <T extends Orchestrator> T createChildOrchestrator(Class<T> orchestratorClass) {
+        return createChildOrchestrator(orchestratorClass, Collections.emptyMap());
+    }
+
+    /**
+     * Create a child orchestrator that inherits all the bindings of the parent, with additional
+     * instance overrides injected into the child's singleton cache before {@code configure()} runs.
+     *
+     * <p>Use this overload when a child orchestrator needs a different binding for a type already
+     * provided by the parent. For example, passing a per-listing {@code Listing} instance so each
+     * inbound gateway child orchestrator gets its own listing.
+     *
+     * @param orchestratorClass the child orchestrator class
+     * @param overrides type-to-instance map; entries are put into the child's singleton cache,
+     *     overwriting any inherited value for the same type
+     * @param <T> the child orchestrator type
+     * @return the child orchestrator instance
+     */
+    protected <T extends Orchestrator> T createChildOrchestrator(
+            Class<T> orchestratorClass, Map<Class<?>, Object> overrides) {
         try {
             T child = orchestratorClass.getDeclaredConstructor().newInstance();
             child.providers.putAll(this.providers);
@@ -135,6 +155,10 @@ public abstract class Orchestrator {
             child.singletonCache.putAll(this.singletonCache);
             child.installedModules.addAll(this.installedModules);
             child.cliArgs = this.cliArgs;
+
+            for (Map.Entry<Class<?>, Object> entry : overrides.entrySet()) {
+                child.singletonCache.put(entry.getKey().getName(), entry.getValue());
+            }
 
             child.configure();
 

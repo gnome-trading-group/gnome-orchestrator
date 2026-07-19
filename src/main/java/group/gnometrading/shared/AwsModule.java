@@ -8,6 +8,7 @@ import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 
 public class AwsModule extends Module {
 
@@ -36,6 +37,17 @@ public class AwsModule extends Module {
     @Singleton
     public final DynamoDbClient provideDynamoDbClient(@Named("AWS_PROFILE") String awsProfile, Region awsRegion) {
         var builder = DynamoDbClient.builder().region(awsRegion);
+        if (awsProfile != null && !awsProfile.isEmpty()) {
+            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
+        }
+        return builder.build();
+    }
+
+    @Provides
+    @Singleton
+    public final SecretsManagerClient provideSecretsManagerClient(
+            @Named("AWS_PROFILE") String awsProfile, Region awsRegion) {
+        var builder = SecretsManagerClient.builder().region(awsRegion);
         if (awsProfile != null && !awsProfile.isEmpty()) {
             builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
         }

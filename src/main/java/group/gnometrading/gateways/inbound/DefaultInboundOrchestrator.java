@@ -38,6 +38,15 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
             case "Lighter" -> {
                 return LighterInboundOrchestrator.class;
             }
+            case "Binance" -> {
+                return BinanceInboundOrchestrator.class;
+            }
+            case "Polymarket" -> {
+                return PolymarketInboundOrchestrator.class;
+            }
+            case "Kalshi" -> {
+                return KalshiInboundOrchestrator.class;
+            }
             default -> throw new IllegalArgumentException(
                     "Unmapped exchange: " + listing.exchange().exchangeName());
         }
@@ -115,6 +124,19 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
                 gateway.forceReconnect();
             }
         };
+    }
+
+    @SuppressWarnings("unchecked")
+    public final SequencedRingBuffer<T> getSequencedRingBuffer() {
+        return getInstance(SequencedRingBuffer.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    public final void startGatewayAgents() {
+        ErrorHandler errorHandler = getInstance(ErrorHandler.class);
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(MarketInboundGateway.class), errorHandler));
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(SocketReader.class), errorHandler));
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(SocketWriter.class), errorHandler));
     }
 
     @SuppressWarnings("unchecked")

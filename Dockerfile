@@ -1,16 +1,18 @@
 # Stage 1: Build the JAR
-FROM maven:3.9.4-eclipse-temurin-17 AS builder
+FROM maven:3.9-eclipse-temurin-21 AS builder
 
 WORKDIR /app
 
 ARG GITHUB_ACTOR
 ARG GITHUB_TOKEN
 
-RUN mkdir -p /root/.m2
 # When testing locally, make sure to copy the m2 folder into the local repo's on any local updates
 # Within the current directory:
+# RUN mkdir -p /root/.m2
 # $ cp -r ~/.m2 .
-COPY .m2 /root/.m2
+# COPY .m2 /root/.m2
+
+COPY settings.xml /root/.m2/settings.xml
 COPY pom.xml .
 COPY src ./src
 

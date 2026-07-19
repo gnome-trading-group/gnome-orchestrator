@@ -1,0 +1,14 @@
+name: Push Release Branch
+on:
+  push:
+    tags:
+      - '*'
+jobs:
+  push-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push to release branch
+        run: git push origin HEAD:refs/heads/release --force
