@@ -42,7 +42,7 @@ export class EcsStack extends cdk.Stack {
     const securityGroup = new ec2.SecurityGroup(this, 'OrchestratorSg', {
       vpc,
       securityGroupName: 'gnome-orchestrator-sg',
-      description: 'Orchestrator ECS tasks — all outbound for WebSocket/HTTPS',
+      description: 'Orchestrator ECS tasks - all outbound for WebSocket/HTTPS',
       allowAllOutbound: true,
     });
     cdk.Tags.of(securityGroup).add(ORCHESTRATOR_TAG, ORCHESTRATOR_TAG_VALUE);
