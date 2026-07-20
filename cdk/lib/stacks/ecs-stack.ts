@@ -70,7 +70,7 @@ export class EcsStack extends cdk.Stack {
     }));
     taskRole.addToPolicy(new iam.PolicyStatement({
       actions: ['s3:PutObject'],
-      resources: ['arn:aws:s3:::gnome-journals/*'],
+      resources: [`arn:aws:s3:::gnome-journals-${props.stage}/*`],
     }));
 
     const logGroup = new logs.LogGroup(this, 'OrchestratorLogGroup', {

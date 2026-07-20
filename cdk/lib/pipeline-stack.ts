@@ -18,7 +18,7 @@ class AppStage extends cdk.Stage {
       ecsRegions: config.ecsRegions,
     });
 
-    new StorageStack(this, 'OrchestratorStorageStack');
+    new StorageStack(this, 'OrchestratorStorageStack', { stage: config.account.stage });
 
     for (const region of config.ecsRegions) {
       new EcsStack(this, `OrchestratorEcsStack-${region}`, {

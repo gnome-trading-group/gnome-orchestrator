@@ -1,15 +1,18 @@
 import * as cdk from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
+import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
 
-export const JOURNAL_BUCKET_NAME = 'gnome-journals';
+interface Props extends cdk.StackProps {
+  stage: Stage;
+}
 
 export class StorageStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
 
     new s3.Bucket(this, 'JournalBucket', {
-      bucketName: JOURNAL_BUCKET_NAME,
+      bucketName: `gnome-journals-${props.stage}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       lifecycleRules: [
