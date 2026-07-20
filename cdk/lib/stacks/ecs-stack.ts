@@ -68,6 +68,10 @@ export class EcsStack extends cdk.Stack {
       actions: ['secretsmanager:GetSecretValue'],
       resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:gnome/*`],
     }));
+    taskRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['s3:PutObject'],
+      resources: ['arn:aws:s3:::gnome-journals/*'],
+    }));
 
     const logGroup = new logs.LogGroup(this, 'OrchestratorLogGroup', {
       logGroupName: `/gnome/orchestrator/${this.region}`,

@@ -24,7 +24,9 @@ import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.GlobalSequence;
+import group.gnometrading.sequencer.JournalWriter;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.RiskModule;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
 import group.gnometrading.simulation.fee.StaticFeeModel;
@@ -37,12 +39,20 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
 import group.gnometrading.strategies.StrategyAgent;
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Parameter;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import software.amazon.awssdk.services.s3.S3Client;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -96,6 +106,7 @@ public class TradingOrchestrator extends Orchestrator {
     @Override
     public final void configure() {
         install(new RiskModule());
+        install(new AwsModule());
 
         Logger logger = getInstance(Logger.class);
         SecurityMaster securityMaster = getInstance(SecurityMaster.class);
@@ -105,16 +116,21 @@ public class TradingOrchestrator extends Orchestrator {
         int strategyId = properties.getIntProperty("strategy.id");
         List<Listing> listings = resolveListings(properties, securityMaster);
 
+        GlobalSequence globalSequence = new GlobalSequence();
+
         List<DefaultInboundOrchestrator<?>> inbounds = new ArrayList<>(listings.size());
         List<SequencedRingBuffer<?>> perListingMdBuffers = new ArrayList<>(listings.size());
         for (Listing listing : listings) {
+            Map<Class<?>, Object> inboundOverrides = new HashMap<>();
+            inboundOverrides.put(Listing.class, listing);
+            if (listings.size() == 1) {
+                inboundOverrides.put(GlobalSequence.class, globalSequence);
+            }
             DefaultInboundOrchestrator<?> inbound = createChildOrchestrator(
-                    DefaultInboundOrchestrator.findInboundOrchestrator(listing), Map.of(Listing.class, listing));
+                    DefaultInboundOrchestrator.findInboundOrchestrator(listing), inboundOverrides);
             inbounds.add(inbound);
             perListingMdBuffers.add(inbound.getSequencedRingBuffer());
         }
-
-        GlobalSequence globalSequence = new GlobalSequence();
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(sharedBuffer);
         OrderManagementSystem oms = new OrderManagementSystem(
@@ -190,6 +206,42 @@ public class TradingOrchestrator extends Orchestrator {
             System.exit(1);
         };
 
+        String sessionId = System.getenv("SESSION_ID");
+        if (sessionId == null) {
+            sessionId = UUID.randomUUID().toString();
+        }
+        if (properties.getBooleanProperty("journal.enabled")) {
+            Path journalPath = Path.of("/tmp/journal-" + sessionId + ".bin");
+            long fileSizeBytes = (long) properties.getIntProperty("journal.file.size.mb") * 1024L * 1024L;
+            try {
+                JournalWriter journalWriter = new JournalWriter(journalPath, fileSizeBytes);
+                strategyMdBuffer.addHandler(journalWriter);
+                intentBuffer.addHandler(journalWriter);
+                stratExecReportBuffer.addHandler(journalWriter);
+                orderOutboundBuffer.addHandler(journalWriter);
+                omsExecReportBuffer.addHandler(journalWriter);
+                strategyMdBuffer.start();
+                intentBuffer.start();
+                stratExecReportBuffer.start();
+                orderOutboundBuffer.start();
+                omsExecReportBuffer.start();
+                S3Client s3Client = System.getenv("SESSION_ID") != null ? getInstance(S3Client.class) : null;
+                String journalBucket = s3Client != null ? properties.getStringProperty("journal.bucket") : null;
+                String s3Key = strategyId + "/" + sessionId + "/journal.zst";
+                int flushIntervalSeconds = properties.getIntProperty("journal.flush.interval.seconds");
+                JournalManagerAgent journalManagerAgent = new JournalManagerAgent(
+                        journalWriter, journalPath, s3Client, journalBucket, s3Key,
+                        epochClock, Duration.ofSeconds(flushIntervalSeconds), logger);
+                GnomeAgentRunner journalRunner = new GnomeAgentRunner(journalManagerAgent, errorHandler);
+                GnomeAgentRunner.startOnThread(journalRunner);
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    try { journalRunner.close(); } catch (Exception e) { /* best effort */ }
+                }));
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to create journal writer", e);
+            }
+        }
+
         for (DefaultInboundOrchestrator<?> inbound : inbounds) {
             inbound.startGatewayAgents();
         }
@@ -251,17 +303,61 @@ public class TradingOrchestrator extends Orchestrator {
         }
 
         String className = properties.getStringProperty("strategy.class");
+        Map<String, String> strategyArgs = properties.getPropertiesByPrefix("strategy.args.");
+
         try {
             Class<?> clazz = Class.forName(className);
-            return (StrategyAgent) clazz.getDeclaredConstructor(
-                            SequencedRingBuffer.class,
-                            SequencedRingBuffer.class,
-                            SequencedRingBuffer.class,
-                            PositionView.class)
-                    .newInstance(mdBuf, erBuf, intentBuf, positionView);
+            for (Constructor<?> ctor : clazz.getConstructors()) {
+                Parameter[] params = ctor.getParameters();
+                if (params.length < 4 || !isInfrastructureParams(params)) continue;
+
+                if (params.length == 4 && strategyArgs.isEmpty()) {
+                    return (StrategyAgent) ctor.newInstance(mdBuf, erBuf, intentBuf, positionView);
+                }
+
+                if (params.length - 4 != strategyArgs.size()) continue;
+
+                Set<String> userParamNames = new HashSet<>();
+                for (int i = 4; i < params.length; i++) {
+                    userParamNames.add(params[i].getName());
+                }
+                if (!userParamNames.equals(strategyArgs.keySet())) continue;
+
+                Object[] args = new Object[params.length];
+                args[0] = mdBuf;
+                args[1] = erBuf;
+                args[2] = intentBuf;
+                args[3] = positionView;
+                for (int i = 4; i < params.length; i++) {
+                    args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i].getType());
+                }
+                return (StrategyAgent) ctor.newInstance(args);
+            }
+            throw new IllegalArgumentException(
+                    "No constructor found for " + className + " matching strategy.args: " + strategyArgs.keySet()
+                            + ". Ensure the class is compiled with -parameters.");
+        } catch (IllegalArgumentException e) {
+            throw new RuntimeException(e);
         } catch (Exception e) {
             throw new RuntimeException("Failed to instantiate strategy class: " + className, e);
         }
+    }
+
+    private static boolean isInfrastructureParams(Parameter[] params) {
+        return SequencedRingBuffer.class.isAssignableFrom(params[0].getType())
+                && SequencedRingBuffer.class.isAssignableFrom(params[1].getType())
+                && SequencedRingBuffer.class.isAssignableFrom(params[2].getType())
+                && PositionView.class.isAssignableFrom(params[3].getType());
+    }
+
+    private static Object convertStrategyArg(String value, Class<?> type) {
+        if (type == String.class) return value;
+        if (type == int.class || type == Integer.class) return Integer.parseInt(value);
+        if (type == long.class || type == Long.class) return Long.parseLong(value);
+        if (type == double.class || type == Double.class) return Double.parseDouble(value);
+        if (type == float.class || type == Float.class) return Float.parseFloat(value);
+        if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(value);
+        throw new IllegalArgumentException("Unsupported strategy arg type: " + type.getName());
     }
 
     private List<Listing> resolveListings(Properties properties, SecurityMaster securityMaster) {

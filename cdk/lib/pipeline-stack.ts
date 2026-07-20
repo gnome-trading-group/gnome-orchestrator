@@ -8,15 +8,17 @@ import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONFIGS, GITHUB_BRANCH, GITHUB_REPO, OrchestratorConfig } from './config';
 import { EcrStack } from './stacks/ecr-stack';
 import { EcsStack } from './stacks/ecs-stack';
+import { StorageStack } from './stacks/storage-stack';
 
 class AppStage extends cdk.Stage {
   constructor(scope: Construct, id: string, config: OrchestratorConfig) {
     super(scope, id, { env: config.account.environment });
 
     const ecrStack = new EcrStack(this, 'OrchestratorEcrStack', {
-      env: { account: config.account.accountId, region: 'us-east-1' },
       ecsRegions: config.ecsRegions,
     });
+
+    new StorageStack(this, 'OrchestratorStorageStack');
 
     for (const region of config.ecsRegions) {
       new EcsStack(this, `OrchestratorEcsStack-${region}`, {
