@@ -52,12 +52,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import software.amazon.awssdk.services.s3.S3Client;
+import java.util.function.Function;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
+import software.amazon.awssdk.services.s3.S3Client;
 
 /**
  * Concrete orchestrator for all live and paper trading sessions.
@@ -90,6 +91,19 @@ public class TradingOrchestrator extends Orchestrator {
 
     private static final int OUTBOUND_BUFFER_SIZE = 64;
     private static final Duration DEFAULT_PNL_FLUSH_INTERVAL = Duration.ofSeconds(30);
+
+    private static final Map<Class<?>, Function<String, Object>> CONVERTERS = Map.ofEntries(
+            Map.entry(String.class, (Function<String, Object>) v -> v),
+            Map.entry(int.class, Integer::parseInt),
+            Map.entry(Integer.class, Integer::parseInt),
+            Map.entry(long.class, Long::parseLong),
+            Map.entry(Long.class, Long::parseLong),
+            Map.entry(double.class, Double::parseDouble),
+            Map.entry(Double.class, Double::parseDouble),
+            Map.entry(float.class, Float::parseFloat),
+            Map.entry(Float.class, Float::parseFloat),
+            Map.entry(boolean.class, Boolean::parseBoolean),
+            Map.entry(Boolean.class, Boolean::parseBoolean));
 
     @Provides
     @Singleton
@@ -210,38 +224,82 @@ public class TradingOrchestrator extends Orchestrator {
         if (sessionId == null) {
             sessionId = UUID.randomUUID().toString();
         }
-        if (properties.getBooleanProperty("journal.enabled")) {
-            Path journalPath = Path.of("/tmp/journal-" + sessionId + ".bin");
-            long fileSizeBytes = (long) properties.getIntProperty("journal.file.size.mb") * 1024L * 1024L;
-            try {
-                JournalWriter journalWriter = new JournalWriter(journalPath, fileSizeBytes);
-                strategyMdBuffer.addHandler(journalWriter);
-                intentBuffer.addHandler(journalWriter);
-                stratExecReportBuffer.addHandler(journalWriter);
-                orderOutboundBuffer.addHandler(journalWriter);
-                omsExecReportBuffer.addHandler(journalWriter);
-                strategyMdBuffer.start();
-                intentBuffer.start();
-                stratExecReportBuffer.start();
-                orderOutboundBuffer.start();
-                omsExecReportBuffer.start();
-                S3Client s3Client = System.getenv("SESSION_ID") != null ? getInstance(S3Client.class) : null;
-                String journalBucket = s3Client != null ? properties.getStringProperty("journal.bucket") : null;
-                String s3Key = strategyId + "/" + sessionId + "/journal.zst";
-                int flushIntervalSeconds = properties.getIntProperty("journal.flush.interval.seconds");
-                JournalManagerAgent journalManagerAgent = new JournalManagerAgent(
-                        journalWriter, journalPath, s3Client, journalBucket, s3Key,
-                        epochClock, Duration.ofSeconds(flushIntervalSeconds), logger);
-                GnomeAgentRunner journalRunner = new GnomeAgentRunner(journalManagerAgent, errorHandler);
-                GnomeAgentRunner.startOnThread(journalRunner);
-                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                    try { journalRunner.close(); } catch (Exception e) { /* best effort */ }
-                }));
-            } catch (IOException e) {
-                throw new RuntimeException("Failed to create journal writer", e);
-            }
-        }
+        List<SequencedRingBuffer<?>> journaledBuffers = new ArrayList<>();
+        journaledBuffers.add(strategyMdBuffer);
+        journaledBuffers.add(intentBuffer);
+        journaledBuffers.add(stratExecReportBuffer);
+        journaledBuffers.add(orderOutboundBuffer);
+        journaledBuffers.add(omsExecReportBuffer);
+        wireJournal(strategyId, sessionId, journaledBuffers, epochClock, errorHandler, logger, properties);
 
+        startAgentRunners(
+                inbounds,
+                omsAgent,
+                outboundAgents,
+                muxAgent,
+                routerAgent,
+                strategy,
+                pnlReportingAgent,
+                riskSyncAgent,
+                errorHandler);
+    }
+
+    private void wireJournal(
+            int strategyId,
+            String sessionId,
+            List<SequencedRingBuffer<?>> journaledBuffers,
+            EpochClock epochClock,
+            ErrorHandler errorHandler,
+            Logger logger,
+            Properties properties) {
+        if (!properties.getBooleanProperty("journal.enabled")) {
+            return;
+        }
+        Path journalPath = Path.of("/tmp/journal-" + sessionId + ".bin");
+        long fileSizeBytes = (long) properties.getIntProperty("journal.file.size.mb") * 1024L * 1024L;
+        try {
+            JournalWriter journalWriter = new JournalWriter(journalPath, fileSizeBytes);
+            for (SequencedRingBuffer<?> buf : journaledBuffers) {
+                buf.addHandler(journalWriter);
+                buf.start();
+            }
+            S3Client s3Client = System.getenv("SESSION_ID") != null ? getInstance(S3Client.class) : null;
+            String journalBucket = s3Client != null ? properties.getStringProperty("journal.bucket") : null;
+            String s3Key = strategyId + "/" + sessionId + "/journal.zst";
+            int flushIntervalSeconds = properties.getIntProperty("journal.flush.interval.seconds");
+            JournalManagerAgent journalManagerAgent = new JournalManagerAgent(
+                    journalWriter,
+                    journalPath,
+                    s3Client,
+                    journalBucket,
+                    s3Key,
+                    epochClock,
+                    Duration.ofSeconds(flushIntervalSeconds),
+                    logger);
+            GnomeAgentRunner journalRunner = new GnomeAgentRunner(journalManagerAgent, errorHandler);
+            GnomeAgentRunner.startOnThread(journalRunner);
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    journalRunner.close();
+                } catch (Exception e) {
+                    /* best effort */
+                }
+            }));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to create journal writer", e);
+        }
+    }
+
+    private static void startAgentRunners(
+            List<DefaultInboundOrchestrator<?>> inbounds,
+            OmsAgent omsAgent,
+            List<GnomeAgent> outboundAgents,
+            MarketDataMultiplexer muxAgent,
+            ExchangeRouter routerAgent,
+            StrategyAgent strategy,
+            PnlReportingAgent pnlReportingAgent,
+            RiskSyncAgent riskSyncAgent,
+            ErrorHandler errorHandler) {
         for (DefaultInboundOrchestrator<?> inbound : inbounds) {
             inbound.startGatewayAgents();
         }
@@ -308,39 +366,55 @@ public class TradingOrchestrator extends Orchestrator {
         try {
             Class<?> clazz = Class.forName(className);
             for (Constructor<?> ctor : clazz.getConstructors()) {
-                Parameter[] params = ctor.getParameters();
-                if (params.length < 4 || !isInfrastructureParams(params)) continue;
-
-                if (params.length == 4 && strategyArgs.isEmpty()) {
-                    return (StrategyAgent) ctor.newInstance(mdBuf, erBuf, intentBuf, positionView);
+                StrategyAgent result =
+                        tryInstantiateConstructor(ctor, mdBuf, erBuf, intentBuf, positionView, strategyArgs);
+                if (result != null) {
+                    return result;
                 }
-
-                if (params.length - 4 != strategyArgs.size()) continue;
-
-                Set<String> userParamNames = new HashSet<>();
-                for (int i = 4; i < params.length; i++) {
-                    userParamNames.add(params[i].getName());
-                }
-                if (!userParamNames.equals(strategyArgs.keySet())) continue;
-
-                Object[] args = new Object[params.length];
-                args[0] = mdBuf;
-                args[1] = erBuf;
-                args[2] = intentBuf;
-                args[3] = positionView;
-                for (int i = 4; i < params.length; i++) {
-                    args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i].getType());
-                }
-                return (StrategyAgent) ctor.newInstance(args);
             }
-            throw new IllegalArgumentException(
-                    "No constructor found for " + className + " matching strategy.args: " + strategyArgs.keySet()
-                            + ". Ensure the class is compiled with -parameters.");
+            throw new IllegalArgumentException("No constructor found for " + className + " matching strategy.args: "
+                    + strategyArgs.keySet() + ". Ensure the class is compiled with -parameters.");
         } catch (IllegalArgumentException e) {
             throw new RuntimeException(e);
         } catch (Exception e) {
             throw new RuntimeException("Failed to instantiate strategy class: " + className, e);
         }
+    }
+
+    private static StrategyAgent tryInstantiateConstructor(
+            Constructor<?> ctor,
+            SequencedRingBuffer<?> mdBuf,
+            SequencedRingBuffer<OrderExecutionReport> erBuf,
+            SequencedRingBuffer<Intent> intentBuf,
+            PositionView positionView,
+            Map<String, String> strategyArgs)
+            throws ReflectiveOperationException {
+        Parameter[] params = ctor.getParameters();
+        if (params.length < 4 || !isInfrastructureParams(params)) {
+            return null;
+        }
+        if (params.length == 4 && strategyArgs.isEmpty()) {
+            return (StrategyAgent) ctor.newInstance(mdBuf, erBuf, intentBuf, positionView);
+        }
+        if (params.length - 4 != strategyArgs.size()) {
+            return null;
+        }
+        Set<String> userParamNames = new HashSet<>();
+        for (int i = 4; i < params.length; i++) {
+            userParamNames.add(params[i].getName());
+        }
+        if (!userParamNames.equals(strategyArgs.keySet())) {
+            return null;
+        }
+        Object[] args = new Object[params.length];
+        args[0] = mdBuf;
+        args[1] = erBuf;
+        args[2] = intentBuf;
+        args[3] = positionView;
+        for (int i = 4; i < params.length; i++) {
+            args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i].getType());
+        }
+        return (StrategyAgent) ctor.newInstance(args);
     }
 
     private static boolean isInfrastructureParams(Parameter[] params) {
@@ -351,13 +425,11 @@ public class TradingOrchestrator extends Orchestrator {
     }
 
     private static Object convertStrategyArg(String value, Class<?> type) {
-        if (type == String.class) return value;
-        if (type == int.class || type == Integer.class) return Integer.parseInt(value);
-        if (type == long.class || type == Long.class) return Long.parseLong(value);
-        if (type == double.class || type == Double.class) return Double.parseDouble(value);
-        if (type == float.class || type == Float.class) return Float.parseFloat(value);
-        if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(value);
-        throw new IllegalArgumentException("Unsupported strategy arg type: " + type.getName());
+        Function<String, Object> converter = CONVERTERS.get(type);
+        if (converter == null) {
+            throw new IllegalArgumentException("Unsupported strategy arg type: " + type.getName());
+        }
+        return converter.apply(value);
     }
 
     private List<Listing> resolveListings(Properties properties, SecurityMaster securityMaster) {

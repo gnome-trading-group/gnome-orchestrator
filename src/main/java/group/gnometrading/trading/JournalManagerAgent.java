@@ -81,10 +81,9 @@ public final class JournalManagerAgent implements GnomeAgent {
         }
         try {
             byte[] compressed = compress();
-            s3Client.putObject(
-                    request -> request.bucket(bucket).key(s3Key),
-                    RequestBody.fromBytes(compressed));
-            logger.logf(LogMessage.DEBUG, "Journal uploaded to s3://%s/%s (%d bytes)", bucket, s3Key, compressed.length);
+            s3Client.putObject(request -> request.bucket(bucket).key(s3Key), RequestBody.fromBytes(compressed));
+            logger.logf(
+                    LogMessage.DEBUG, "Journal uploaded to s3://%s/%s (%d bytes)", bucket, s3Key, compressed.length);
         } catch (Exception e) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to upload journal to S3: %s", e.getMessage());
         }
@@ -94,7 +93,7 @@ public final class JournalManagerAgent implements GnomeAgent {
         int writtenBytes = writer.writtenBytes();
         ByteArrayOutputStream bos = new ByteArrayOutputStream(writtenBytes / 4 + 1024);
         try (InputStream in = Files.newInputStream(journalPath);
-             ZstdOutputStream zstd = new ZstdOutputStream(bos)) {
+                ZstdOutputStream zstd = new ZstdOutputStream(bos)) {
             byte[] buf = new byte[64 * 1024];
             int remaining = writtenBytes;
             while (remaining > 0) {
