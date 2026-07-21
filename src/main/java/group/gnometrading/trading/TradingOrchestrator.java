@@ -204,8 +204,8 @@ public class TradingOrchestrator extends Orchestrator {
 
         OmsAgent omsAgent =
                 new OmsAgent(oms, intentBuffer, omsExecReportBuffer, orderOutboundBuffer, stratExecReportBuffer);
-        StrategyAgent strategy =
-                createStrategyAgent(strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView);
+        StrategyAgent strategy = createStrategyAgent(
+                strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
 
         RegistryConnection registryConnection = getInstance(RegistryConnection.class);
         EpochClock epochClock = SystemEpochClock.INSTANCE;
@@ -347,7 +347,8 @@ public class TradingOrchestrator extends Orchestrator {
             SequencedRingBuffer<?> mdBuf,
             SequencedRingBuffer<OrderExecutionReport> erBuf,
             SequencedRingBuffer<Intent> intentBuf,
-            PositionView positionView) {
+            PositionView positionView,
+            SecurityMaster securityMaster) {
         Properties properties = getInstance(Properties.class);
         String strategyType = properties.getStringProperty("strategy.type");
 
@@ -357,7 +358,8 @@ public class TradingOrchestrator extends Orchestrator {
                 throw new IllegalStateException(
                         "Python strategy callback not set. Call PythonStrategyAgent.setCallback() before Orchestrator.main().");
             }
-            return PythonStrategyAgent.createWithBuffers(mdBuf, erBuf, intentBuf, positionView, callback);
+            return PythonStrategyAgent.createWithBuffers(
+                    mdBuf, erBuf, intentBuf, positionView, securityMaster, callback);
         }
 
         String className = properties.getStringProperty("strategy.class");
@@ -366,8 +368,8 @@ public class TradingOrchestrator extends Orchestrator {
         try {
             Class<?> clazz = Class.forName(className);
             for (Constructor<?> ctor : clazz.getConstructors()) {
-                StrategyAgent result =
-                        tryInstantiateConstructor(ctor, mdBuf, erBuf, intentBuf, positionView, strategyArgs);
+                StrategyAgent result = tryInstantiateConstructor(
+                        ctor, mdBuf, erBuf, intentBuf, positionView, securityMaster, strategyArgs);
                 if (result != null) {
                     return result;
                 }
@@ -387,20 +389,21 @@ public class TradingOrchestrator extends Orchestrator {
             SequencedRingBuffer<OrderExecutionReport> erBuf,
             SequencedRingBuffer<Intent> intentBuf,
             PositionView positionView,
+            SecurityMaster securityMaster,
             Map<String, String> strategyArgs)
             throws ReflectiveOperationException {
         Parameter[] params = ctor.getParameters();
-        if (params.length < 4 || !isInfrastructureParams(params)) {
+        if (params.length < 5 || !isInfrastructureParams(params)) {
             return null;
         }
-        if (params.length == 4 && strategyArgs.isEmpty()) {
-            return (StrategyAgent) ctor.newInstance(mdBuf, erBuf, intentBuf, positionView);
+        if (params.length == 5 && strategyArgs.isEmpty()) {
+            return (StrategyAgent) ctor.newInstance(mdBuf, erBuf, intentBuf, positionView, securityMaster);
         }
-        if (params.length - 4 != strategyArgs.size()) {
+        if (params.length - 5 != strategyArgs.size()) {
             return null;
         }
         Set<String> userParamNames = new HashSet<>();
-        for (int i = 4; i < params.length; i++) {
+        for (int i = 5; i < params.length; i++) {
             userParamNames.add(params[i].getName());
         }
         if (!userParamNames.equals(strategyArgs.keySet())) {
@@ -411,7 +414,8 @@ public class TradingOrchestrator extends Orchestrator {
         args[1] = erBuf;
         args[2] = intentBuf;
         args[3] = positionView;
-        for (int i = 4; i < params.length; i++) {
+        args[4] = securityMaster;
+        for (int i = 5; i < params.length; i++) {
             args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i].getType());
         }
         return (StrategyAgent) ctor.newInstance(args);
@@ -421,7 +425,8 @@ public class TradingOrchestrator extends Orchestrator {
         return SequencedRingBuffer.class.isAssignableFrom(params[0].getType())
                 && SequencedRingBuffer.class.isAssignableFrom(params[1].getType())
                 && SequencedRingBuffer.class.isAssignableFrom(params[2].getType())
-                && PositionView.class.isAssignableFrom(params[3].getType());
+                && PositionView.class.isAssignableFrom(params[3].getType())
+                && SecurityMaster.class.isAssignableFrom(params[4].getType());
     }
 
     private static Object convertStrategyArg(String value, Class<?> type) {
