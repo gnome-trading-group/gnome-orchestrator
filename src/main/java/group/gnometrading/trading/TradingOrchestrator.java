@@ -213,7 +213,12 @@ public class TradingOrchestrator extends Orchestrator {
 
         int pnlFlushSeconds = properties.getIntProperty("pnl.flush.interval.seconds");
         PnlReportingAgent pnlReportingAgent = new PnlReportingAgent(
-                positionTracker, registryConnection, epochClock, Duration.ofSeconds(pnlFlushSeconds), listings.size(), sessionId);
+                positionTracker,
+                registryConnection,
+                epochClock,
+                Duration.ofSeconds(pnlFlushSeconds),
+                listings.size(),
+                sessionId);
 
         RiskSyncAgent riskSyncAgent = getInstance(RiskSyncAgent.class);
 
