@@ -51,7 +51,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.function.Function;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
@@ -209,9 +208,12 @@ public class TradingOrchestrator extends Orchestrator {
 
         RegistryConnection registryConnection = getInstance(RegistryConnection.class);
         EpochClock epochClock = SystemEpochClock.INSTANCE;
+
+        String sessionId = properties.getStringProperty("session.id");
+
         int pnlFlushSeconds = properties.getIntProperty("pnl.flush.interval.seconds");
         PnlReportingAgent pnlReportingAgent = new PnlReportingAgent(
-                positionTracker, registryConnection, epochClock, Duration.ofSeconds(pnlFlushSeconds), listings.size());
+                positionTracker, registryConnection, epochClock, Duration.ofSeconds(pnlFlushSeconds), listings.size(), sessionId);
 
         RiskSyncAgent riskSyncAgent = getInstance(RiskSyncAgent.class);
 
@@ -219,11 +221,6 @@ public class TradingOrchestrator extends Orchestrator {
             logger.logf(LogMessage.FATAL_ERROR_EXITING, "Agent error: %s", error);
             System.exit(1);
         };
-
-        String sessionId = System.getenv("SESSION_ID");
-        if (sessionId == null) {
-            sessionId = UUID.randomUUID().toString();
-        }
         List<SequencedRingBuffer<?>> journaledBuffers = new ArrayList<>();
         journaledBuffers.add(strategyMdBuffer);
         journaledBuffers.add(intentBuffer);
@@ -263,8 +260,8 @@ public class TradingOrchestrator extends Orchestrator {
                 buf.addHandler(journalWriter);
                 buf.start();
             }
-            S3Client s3Client = System.getenv("SESSION_ID") != null ? getInstance(S3Client.class) : null;
-            String journalBucket = s3Client != null ? properties.getStringProperty("journal.bucket") : null;
+            S3Client s3Client = getInstance(S3Client.class);
+            String journalBucket = properties.getStringProperty("journal.bucket");
             String s3Key = strategyId + "/" + sessionId + "/journal.zst";
             int flushIntervalSeconds = properties.getIntProperty("journal.flush.interval.seconds");
             JournalManagerAgent journalManagerAgent = new JournalManagerAgent(
