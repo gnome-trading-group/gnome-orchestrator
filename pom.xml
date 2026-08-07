@@ -55,7 +55,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.15.4</version>
+            <version>1.18.1-SNAPSHOT</version>
             <exclusions>
                 <exclusion>
                     <groupId>group.gnometrading</groupId>
