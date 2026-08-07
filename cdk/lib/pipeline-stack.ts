@@ -24,6 +24,7 @@ class AppStage extends cdk.Stage {
       new EcsStack(this, `OrchestratorEcsStack-${region}`, {
         env: { account: config.account.accountId, region },
         stage: config.account.stage,
+        registryApiKeyId: config.registryApiKeyId,
       });
     }
   }

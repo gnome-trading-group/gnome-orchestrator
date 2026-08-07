@@ -16,6 +16,7 @@ export const ORCHESTRATOR_TAG_VALUE = 'orchestrator-ecs';
 
 interface Props extends cdk.StackProps {
   stage: Stage;
+  registryApiKeyId: string;
 }
 
 export class EcsStack extends cdk.Stack {
@@ -74,7 +75,7 @@ export class EcsStack extends cdk.Stack {
     }));
     taskRole.addToPolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],
-      resources: [cdk.Fn.importValue('RegistryApiKeyArn')],
+      resources: [`arn:aws:apigateway:us-east-1::/apikeys/${props.registryApiKeyId}`],
     }));
 
     const logGroup = new logs.LogGroup(this, 'OrchestratorLogGroup', {
@@ -100,7 +101,7 @@ export class EcsStack extends cdk.Stack {
       environment: {
         MAIN_CLASS: 'group.gnometrading.trading.TradingOrchestrator',
         STAGE: props.stage,
-        REGISTRY_API_KEY_ID: cdk.Fn.importValue('RegistryApiKeyId'),
+        REGISTRY_API_KEY_ID: props.registryApiKeyId,
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'orchestrator',

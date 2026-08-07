@@ -9,7 +9,7 @@
     </parent>
 
     <artifactId>gnome-orchestrator</artifactId>
-    <version>1.4.2-SNAPSHOT</version>
+    <version>1.4.4-SNAPSHOT</version>
 
     <scm>
         <connection>scm:git:git@github.com:gnome-trading-group/gnome-orchestrator.git</connection>
