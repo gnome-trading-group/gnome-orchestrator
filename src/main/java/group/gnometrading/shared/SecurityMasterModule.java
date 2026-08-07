@@ -6,6 +6,7 @@ import group.gnometrading.di.Module;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.resources.Properties;
+import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 
 public class SecurityMasterModule extends Module {
 
@@ -16,8 +17,16 @@ public class SecurityMasterModule extends Module {
 
     @Provides
     public final RegistryConnection provideRegistryConnection(Properties properties) {
-        return new RegistryConnection(
-                properties.getStringProperty("registry.url"), properties.getStringProperty("registry.api_key"));
+        String keyId = properties.getStringProperty("registry.api.key.id");
+        String apiKey;
+        if (!keyId.isEmpty()) {
+            try (ApiGatewayClient client = ApiGatewayClient.create()) {
+                apiKey = client.getApiKey(r -> r.apiKey(keyId).includeValue(true)).value();
+            }
+        } else {
+            apiKey = "";
+        }
+        return new RegistryConnection(properties.getStringProperty("registry.url"), apiKey);
     }
 
     @Provides

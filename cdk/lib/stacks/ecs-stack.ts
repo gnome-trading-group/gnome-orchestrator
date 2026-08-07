@@ -72,6 +72,10 @@ export class EcsStack extends cdk.Stack {
       actions: ['s3:PutObject'],
       resources: [`arn:aws:s3:::gnome-journals-${props.stage}/*`],
     }));
+    taskRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [cdk.Fn.importValue('RegistryApiKeyArn')],
+    }));
 
     const logGroup = new logs.LogGroup(this, 'OrchestratorLogGroup', {
       logGroupName: `/gnome/orchestrator/${this.region}`,
@@ -96,6 +100,7 @@ export class EcsStack extends cdk.Stack {
       environment: {
         MAIN_CLASS: 'group.gnometrading.trading.TradingOrchestrator',
         STAGE: props.stage,
+        REGISTRY_API_KEY_ID: cdk.Fn.importValue('RegistryApiKeyId'),
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'orchestrator',

@@ -18,6 +18,7 @@ import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
 import java.io.IOException;
 import java.time.Clock;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -63,44 +64,69 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
     }
 
     @Provides
-    public final MarketDataCollector provideMarketDataCollector(
-            Logger logger,
-            Clock clock,
-            S3Client s3Client,
-            Listing listing,
-            @Named("OUTPUT_BUCKET") String outputBucket) {
-        return new MarketDataCollector(logger, clock, s3Client, listing, outputBucket);
+    @Named("LISTING_IDS")
+    public final int[] provideListingIds(Properties properties) {
+        if (properties.hasProperty("listings")) {
+            String[] parts = properties.getStringProperty("listings").split(",");
+            int[] ids = new int[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                ids[i] = Integer.parseInt(parts[i].trim());
+            }
+            return ids;
+        }
+        return new int[] {properties.getIntProperty("listing")};
     }
 
     @Override
     public final void configure() {
         install(new SecurityMasterModule(), new AwsModule());
         final Logger logger = getInstance(Logger.class);
-        final Listing listing = getInstance(Listing.class);
+        final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
+        final String outputBucket = getInstance(String.class, "OUTPUT_BUCKET");
+        final int[] listingIds = getInstance(int[].class, "LISTING_IDS");
 
-        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
-                DefaultInboundOrchestrator.findInboundOrchestrator(listing);
-        final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-        final MarketDataCollector marketDataCollector = getInstance(MarketDataCollector.class);
-        orchestrator.configureGatewayForListing(new SchemaEventAdapter(marketDataCollector));
+        final MarketDataCollector[] collectors = new MarketDataCollector[listingIds.length];
+        for (int i = 0; i < listingIds.length; i++) {
+            final Listing listing = securityMaster.getListing(listingIds[i]);
+            final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
+                    DefaultInboundOrchestrator.findInboundOrchestrator(listing);
+            final DefaultInboundOrchestrator<?> orchestrator =
+                    createChildOrchestrator(orchestratorClass, Map.of(Listing.class, listing));
+
+            final MarketDataCollector collector = new MarketDataCollector(
+                    logger, getInstance(Clock.class), getInstance(S3Client.class), listing, outputBucket);
+            collectors[i] = collector;
+
+            orchestrator.configureGatewayForListing(new SchemaEventAdapter(collector));
+
+            logger.logf(
+                    LogMessage.DEBUG,
+                    "Started listing %s on exchange %s with schema %s on class %s",
+                    listing.security().symbol(),
+                    listing.exchange().exchangeName(),
+                    listing.exchange().schemaType(),
+                    orchestratorClass.getSimpleName());
+        }
 
         final long maxStaleNanos = TimeUnit.SECONDS.toNanos(90);
         try {
             new HealthCheckServer(8080, () -> {
-                        long lastEvent = marketDataCollector.lastEventNanos;
-                        return lastEvent == 0L || (System.nanoTime() - lastEvent) < maxStaleNanos;
+                        for (MarketDataCollector c : collectors) {
+                            long last = c.lastEventNanos;
+                            if (last != 0L && (System.nanoTime() - last) < maxStaleNanos) {
+                                return true;
+                            }
+                        }
+                        for (MarketDataCollector c : collectors) {
+                            if (c.lastEventNanos != 0L) {
+                                return false;
+                            }
+                        }
+                        return true;
                     })
                     .start();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-
-        logger.logf(
-                LogMessage.DEBUG,
-                "Started listing %s on exchange %s with schema %s on class %s",
-                listing.security().symbol(),
-                listing.exchange().exchangeName(),
-                listing.exchange().schemaType(),
-                orchestratorClass.getSimpleName());
     }
 }

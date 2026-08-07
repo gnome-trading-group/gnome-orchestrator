@@ -12,8 +12,8 @@ services:
     environment:
       LISTING: 8
       OUTPUT_BUCKET: gnome-market-data-dev
-      REGISTRY_URL: i3116oczxe.execute-api.us-east-1.amazonaws.com
-      REGISTRY_API_KEY: 9WPV7CfeqXa578yVYlxdG3kCPFzACr7YaMU0UVma
+      REGISTRY_URL: ${REGISTRY_URL}
+      REGISTRY_API_KEY_ID: ${REGISTRY_API_KEY_ID}
       MAIN_CLASS: group.gnometrading.collectors.DelegatingCollectorOrchestrator
       STAGE: dev
 

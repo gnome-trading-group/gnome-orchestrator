@@ -14,6 +14,9 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.OmsAgent;
 import group.gnometrading.oms.OrderManagementSystem;
 import group.gnometrading.oms.pnl.PnlReportingAgent;
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.PriceWriterAgent;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.PositionView;
 import group.gnometrading.oms.position.SharedPositionBuffer;
@@ -146,8 +149,19 @@ public class TradingOrchestrator extends Orchestrator {
         }
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(sharedBuffer);
+        SharedPriceBuffer priceBuffer = new SharedPriceBuffer(listings.size());
+        PriceSlotRegistry priceSlotRegistry = new PriceSlotRegistry(listings.size());
+        for (Listing listing : listings) {
+            priceSlotRegistry.register(listing.listingId());
+        }
         OrderManagementSystem oms = new OrderManagementSystem(
-                logger, new RingBufferOrderStateManager(), positionTracker, riskEngine, securityMaster);
+                logger,
+                new RingBufferOrderStateManager(),
+                positionTracker,
+                riskEngine,
+                securityMaster,
+                priceBuffer,
+                priceSlotRegistry);
         for (Listing listing : listings) {
             positionTracker.registerSlot(strategyId, listing.listingId());
         }
@@ -165,6 +179,9 @@ public class TradingOrchestrator extends Orchestrator {
             strategyMdBuffer = new SequencedRingBuffer<>(Intent::new, globalSequence);
             muxAgent = new MarketDataMultiplexer(perListingMdBuffers, strategyMdBuffer);
         }
+
+        PriceWriterAgent priceWriterAgent =
+                new PriceWriterAgent(priceBuffer, priceSlotRegistry, securityMaster, strategyMdBuffer);
 
         SequencedRingBuffer<Intent> orderOutboundBuffer =
                 new SequencedRingBuffer<>(Intent::new, globalSequence, OUTBOUND_BUFFER_SIZE);
@@ -209,16 +226,21 @@ public class TradingOrchestrator extends Orchestrator {
         RegistryConnection registryConnection = getInstance(RegistryConnection.class);
         EpochClock epochClock = SystemEpochClock.INSTANCE;
 
-        String sessionId = properties.getStringProperty("session.id");
+        String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
 
-        int pnlFlushSeconds = properties.getIntProperty("pnl.flush.interval.seconds");
-        PnlReportingAgent pnlReportingAgent = new PnlReportingAgent(
-                positionTracker,
-                registryConnection,
-                epochClock,
-                Duration.ofSeconds(pnlFlushSeconds),
-                listings.size(),
-                sessionId);
+        PnlReportingAgent pnlReportingAgent = null;
+        if (sessionId != null) {
+            int pnlFlushSeconds = properties.getIntProperty("pnl.flush.interval.seconds");
+            pnlReportingAgent = new PnlReportingAgent(
+                    positionTracker,
+                    registryConnection,
+                    epochClock,
+                    Duration.ofSeconds(pnlFlushSeconds),
+                    listings.size(),
+                    sessionId,
+                    priceBuffer,
+                    priceSlotRegistry);
+        }
 
         RiskSyncAgent riskSyncAgent = getInstance(RiskSyncAgent.class);
 
@@ -242,6 +264,7 @@ public class TradingOrchestrator extends Orchestrator {
                 routerAgent,
                 strategy,
                 pnlReportingAgent,
+                priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
     }
@@ -300,12 +323,14 @@ public class TradingOrchestrator extends Orchestrator {
             ExchangeRouter routerAgent,
             StrategyAgent strategy,
             PnlReportingAgent pnlReportingAgent,
+            PriceWriterAgent priceWriterAgent,
             RiskSyncAgent riskSyncAgent,
             ErrorHandler errorHandler) {
         for (DefaultInboundOrchestrator<?> inbound : inbounds) {
             inbound.startGatewayAgents();
         }
         GnomeAgentRunner.startOnThread(new GnomeAgentRunner(omsAgent, errorHandler));
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(priceWriterAgent, errorHandler));
         for (GnomeAgent outbound : outboundAgents) {
             GnomeAgentRunner.startOnThread(new GnomeAgentRunner(outbound, errorHandler));
         }
@@ -316,7 +341,9 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner.startOnThread(new GnomeAgentRunner(routerAgent, errorHandler));
         }
         GnomeAgentRunner.startOnThread(new GnomeAgentRunner(strategy, errorHandler));
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(pnlReportingAgent, errorHandler));
+        if (pnlReportingAgent != null) {
+            GnomeAgentRunner.startOnThread(new GnomeAgentRunner(pnlReportingAgent, errorHandler));
+        }
         GnomeAgentRunner.startOnThread(new GnomeAgentRunner(riskSyncAgent, errorHandler));
     }
 
