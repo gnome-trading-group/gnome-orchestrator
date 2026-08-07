@@ -11,8 +11,8 @@ import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import java.time.Clock;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -89,7 +89,7 @@ final class CollectionMetadataPublisher {
     CollectionContext publish(final List<Listing> listings, final SecurityMaster securityMaster) {
         final String collectionId = UUID.randomUUID().toString();
         final String key = "v1/collections/" + collectionId + "/contract-metadata.json";
-        final Set<Integer> selectedSecurityIds = new HashSet<>();
+        final Set<Integer> selectedSecurityIds = new LinkedHashSet<>();
         final List<ListingMetadata> listingMetadata = new ArrayList<>(listings.size());
 
         for (Listing listing : listings) {
@@ -132,10 +132,12 @@ final class CollectionMetadataPublisher {
         }
 
         final LinkedHashMap<Integer, ContractRelationship> relationships = new LinkedHashMap<>();
-        for (ContractRelationship relationship : securityMaster.getAllContractRelationships()) {
-            if (selectedSecurityIds.contains(relationship.securityIdA())
-                    || selectedSecurityIds.contains(relationship.securityIdB())) {
-                relationships.putIfAbsent(relationship.relationshipId(), relationship);
+        for (int securityId : selectedSecurityIds) {
+            for (ContractRelationship relationship : securityMaster.getContractRelationships(securityId)) {
+                if (selectedSecurityIds.contains(relationship.securityIdA())
+                        || selectedSecurityIds.contains(relationship.securityIdB())) {
+                    relationships.putIfAbsent(relationship.relationshipId(), relationship);
+                }
             }
         }
 
