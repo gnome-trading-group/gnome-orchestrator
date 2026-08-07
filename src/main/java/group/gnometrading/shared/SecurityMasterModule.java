@@ -6,6 +6,7 @@ import group.gnometrading.di.Module;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.resources.Properties;
+import java.util.function.Function;
 import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 
 public class SecurityMasterModule extends Module {
@@ -17,17 +18,31 @@ public class SecurityMasterModule extends Module {
 
     @Provides
     public final RegistryConnection provideRegistryConnection(Properties properties) {
-        String keyId = properties.getStringProperty("registry.api.key.id");
-        String apiKey;
-        if (!keyId.isEmpty()) {
-            try (ApiGatewayClient client = ApiGatewayClient.create()) {
-                apiKey = client.getApiKey(r -> r.apiKey(keyId).includeValue(true))
-                        .value();
-            }
-        } else {
-            apiKey = "";
-        }
+        final String apiKey = resolveRegistryApiKey(properties, SecurityMasterModule::getApiKeyById);
         return new RegistryConnection(properties.getStringProperty("registry.url"), apiKey);
+    }
+
+    static String resolveRegistryApiKey(Properties properties, Function<String, String> keyLookup) {
+        final String keyId = optionalProperty(properties, "registry.api.key.id").trim();
+        if (!keyId.isEmpty()) {
+            return keyLookup.apply(keyId);
+        }
+        return optionalProperty(properties, "registry.api.key");
+    }
+
+    private static String optionalProperty(Properties properties, String name) {
+        try {
+            final String value = properties.getStringProperty(name);
+            return value == null ? "" : value;
+        } catch (IllegalArgumentException ignored) {
+            return "";
+        }
+    }
+
+    private static String getApiKeyById(String keyId) {
+        try (ApiGatewayClient client = ApiGatewayClient.create()) {
+            return client.getApiKey(r -> r.apiKey(keyId).includeValue(true)).value();
+        }
     }
 
     @Provides
