@@ -56,6 +56,12 @@
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
             <version>1.15.4</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>group.gnometrading</groupId>
+                    <artifactId>gnome-networking</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -80,7 +86,13 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>1.2.0</version>
+            <version>1.2.1-SNAPSHOT</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>group.gnometrading</groupId>
+                    <artifactId>gnome-networking</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>

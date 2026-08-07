@@ -132,6 +132,11 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     }
 
     @SuppressWarnings("unchecked")
+    public final SocketReader<T> getSocketReader() {
+        return getInstance(SocketReader.class);
+    }
+
+    @SuppressWarnings("unchecked")
     public final void startGatewayAgents() {
         ErrorHandler errorHandler = getInstance(ErrorHandler.class);
         GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(MarketInboundGateway.class), errorHandler));

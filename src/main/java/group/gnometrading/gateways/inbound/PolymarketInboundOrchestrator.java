@@ -18,6 +18,7 @@ import group.gnometrading.sm.Listing;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import org.agrona.concurrent.EpochNanoClock;
 
 public class PolymarketInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10Schema> {
@@ -80,6 +81,8 @@ public class PolymarketInboundOrchestrator extends DefaultInboundOrchestrator<Mb
     @Override
     @Provides
     public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
-        return new MarketInboundGatewayConfig.Builder().build();
+        return new MarketInboundGatewayConfig.Builder()
+                .withKeepAliveInterval(Duration.ofSeconds(10))
+                .build();
     }
 }
