@@ -21,7 +21,8 @@ public class SecurityMasterModule extends Module {
         String apiKey;
         if (!keyId.isEmpty()) {
             try (ApiGatewayClient client = ApiGatewayClient.create()) {
-                apiKey = client.getApiKey(r -> r.apiKey(keyId).includeValue(true)).value();
+                apiKey = client.getApiKey(r -> r.apiKey(keyId).includeValue(true))
+                        .value();
             }
         } else {
             apiKey = "";
