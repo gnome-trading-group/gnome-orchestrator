@@ -3,7 +3,7 @@ import { GnomeAccount, Stage } from '@gnome-trading-group/gnome-shared-cdk';
 export const GITHUB_REPO = 'gnome-trading-group/gnome-orchestrator';
 export const GITHUB_BRANCH = 'release';
 
-export const ECS_REGIONS = ['us-east-1', 'ap-northeast-1'];
+export const ECS_REGIONS = ['us-east-1', 'ap-northeast-1', 'eu-west-1'];
 
 export interface OrchestratorConfig {
   account: GnomeAccount;
