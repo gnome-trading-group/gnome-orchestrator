@@ -6,7 +6,6 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
-import group.gnometrading.gateways.inbound.MarketInboundGatewayConfig;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -76,13 +75,6 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
     @Provides
     public final GnomeSocketFactory provideSocketFactory() {
         return new NativeSocketFactory();
-    }
-
-    @Provides
-    public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
-        return new MarketInboundGatewayConfig.Builder()
-                .withMaxReconnectAttempts(1)
-                .build();
     }
 
     @Provides

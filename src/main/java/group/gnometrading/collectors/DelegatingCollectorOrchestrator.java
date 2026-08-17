@@ -47,17 +47,6 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
     }
 
     @Provides
-    @Named("LISTING_ID")
-    public final Integer provideListingId(Properties properties) {
-        return properties.getIntProperty("listing");
-    }
-
-    @Provides
-    public final Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
-        return securityMaster.getListing(listingId);
-    }
-
-    @Provides
     @Named("OUTPUT_BUCKET")
     public final String provideOutputBucket(Properties properties) {
         return properties.getStringProperty("output.bucket");
