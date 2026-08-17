@@ -21,7 +21,8 @@ public class SecurityMasterModule extends Module {
         String keyId = properties.getStringProperty("registry.api.key.id");
         String apiKey;
         if (!keyId.isEmpty()) {
-            try (ApiGatewayClient client = ApiGatewayClient.builder().region(Region.US_EAST_1).build()) {
+            try (ApiGatewayClient client =
+                    ApiGatewayClient.builder().region(Region.US_EAST_1).build()) {
                 apiKey = client.getApiKey(r -> r.apiKey(keyId).includeValue(true))
                         .value();
             }
