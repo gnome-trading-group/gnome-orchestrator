@@ -4,6 +4,7 @@ import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
+import group.gnometrading.gateways.credentials.KalshiCredentials;
 import group.gnometrading.gateways.inbound.exchanges.kalshi.KalshiSocketReader;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
@@ -18,13 +19,9 @@ import group.gnometrading.sm.Listing;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.KeyFactory;
-import java.security.PrivateKey;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.util.Base64;
 import org.agrona.concurrent.EpochNanoClock;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 
 public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10Schema> {
 
@@ -70,14 +67,13 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
 
     @Provides
     @Singleton
-    public final PrivateKey providePrivateKey(Properties properties) throws Exception {
-        String keyPath = properties.getStringProperty("kalshi.private.key.path");
-        String pem = Files.readString(Path.of(keyPath));
-        String base64 = pem.replace("-----BEGIN PRIVATE KEY-----", "")
-                .replace("-----END PRIVATE KEY-----", "")
-                .replaceAll("\\s", "");
-        byte[] keyBytes = Base64.getDecoder().decode(base64);
-        return KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
+    public final KalshiCredentials provideKalshiCredentials(SecretsManagerClient secretsManager, Listing listing) {
+        String secretName = "gnome/exchange-credentials/kalshi";
+        String secretJson = secretsManager
+                .getSecretValue(
+                        GetSecretValueRequest.builder().secretId(secretName).build())
+                .secretString();
+        return KalshiCredentials.fromJson(secretJson);
     }
 
     @Override
@@ -85,7 +81,7 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
     @Singleton
     @SuppressWarnings("unchecked")
     public final SocketReader<Mbp10Schema> provideSocketReader() {
-        Properties properties = getInstance(Properties.class);
+        KalshiCredentials credentials = getInstance(KalshiCredentials.class);
         return new KalshiSocketReader(
                 getInstance(Logger.class),
                 getInstance(SequencedRingBuffer.class),
@@ -94,8 +90,8 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
                 getInstance(Listing.class),
                 getInstance(WebSocketClient.class),
                 new JsonDecoder(),
-                properties.getStringProperty("kalshi.api.key"),
-                getInstance(PrivateKey.class));
+                credentials.apiKey(),
+                credentials.privateKey());
     }
 
     @Override

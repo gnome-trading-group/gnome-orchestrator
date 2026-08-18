@@ -66,8 +66,7 @@ public class BinanceInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10
     @Provides
     @Singleton
     public final BinanceCredentials provideBinanceCredentials(SecretsManagerClient secretsManager, Listing listing) {
-        String secretName =
-                "exchange-credentials/" + listing.exchange().exchangeName().toLowerCase();
+        String secretName = "gnome/exchange-credentials/binance";
         String secretJson = secretsManager
                 .getSecretValue(
                         GetSecretValueRequest.builder().secretId(secretName).build())

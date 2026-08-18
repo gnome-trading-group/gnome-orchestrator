@@ -28,23 +28,21 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         install(new RiskModule());
     }
 
-    public static final int DEFAULT_RING_BUFFER_SIZE = 1024;
-
     public static Class<? extends DefaultInboundOrchestrator<?>> findInboundOrchestrator(final Listing listing) {
-        switch (listing.exchange().exchangeName()) {
-            case "Hyperliquid" -> {
+        switch (listing.exchange().exchangeName().toLowerCase()) {
+            case "hyperliquid" -> {
                 return HyperliquidInboundOrchestrator.class;
             }
-            case "Lighter" -> {
+            case "lighter" -> {
                 return LighterInboundOrchestrator.class;
             }
-            case "Binance" -> {
+            case "binance" -> {
                 return BinanceInboundOrchestrator.class;
             }
-            case "Polymarket" -> {
+            case "polymarket" -> {
                 return PolymarketInboundOrchestrator.class;
             }
-            case "Kalshi" -> {
+            case "kalshi" -> {
                 return KalshiInboundOrchestrator.class;
             }
             default -> throw new IllegalArgumentException(

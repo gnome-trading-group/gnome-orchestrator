@@ -13,6 +13,7 @@ import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSocketFactory;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.sequencer.SchemaEventAdapter;
+import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
 import java.net.URI;
@@ -94,7 +95,7 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
 
     @Override
     public final void configure() {
-        install(new SecurityMasterModule());
+        install(new SecurityMasterModule(), new AwsModule());
         final MarketDataWriter writer = getInstance(MarketDataWriter.class);
         final Listing listing = getInstance(Listing.class);
 
