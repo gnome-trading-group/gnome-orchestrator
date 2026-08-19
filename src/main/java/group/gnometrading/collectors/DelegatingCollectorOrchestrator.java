@@ -2,6 +2,7 @@ package group.gnometrading.collectors;
 
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collector.MarketDataCollector;
+import group.gnometrading.collector.RawDataCollector;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
@@ -53,6 +54,12 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
     }
 
     @Provides
+    @Named("RAW_CAPTURE_BUCKET")
+    public final String provideRawCaptureBucket(Properties properties) {
+        return properties.getStringProperty("raw.capture.bucket");
+    }
+
+    @Provides
     @Named("LISTING_IDS")
     public final int[] provideListingIds(Properties properties) {
         if (properties.hasProperty("listings")) {
@@ -72,6 +79,7 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
         final Logger logger = getInstance(Logger.class);
         final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         final String outputBucket = getInstance(String.class, "OUTPUT_BUCKET");
+        final String rawCaptureBucket = getInstance(String.class, "RAW_CAPTURE_BUCKET");
         final int[] listingIds = getInstance(int[].class, "LISTING_IDS");
 
         final MarketDataCollector[] collectors = new MarketDataCollector[listingIds.length];
@@ -81,6 +89,10 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
                     DefaultInboundOrchestrator.findInboundOrchestrator(listing);
             final DefaultInboundOrchestrator<?> orchestrator =
                     createChildOrchestrator(orchestratorClass, Map.of(Listing.class, listing));
+
+            final RawDataCollector rawCollector = new RawDataCollector(
+                    logger, getInstance(Clock.class), getInstance(S3Client.class), listing, rawCaptureBucket);
+            orchestrator.setRawDataSink(rawCollector::capture);
 
             final MarketDataCollector collector = new MarketDataCollector(
                     logger, getInstance(Clock.class), getInstance(S3Client.class), listing, outputBucket);
