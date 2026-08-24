@@ -32,13 +32,8 @@ import group.gnometrading.sequencer.JournalWriter;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.RiskModule;
+import group.gnometrading.simulation.config.ExchangeProfileConfig;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
-import group.gnometrading.simulation.fee.StaticFeeModel;
-import group.gnometrading.simulation.latency.StaticLatency;
-import group.gnometrading.simulation.queues.OptimisticQueueModel;
-import group.gnometrading.simulation.queues.ProbabilisticQueueModel;
-import group.gnometrading.simulation.queues.QueueModel;
-import group.gnometrading.simulation.queues.RiskAverseQueueModel;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
@@ -357,16 +352,8 @@ public class TradingOrchestrator extends Orchestrator {
         String mode = properties.getStringProperty("mode");
 
         if ("paper".equals(mode)) {
-            StaticFeeModel feeModel = new StaticFeeModel(
-                    Double.parseDouble(properties.getStringProperty("simulation.taker.fee")),
-                    Double.parseDouble(properties.getStringProperty("simulation.maker.fee")));
-            StaticLatency networkLatency =
-                    new StaticLatency(Long.parseLong(properties.getStringProperty("simulation.network.latency.nanos")));
-            StaticLatency orderLatency =
-                    new StaticLatency(Long.parseLong(properties.getStringProperty("simulation.order.latency.nanos")));
-            QueueModel queueModel = resolveQueueModel(properties);
-            MbpSimulatedExchange exchange =
-                    new MbpSimulatedExchange(feeModel, networkLatency, orderLatency, queueModel);
+            ExchangeProfileConfig profile = ExchangeProfileConfig.fromProperties(properties);
+            MbpSimulatedExchange exchange = (MbpSimulatedExchange) profile.toSimulatedExchange();
             return new PaperTradingOutboundGateway(
                     exchange,
                     marketDataBuffer,
@@ -482,16 +469,5 @@ public class TradingOrchestrator extends Orchestrator {
                 .map(Integer::parseInt)
                 .map(securityMaster::getListing)
                 .toList();
-    }
-
-    private QueueModel resolveQueueModel(final Properties properties) {
-        String model = properties.getStringProperty("simulation.queue.model");
-        return switch (model) {
-            case "optimistic" -> new OptimisticQueueModel();
-            case "probabilistic" -> new ProbabilisticQueueModel(
-                    Double.parseDouble(properties.getStringProperty("simulation.queue.cancel.ahead.probability")));
-            case "risk_averse" -> new RiskAverseQueueModel();
-            default -> throw new IllegalArgumentException("Unknown queue model: " + model);
-        };
     }
 }
