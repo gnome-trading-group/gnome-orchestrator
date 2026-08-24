@@ -4,8 +4,9 @@ import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
+import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.credentials.KalshiCredentials;
-import group.gnometrading.gateways.inbound.exchanges.kalshi.KalshiSocketReader;
+import group.gnometrading.gateways.inbound.exchanges.kalshi.KalshiInboundReader;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -82,7 +83,7 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
     @SuppressWarnings("unchecked")
     public final SocketReader<Mbp10Schema> provideSocketReader() {
         KalshiCredentials credentials = getInstance(KalshiCredentials.class);
-        return new KalshiSocketReader(
+        return new KalshiInboundReader(
                 getInstance(Logger.class),
                 getInstance(SequencedRingBuffer.class),
                 getInstance(EpochNanoClock.class),
@@ -96,7 +97,7 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
 
     @Override
     @Provides
-    public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
-        return new MarketInboundGatewayConfig.Builder().build();
+    public final GatewayConfig provideGatewayConfig() {
+        return new GatewayConfig.Builder().build();
     }
 }

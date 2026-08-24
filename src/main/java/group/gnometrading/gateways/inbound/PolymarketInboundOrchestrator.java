@@ -4,7 +4,8 @@ import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
-import group.gnometrading.gateways.inbound.exchanges.polymarket.PolymarketSocketReader;
+import group.gnometrading.gateways.GatewayConfig;
+import group.gnometrading.gateways.inbound.exchanges.polymarket.PolymarketInboundReader;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -68,7 +69,7 @@ public class PolymarketInboundOrchestrator extends DefaultInboundOrchestrator<Mb
     @Singleton
     @SuppressWarnings("unchecked")
     public final SocketReader<Mbp10Schema> provideSocketReader() {
-        return new PolymarketSocketReader(
+        return new PolymarketInboundReader(
                 getInstance(Logger.class),
                 getInstance(SequencedRingBuffer.class),
                 getInstance(EpochNanoClock.class),
@@ -80,8 +81,8 @@ public class PolymarketInboundOrchestrator extends DefaultInboundOrchestrator<Mb
 
     @Override
     @Provides
-    public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
-        return new MarketInboundGatewayConfig.Builder()
+    public final GatewayConfig provideGatewayConfig() {
+        return new GatewayConfig.Builder()
                 .withMaxSilentInterval(Duration.ofSeconds(60))
                 .build();
     }

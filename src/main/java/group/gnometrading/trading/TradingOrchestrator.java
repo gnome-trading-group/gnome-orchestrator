@@ -8,6 +8,7 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
+import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -366,10 +367,19 @@ public class TradingOrchestrator extends Orchestrator {
             QueueModel queueModel = resolveQueueModel(properties);
             MbpSimulatedExchange exchange =
                     new MbpSimulatedExchange(feeModel, networkLatency, orderLatency, queueModel);
-            return new PaperTradingOutboundGateway(exchange, marketDataBuffer, orderOutboundBuffer, execReportBuffer);
+            return new PaperTradingOutboundGateway(
+                    exchange,
+                    marketDataBuffer,
+                    orderOutboundBuffer,
+                    execReportBuffer,
+                    getInstance(EpochNanoClock.class));
         }
 
-        throw new UnsupportedOperationException("Live outbound gateway not yet implemented. mode=" + mode);
+        final Class<? extends DefaultOutboundOrchestrator> orchClass =
+                DefaultOutboundOrchestrator.findOutboundOrchestrator(listing);
+        final DefaultOutboundOrchestrator outboundOrch = createChildOrchestrator(orchClass);
+        final ErrorHandler errorHandler = getInstance(ErrorHandler.class);
+        return outboundOrch.startGatewayAgents(orderOutboundBuffer, execReportBuffer, errorHandler);
     }
 
     private StrategyAgent createStrategyAgent(

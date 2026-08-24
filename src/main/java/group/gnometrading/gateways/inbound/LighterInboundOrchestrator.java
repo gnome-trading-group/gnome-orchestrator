@@ -4,7 +4,8 @@ import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
-import group.gnometrading.gateways.inbound.exchanges.lighter.LighterSocketReader;
+import group.gnometrading.gateways.GatewayConfig;
+import group.gnometrading.gateways.inbound.exchanges.lighter.LighterInboundReader;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -67,7 +68,7 @@ public class LighterInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10
     @Singleton
     @SuppressWarnings("unchecked")
     public final SocketReader<Mbp10Schema> provideSocketReader() {
-        return new LighterSocketReader(
+        return new LighterInboundReader(
                 getInstance(Logger.class),
                 getInstance(SequencedRingBuffer.class),
                 getInstance(EpochNanoClock.class),
@@ -79,7 +80,7 @@ public class LighterInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10
 
     @Override
     @Provides
-    public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
-        return new MarketInboundGatewayConfig.Builder().build();
+    public final GatewayConfig provideGatewayConfig() {
+        return new GatewayConfig.Builder().build();
     }
 }

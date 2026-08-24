@@ -5,6 +5,7 @@ import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
+import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.schemas.Schema;
@@ -75,7 +76,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     public abstract SocketReader<T> provideSocketReader();
 
     @Provides
-    public abstract MarketInboundGatewayConfig provideMarketInboundGatewayConfig();
+    public abstract GatewayConfig provideGatewayConfig();
 
     @Provides
     @Singleton
@@ -83,10 +84,10 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     @Singleton
-    public final MarketInboundGateway provideMarketInboundGateway() {
-        return new MarketInboundGateway(
+    public final InboundGateway provideInboundGateway() {
+        return new InboundGateway(
                 getInstance(Logger.class),
-                getInstance(MarketInboundGatewayConfig.class),
+                getInstance(GatewayConfig.class),
                 getInstance(SocketReader.class),
                 getInstance(EpochClock.class));
     }
@@ -100,7 +101,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     public final ErrorHandler provideInboundErrorHandler() {
-        MarketInboundGateway gateway = getInstance(MarketInboundGateway.class);
+        InboundGateway gateway = getInstance(InboundGateway.class);
         Logger logger = getInstance(Logger.class);
         List<Long> errorTimestamps = getInstance(List.class, "ERROR_TIMESTAMPS");
 
@@ -137,7 +138,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     @SuppressWarnings("unchecked")
     public final void startGatewayAgents() {
         ErrorHandler errorHandler = getInstance(ErrorHandler.class);
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(MarketInboundGateway.class), errorHandler));
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(InboundGateway.class), errorHandler));
         GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(SocketReader.class), errorHandler));
         GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(SocketWriter.class), errorHandler));
     }
@@ -151,7 +152,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         SequencedRingBuffer<T> sequencedRingBuffer = getInstance(SequencedRingBuffer.class);
         SocketWriter socketWriter = getInstance(SocketWriter.class);
         SocketReader<T> socketReader = getInstance(SocketReader.class);
-        MarketInboundGateway marketInboundGateway = getInstance(MarketInboundGateway.class);
+        InboundGateway marketInboundGateway = getInstance(InboundGateway.class);
 
         ErrorHandler errorHandler = getInstance(ErrorHandler.class);
         GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, errorHandler);

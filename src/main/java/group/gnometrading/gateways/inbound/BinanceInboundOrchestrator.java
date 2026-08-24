@@ -2,12 +2,13 @@ package group.gnometrading.gateways.inbound;
 
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
+import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.credentials.BinanceCredentials;
 import group.gnometrading.gateways.fix.FixConfig;
 import group.gnometrading.gateways.fix.FixSocketMessageClient;
 import group.gnometrading.gateways.fix.FixTimestampPrecision;
 import group.gnometrading.gateways.fix.FixVersion;
-import group.gnometrading.gateways.inbound.exchanges.binance.BinanceFixSocketReader;
+import group.gnometrading.gateways.inbound.exchanges.binance.BinanceInboundReader;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -95,7 +96,7 @@ public class BinanceInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10
     @SuppressWarnings("unchecked")
     public final SocketReader<Mbp10Schema> provideSocketReader() {
         BinanceCredentials credentials = getInstance(BinanceCredentials.class);
-        return new BinanceFixSocketReader(
+        return new BinanceInboundReader(
                 getInstance(Logger.class),
                 getInstance(SequencedRingBuffer.class),
                 getInstance(EpochNanoClock.class),
@@ -108,7 +109,7 @@ public class BinanceInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10
 
     @Override
     @Provides
-    public final MarketInboundGatewayConfig provideMarketInboundGatewayConfig() {
-        return new MarketInboundGatewayConfig.Builder().build();
+    public final GatewayConfig provideGatewayConfig() {
+        return new GatewayConfig.Builder().build();
     }
 }
