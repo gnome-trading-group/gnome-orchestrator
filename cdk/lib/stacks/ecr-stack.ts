@@ -53,8 +53,10 @@ export class EcrStack extends cdk.Stack {
       assumedBy: new iam.WebIdentityPrincipal(githubOidc.openIdConnectProviderArn, {
         StringEquals: {
           'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
+        },
+        StringLike: {
           'token.actions.githubusercontent.com:sub':
-            'repo:gnome-trading-group/gnome-orchestrator:ref:refs/heads/main',
+            'repo:gnome-trading-group/gnome-orchestrator:ref:refs/tags/*',
         },
       }),
       description: 'Assumed by GitHub Actions gnome-orchestrator CI to push image to ECR',
