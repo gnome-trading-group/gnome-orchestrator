@@ -6,11 +6,10 @@ WORKDIR /app
 ARG GITHUB_ACTOR
 ARG GITHUB_TOKEN
 
-# When testing locally, make sure to copy the m2 folder into the local repo's on any local updates
-# Within the current directory:
-RUN mkdir -p /root/.m2
+# To test local SNAPSHOT dependencies (e.g. gnome-schemas), copy your Maven cache and uncomment:
 # $ cp -r ~/.m2 .
-COPY .m2 /root/.m2
+# RUN mkdir -p /root/.m2
+# COPY .m2 /root/.m2
 
 COPY settings.xml /root/.m2/settings.xml
 COPY pom.xml .

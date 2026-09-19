@@ -1,0 +1,66 @@
+name: Build & Push Orchestrator Docker Image
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          docker build \
+            --build-arg GITHUB_ACTOR=${{ github.actor }} \
+            --build-arg GITHUB_TOKEN=$GITHUB_TOKEN \
+            -t gnome-orchestrator:latest \
+            -t gnome-orchestrator:$SHA \
+            .
+          echo "SHA=$SHA" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials (dev)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_ROLE_ARN_DEV }}
+          aws-region: us-east-1
+
+      - name: Login to ECR (dev)
+        id: login-ecr-dev
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push to dev ECR
+        run: |
+          REGISTRY=${{ steps.login-ecr-dev.outputs.registry }}
+          docker tag gnome-orchestrator:latest $REGISTRY/gnome-orchestrator:latest
+          docker tag gnome-orchestrator:$SHA $REGISTRY/gnome-orchestrator:$SHA
+          docker push $REGISTRY/gnome-orchestrator:latest
+          docker push $REGISTRY/gnome-orchestrator:$SHA
+
+      - name: Configure AWS credentials (prod)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_ROLE_ARN_PROD }}
+          aws-region: us-east-1
+
+      - name: Login to ECR (prod)
+        id: login-ecr-prod
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push to prod ECR
+        run: |
+          REGISTRY=${{ steps.login-ecr-prod.outputs.registry }}
+          docker tag gnome-orchestrator:latest $REGISTRY/gnome-orchestrator:latest
+          docker tag gnome-orchestrator:$SHA $REGISTRY/gnome-orchestrator:$SHA
+          docker push $REGISTRY/gnome-orchestrator:latest
+          docker push $REGISTRY/gnome-orchestrator:$SHA
