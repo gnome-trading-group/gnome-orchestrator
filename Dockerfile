@@ -18,7 +18,7 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # Stage 2: Runtime — unified Java + Python image
-FROM --platform=linux/amd64 python:3.13-slim
+FROM --platform=linux/amd64 python:3.13-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
