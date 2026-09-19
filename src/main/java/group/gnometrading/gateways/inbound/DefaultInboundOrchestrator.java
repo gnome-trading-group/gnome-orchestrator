@@ -73,14 +73,14 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     @Singleton
-    public abstract SocketReader<T> provideSocketReader();
+    public abstract InboundSocketReader<T> provideSocketReader();
 
     @Provides
     public abstract GatewayConfig provideGatewayConfig();
 
     @Provides
     @Singleton
-    public abstract SocketWriter provideSocketWriter();
+    public abstract InboundSocketWriter provideSocketWriter();
 
     @Provides
     @Singleton
@@ -88,7 +88,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         return new InboundGateway(
                 getInstance(Logger.class),
                 getInstance(GatewayConfig.class),
-                getInstance(SocketReader.class),
+                getInstance(InboundSocketReader.class),
                 getInstance(EpochClock.class));
     }
 
@@ -132,15 +132,15 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @SuppressWarnings("unchecked")
     public final void setRawDataSink(RawDataSink sink) {
-        getInstance(SocketReader.class).setRawDataSink(sink);
+        getInstance(InboundSocketReader.class).setRawDataSink(sink);
     }
 
     @SuppressWarnings("unchecked")
     public final void startGatewayAgents() {
         ErrorHandler errorHandler = getInstance(ErrorHandler.class);
         GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(InboundGateway.class), errorHandler));
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(SocketReader.class), errorHandler));
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(SocketWriter.class), errorHandler));
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(InboundSocketReader.class), errorHandler));
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(InboundSocketWriter.class), errorHandler));
     }
 
     @SuppressWarnings("unchecked")
@@ -150,8 +150,8 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         logger.logf(LogMessage.DEBUG, "Configuring listing gateway for: %d", listing.listingId());
 
         SequencedRingBuffer<T> sequencedRingBuffer = getInstance(SequencedRingBuffer.class);
-        SocketWriter socketWriter = getInstance(SocketWriter.class);
-        SocketReader<T> socketReader = getInstance(SocketReader.class);
+        InboundSocketWriter socketWriter = getInstance(InboundSocketWriter.class);
+        InboundSocketReader<T> socketReader = getInstance(InboundSocketReader.class);
         InboundGateway marketInboundGateway = getInstance(InboundGateway.class);
 
         ErrorHandler errorHandler = getInstance(ErrorHandler.class);

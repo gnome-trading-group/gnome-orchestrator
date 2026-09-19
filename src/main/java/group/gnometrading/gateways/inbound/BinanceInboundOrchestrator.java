@@ -78,7 +78,7 @@ public class BinanceInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10
     @Override
     @Provides
     @Singleton
-    public final SocketWriter provideSocketWriter() {
+    public final InboundSocketWriter provideSocketWriter() {
         return new NoOpSocketWriter();
     }
 
@@ -94,7 +94,7 @@ public class BinanceInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10
     @Provides
     @Singleton
     @SuppressWarnings("unchecked")
-    public final SocketReader<Mbp10Schema> provideSocketReader() {
+    public final InboundSocketReader<Mbp10Schema> provideSocketReader() {
         BinanceCredentials credentials = getInstance(BinanceCredentials.class);
         return new BinanceInboundReader(
                 getInstance(Logger.class),

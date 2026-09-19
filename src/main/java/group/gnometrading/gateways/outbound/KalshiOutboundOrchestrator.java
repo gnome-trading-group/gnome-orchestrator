@@ -7,11 +7,10 @@ import group.gnometrading.di.Named;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
-import group.gnometrading.gateways.credentials.PolymarketCredentials;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketAuthHeaders;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketOrderSigner;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketOutboundReader;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketOutboundWriter;
+import group.gnometrading.gateways.credentials.KalshiCredentials;
+import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiAuthSigner;
+import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundReader;
+import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundWriter;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -33,7 +32,7 @@ import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 
-public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchestrator {
+public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrator {
 
     @Provides
     public EpochClock provideEpochClock() {
@@ -47,26 +46,25 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
 
     @Provides
     @Singleton
-    public PolymarketCredentials provideCredentials(SecretsManagerClient secretsManager) {
+    public KalshiCredentials provideCredentials(final SecretsManagerClient secretsManager) {
         final String secretJson = secretsManager
                 .getSecretValue(GetSecretValueRequest.builder()
-                        .secretId("gnome/exchange-credentials/polymarket")
+                        .secretId("gnome/exchange-credentials/kalshi")
                         .build())
                 .secretString();
-        return PolymarketCredentials.fromJson(secretJson);
+        return KalshiCredentials.fromJson(secretJson);
     }
 
     @Provides
-    @Singleton
-    public PolymarketOrderSigner provideOrderSigner(PolymarketCredentials credentials) {
-        return new PolymarketOrderSigner(credentials.ethereumPrivateKey(), credentials.signerAddress());
+    @Named("WRITER")
+    public KalshiAuthSigner provideWriterAuthSigner(final KalshiCredentials credentials) throws IOException {
+        return new KalshiAuthSigner(credentials.apiKey(), credentials.privateKey());
     }
 
     @Provides
-    @Singleton
-    public PolymarketAuthHeaders provideAuthHeaders(PolymarketCredentials credentials) {
-        return new PolymarketAuthHeaders(
-                credentials.apiKey(), credentials.secret(), credentials.passphrase(), credentials.proxyWalletAddress());
+    @Named("READER")
+    public KalshiAuthSigner provideReaderAuthSigner(final KalshiCredentials credentials) throws IOException {
+        return new KalshiAuthSigner(credentials.apiKey(), credentials.privateKey());
     }
 
     @Provides
@@ -76,20 +74,20 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
     }
 
     @Provides
-    @Singleton
-    public URI provideUserWsUri(Properties properties) throws URISyntaxException {
-        return new URI(properties.getStringProperty("polymarket.user.ws.url"));
-    }
-
-    @Provides
-    @Named("CLOB_HOST")
-    public String provideClobHost(Properties properties) throws URISyntaxException {
-        return new URI(properties.getStringProperty("polymarket.clob.url")).getHost();
+    @Named("API_HOST")
+    public String provideApiHost(final Properties properties) throws URISyntaxException {
+        return new URI(properties.getStringProperty("kalshi.api.url")).getHost();
     }
 
     @Provides
     @Singleton
-    public WebSocketClient provideUserWsClient(URI userWsUri) throws IOException {
+    public URI provideUserWsUri(final Properties properties) throws URISyntaxException {
+        return new URI(properties.getStringProperty("kalshi.user.ws.url"));
+    }
+
+    @Provides
+    @Singleton
+    public WebSocketClient provideUserWsClient(final URI userWsUri) throws IOException {
         return new WebSocketClientBuilder()
                 .withURI(userWsUri)
                 .withSocketFactory(new NativeSSLSocketFactory())
@@ -100,7 +98,6 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
     @Provides
     public GatewayConfig provideGatewayConfig() {
         return new GatewayConfig.Builder()
-                .withKeepAliveInterval(Duration.ofSeconds(10))
                 .withMaxSilentInterval(Duration.ofSeconds(30))
                 .build();
     }
@@ -110,23 +107,22 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
             final SequencedRingBuffer<?> orderOutboundBuffer,
             final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             final ErrorHandler errorHandler) {
-        final PolymarketCredentials credentials = getInstance(PolymarketCredentials.class);
         final Logger logger = getInstance(Logger.class);
         final EpochNanoClock nanoClock = getInstance(EpochNanoClock.class);
         final EpochClock epochClock = getInstance(EpochClock.class);
         final Listing listing = getInstance(Listing.class);
         final WebSocketClient wsClient = getInstance(WebSocketClient.class);
-        final String clobHost = getInstance(String.class, "CLOB_HOST");
+        final String apiHost = getInstance(String.class, "API_HOST");
         final GatewayConfig config = getInstance(GatewayConfig.class);
-        final PolymarketOrderSigner orderSigner = getInstance(PolymarketOrderSigner.class);
-        final PolymarketAuthHeaders authHeaders = getInstance(PolymarketAuthHeaders.class);
+        final KalshiAuthSigner writerSigner = getInstance(KalshiAuthSigner.class, "WRITER");
+        final KalshiAuthSigner readerSigner = getInstance(KalshiAuthSigner.class, "READER");
         final HTTPClient httpClient = getInstance(HTTPClient.class);
 
         final ManyToOneRingBuffer<OrderContext> contextQueue = createOrderContextQueue();
         final ManyToOneRingBuffer<OrderContext> rejectQueue = createOrderContextQueue();
         final ManyToOneRingBuffer<OrderContext> completionQueue = createOrderContextQueue();
 
-        final PolymarketOutboundReader reader = new PolymarketOutboundReader(
+        final KalshiOutboundReader reader = new KalshiOutboundReader(
                 logger,
                 execReportBuffer,
                 contextQueue,
@@ -136,19 +132,17 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
                 listing,
                 wsClient,
                 new JsonDecoder(),
-                credentials.apiKey(),
-                credentials.secret(),
-                credentials.passphrase());
+                readerSigner);
 
-        final PolymarketOutboundWriter writer = new PolymarketOutboundWriter(
+        final KalshiOutboundWriter writer = new KalshiOutboundWriter(
                 orderOutboundBuffer,
                 contextQueue,
                 rejectQueue,
                 completionQueue,
                 httpClient,
-                clobHost,
-                orderSigner,
-                authHeaders,
+                apiHost,
+                writerSigner,
+                nanoClock,
                 listing);
 
         return startAgents(reader, writer, config, logger, epochClock, errorHandler);

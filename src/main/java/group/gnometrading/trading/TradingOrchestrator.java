@@ -352,7 +352,7 @@ public class TradingOrchestrator extends Orchestrator {
         String mode = properties.getStringProperty("mode");
 
         if ("paper".equals(mode)) {
-            ExchangeProfileConfig profile = ExchangeProfileConfig.fromProperties(properties);
+            ExchangeProfileConfig profile = ExchangeProfileConfig.resolveForListing(properties, listing.listingId());
             MbpSimulatedExchange exchange = (MbpSimulatedExchange) profile.toSimulatedExchange();
             return new PaperTradingOutboundGateway(
                     exchange,

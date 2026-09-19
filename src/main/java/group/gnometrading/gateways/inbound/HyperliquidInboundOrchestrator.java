@@ -50,9 +50,9 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
     @Override
     @Provides
     @Singleton
-    public final SocketWriter provideSocketWriter() {
+    public final InboundSocketWriter provideSocketWriter() {
         WebSocketClient webSocketClient = getInstance(WebSocketClient.class);
-        return new JsonWebSocketWriter(webSocketClient, new JsonEncoder());
+        return new InboundJsonWebSocketWriter(webSocketClient, new JsonEncoder());
     }
 
     @Override
@@ -67,12 +67,12 @@ public class HyperliquidInboundOrchestrator extends DefaultInboundOrchestrator<M
     @Provides
     @Singleton
     @SuppressWarnings("unchecked")
-    public final SocketReader<Mbp10Schema> provideSocketReader() {
+    public final InboundSocketReader<Mbp10Schema> provideSocketReader() {
         return new HyperliquidInboundReader(
                 getInstance(Logger.class),
                 getInstance(SequencedRingBuffer.class),
                 getInstance(EpochNanoClock.class),
-                getInstance(SocketWriter.class),
+                getInstance(InboundSocketWriter.class),
                 getInstance(Listing.class),
                 getInstance(WebSocketClient.class),
                 new JsonDecoder());
