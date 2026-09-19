@@ -42,7 +42,7 @@ ENV GNOME_JARS=/app/app.jar
 
 # Defaults to latest gnomepy from PyPI; pin with --build-arg GNOMEPY_VERSION=x.y.z
 ARG GNOMEPY_VERSION=""
-RUN if [ -n "$GNOMEPY_VERSION" ]; then pip install "gnomepy==${GNOMEPY_VERSION}"; else pip install gnomepy; fi
+RUN if [ -n "$GNOMEPY_VERSION" ]; then pip install "gnomepy[strategy]==${GNOMEPY_VERSION}"; else pip install "gnomepy[strategy]"; fi
 
 ENV MAIN_CLASS="group.gnometrading.trading.TradingOrchestrator"
 
