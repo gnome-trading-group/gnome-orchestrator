@@ -1,5 +1,7 @@
 package group.gnometrading.trading;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.concurrent.GnomeAgent;
@@ -38,8 +40,6 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
 import group.gnometrading.strategies.StrategyAgent;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Parameter;
