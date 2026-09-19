@@ -67,7 +67,10 @@ export class EcsStack extends cdk.Stack {
     });
     taskRole.addToPolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:gnome/*`],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:gnome/*`,
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:gnomepy/*`,
+      ],
     }));
     taskRole.addToPolicy(new iam.PolicyStatement({
       actions: ['s3:PutObject'],
