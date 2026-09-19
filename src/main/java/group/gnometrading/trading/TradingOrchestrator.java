@@ -38,6 +38,8 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
 import group.gnometrading.strategies.StrategyAgent;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Parameter;
@@ -389,7 +391,17 @@ public class TradingOrchestrator extends Orchestrator {
         }
 
         String className = properties.getStringProperty("strategy.class");
-        Map<String, String> strategyArgs = properties.getPropertiesByPrefix("strategy.args.");
+        Map<String, String> strategyArgs;
+        String argsJson = System.getenv("STRATEGY_ARGS_JSON");
+        if (argsJson != null && !argsJson.isEmpty()) {
+            try {
+                strategyArgs = new ObjectMapper().readValue(argsJson, new TypeReference<>() {});
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to parse STRATEGY_ARGS_JSON", e);
+            }
+        } else {
+            strategyArgs = properties.getPropertiesByPrefix("strategy.args.");
+        }
 
         try {
             Class<?> clazz = Class.forName(className);
