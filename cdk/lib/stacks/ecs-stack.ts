@@ -94,8 +94,8 @@ export class EcsStack extends cdk.Stack {
 
     const taskDefinition = new ecs.FargateTaskDefinition(this, 'OrchestratorTaskDef', {
       family: TASK_DEFINITION_FAMILY,
-      cpu: 2048,
-      memoryLimitMiB: 4096,
+      cpu: 4096,
+      memoryLimitMiB: 8192,
       executionRole,
       taskRole,
     });
