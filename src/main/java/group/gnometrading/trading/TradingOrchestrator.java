@@ -183,7 +183,7 @@ public class TradingOrchestrator extends Orchestrator {
         OmsAgent omsAgent =
                 new OmsAgent(oms, intentBuffer, omsExecReportBuffer, orderOutboundBuffer, stratExecReportBuffer);
         StrategyAgent strategy = createStrategyAgent(
-                strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
+                strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
 
         RegistryConnection registryConnection = getInstance(RegistryConnection.class);
         EpochClock epochClock = SystemEpochClock.INSTANCE;
@@ -423,6 +423,7 @@ public class TradingOrchestrator extends Orchestrator {
     }
 
     private StrategyAgent createStrategyAgent(
+            int strategyId,
             SequencedRingBuffer<?> mdBuf,
             SequencedRingBuffer<OrderExecutionReport> erBuf,
             SequencedRingBuffer<Intent> intentBuf,
@@ -438,7 +439,7 @@ public class TradingOrchestrator extends Orchestrator {
                         "Python strategy callback not set. Call PythonStrategyAgent.setCallback() before Orchestrator.main().");
             }
             return PythonStrategyAgent.createWithBuffers(
-                    mdBuf, erBuf, intentBuf, positionView, securityMaster, callback);
+                    strategyId, mdBuf, erBuf, intentBuf, positionView, securityMaster, callback);
         }
 
         String className = properties.getStringProperty("strategy.class");
@@ -458,7 +459,7 @@ public class TradingOrchestrator extends Orchestrator {
             Class<?> clazz = Class.forName(className);
             for (Constructor<?> ctor : clazz.getConstructors()) {
                 StrategyAgent result = tryInstantiateConstructor(
-                        ctor, mdBuf, erBuf, intentBuf, positionView, securityMaster, strategyArgs);
+                        ctor, strategyId, mdBuf, erBuf, intentBuf, positionView, securityMaster, strategyArgs);
                 if (result != null) {
                     return result;
                 }
@@ -474,6 +475,7 @@ public class TradingOrchestrator extends Orchestrator {
 
     private static StrategyAgent tryInstantiateConstructor(
             Constructor<?> ctor,
+            int strategyId,
             SequencedRingBuffer<?> mdBuf,
             SequencedRingBuffer<OrderExecutionReport> erBuf,
             SequencedRingBuffer<Intent> intentBuf,
@@ -482,40 +484,42 @@ public class TradingOrchestrator extends Orchestrator {
             Map<String, Object> strategyArgs)
             throws ReflectiveOperationException {
         Parameter[] params = ctor.getParameters();
-        if (params.length < 5 || !isInfrastructureParams(params)) {
+        if (params.length < 6 || !isInfrastructureParams(params)) {
             return null;
         }
-        if (params.length == 5 && strategyArgs.isEmpty()) {
-            return (StrategyAgent) ctor.newInstance(mdBuf, erBuf, intentBuf, positionView, securityMaster);
+        if (params.length == 6 && strategyArgs.isEmpty()) {
+            return (StrategyAgent) ctor.newInstance(strategyId, mdBuf, erBuf, intentBuf, positionView, securityMaster);
         }
-        if (params.length - 5 != strategyArgs.size()) {
+        if (params.length - 6 != strategyArgs.size()) {
             return null;
         }
         Set<String> userParamNames = new HashSet<>();
-        for (int i = 5; i < params.length; i++) {
+        for (int i = 6; i < params.length; i++) {
             userParamNames.add(params[i].getName());
         }
         if (!userParamNames.equals(strategyArgs.keySet())) {
             return null;
         }
         Object[] args = new Object[params.length];
-        args[0] = mdBuf;
-        args[1] = erBuf;
-        args[2] = intentBuf;
-        args[3] = positionView;
-        args[4] = securityMaster;
-        for (int i = 5; i < params.length; i++) {
+        args[0] = strategyId;
+        args[1] = mdBuf;
+        args[2] = erBuf;
+        args[3] = intentBuf;
+        args[4] = positionView;
+        args[5] = securityMaster;
+        for (int i = 6; i < params.length; i++) {
             args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i]);
         }
         return (StrategyAgent) ctor.newInstance(args);
     }
 
     private static boolean isInfrastructureParams(Parameter[] params) {
-        return SequencedRingBuffer.class.isAssignableFrom(params[0].getType())
+        return int.class == params[0].getType()
                 && SequencedRingBuffer.class.isAssignableFrom(params[1].getType())
                 && SequencedRingBuffer.class.isAssignableFrom(params[2].getType())
-                && PositionView.class.isAssignableFrom(params[3].getType())
-                && SecurityMaster.class.isAssignableFrom(params[4].getType());
+                && SequencedRingBuffer.class.isAssignableFrom(params[3].getType())
+                && PositionView.class.isAssignableFrom(params[4].getType())
+                && SecurityMaster.class.isAssignableFrom(params[5].getType());
     }
 
     private static Object convertStrategyArg(Object value, Parameter param) {
