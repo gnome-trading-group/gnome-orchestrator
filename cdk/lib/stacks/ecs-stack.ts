@@ -51,6 +51,7 @@ export class EcsStack extends cdk.Stack {
     const cluster = new ecs.Cluster(this, 'OrchestratorCluster', {
       clusterName: CLUSTER_NAME,
       vpc,
+      containerInsights: true,
     });
 
     const executionRole = new iam.Role(this, 'TaskExecutionRole', {
