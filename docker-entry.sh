@@ -32,7 +32,7 @@ PY
     git -C "$REPO_DIR" --no-pager log -1 --oneline
 
     echo "entrypoint: installing gnomepy-research"
-    pip install --quiet --no-deps "$REPO_DIR"
+    pip install --quiet --no-deps --break-system-packages "$REPO_DIR"
 
     unset GH_TOKEN
 

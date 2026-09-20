@@ -18,7 +18,8 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # Stage 2: Runtime — unified Java + Python image
-FROM --platform=linux/amd64 python:3.13-slim-bookworm
+# ubuntu:24.04 required for GLIBCXX_3.4.32 compatibility with libNativeSockets.so
+FROM --platform=linux/amd64 ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -28,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
         openjdk-17-jre-headless \
+        python3 \
+        python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf "$(dirname "$(dirname "$(readlink -f "$(which java)")")")" /usr/lib/jvm/current
@@ -42,7 +45,7 @@ ENV GNOME_JARS=/app/app.jar
 
 # Defaults to latest gnomepy from PyPI; pin with --build-arg GNOMEPY_VERSION=x.y.z
 ARG GNOMEPY_VERSION=""
-RUN if [ -n "$GNOMEPY_VERSION" ]; then pip install "gnomepy[strategy]==${GNOMEPY_VERSION}"; else pip install "gnomepy[strategy]"; fi
+RUN if [ -n "$GNOMEPY_VERSION" ]; then pip install --break-system-packages "gnomepy[strategy]==${GNOMEPY_VERSION}"; else pip install --break-system-packages "gnomepy[strategy]"; fi
 
 ENV MAIN_CLASS="group.gnometrading.trading.TradingOrchestrator"
 
