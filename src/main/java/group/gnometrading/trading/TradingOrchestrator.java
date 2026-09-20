@@ -175,35 +175,10 @@ public class TradingOrchestrator extends Orchestrator {
         SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer =
                 new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
 
-        List<GnomeAgent> outboundAgents = new ArrayList<>(listings.size());
-        ExchangeRouter routerAgent = null;
-
-        if (listings.size() == 1) {
-            outboundAgents.add(createOutboundGateway(
-                    listings.get(0), perListingMdBuffers.get(0), orderOutboundBuffer, omsExecReportBuffer));
-        } else {
-            Map<Integer, SequencedRingBuffer<?>> perExchangeOutBufs = new HashMap<>();
-            List<SequencedRingBuffer<OrderExecutionReport>> perExchangeExecBufs = new ArrayList<>(listings.size());
-
-            for (int i = 0; i < listings.size(); i++) {
-                Listing listing = listings.get(i);
-                int exchangeId = listing.exchange().exchangeId();
-
-                SequencedRingBuffer<Intent> perExchangeOutBuf =
-                        new SequencedRingBuffer<>(Intent::new, globalSequence, OUTBOUND_BUFFER_SIZE);
-                SequencedRingBuffer<OrderExecutionReport> perExchangeExecBuf =
-                        new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
-
-                perExchangeOutBufs.put(exchangeId, perExchangeOutBuf);
-                perExchangeExecBufs.add(perExchangeExecBuf);
-
-                outboundAgents.add(createOutboundGateway(
-                        listing, perListingMdBuffers.get(i), perExchangeOutBuf, perExchangeExecBuf));
-            }
-
-            routerAgent = new ExchangeRouter(
-                    orderOutboundBuffer, perExchangeOutBufs, perExchangeExecBufs, omsExecReportBuffer);
-        }
+        OutboundSetup outboundSetup =
+                setupOutbound(listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, globalSequence);
+        List<GnomeAgent> outboundAgents = outboundSetup.agents();
+        ExchangeRouter routerAgent = outboundSetup.router();
 
         OmsAgent omsAgent =
                 new OmsAgent(oms, intentBuffer, omsExecReportBuffer, orderOutboundBuffer, stratExecReportBuffer);
@@ -243,7 +218,7 @@ public class TradingOrchestrator extends Orchestrator {
         journaledBuffers.add(omsExecReportBuffer);
         wireJournal(strategyId, sessionId, journaledBuffers, epochClock, errorHandler, logger, properties);
 
-        startAgentRunners(
+        AgentRunners runners = startAgentRunners(
                 inbounds,
                 omsAgent,
                 outboundAgents,
@@ -254,6 +229,18 @@ public class TradingOrchestrator extends Orchestrator {
                 priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            closeQuietly(runners.strategy());
+            closeQuietly(runners.oms());
+            closeQuietly(runners.router());
+            for (GnomeAgentRunner outbound : runners.outboundAgents()) {
+                closeQuietly(outbound);
+            }
+            closeQuietly(runners.mux());
+            closeQuietly(runners.pnl());
+            closeQuietly(runners.priceWriter());
+            closeQuietly(runners.riskSync());
+        }));
     }
 
     private void wireJournal(
@@ -302,7 +289,50 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
-    private static void startAgentRunners(
+    private record OutboundSetup(List<GnomeAgent> agents, ExchangeRouter router) {}
+
+    private OutboundSetup setupOutbound(
+            List<Listing> listings,
+            List<SequencedRingBuffer<?>> perListingMdBuffers,
+            SequencedRingBuffer<Intent> orderOutboundBuffer,
+            SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
+            GlobalSequence globalSequence) {
+        List<GnomeAgent> agents = new ArrayList<>(listings.size());
+        if (listings.size() == 1) {
+            agents.add(createOutboundGateway(
+                    listings.get(0), perListingMdBuffers.get(0), orderOutboundBuffer, omsExecReportBuffer));
+            return new OutboundSetup(agents, null);
+        }
+        Map<Integer, SequencedRingBuffer<?>> perExchangeOutBufs = new HashMap<>();
+        List<SequencedRingBuffer<OrderExecutionReport>> perExchangeExecBufs = new ArrayList<>(listings.size());
+        for (int i = 0; i < listings.size(); i++) {
+            Listing listing = listings.get(i);
+            int exchangeId = listing.exchange().exchangeId();
+            SequencedRingBuffer<Intent> perExchangeOutBuf =
+                    new SequencedRingBuffer<>(Intent::new, globalSequence, OUTBOUND_BUFFER_SIZE);
+            SequencedRingBuffer<OrderExecutionReport> perExchangeExecBuf =
+                    new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
+            perExchangeOutBufs.put(exchangeId, perExchangeOutBuf);
+            perExchangeExecBufs.add(perExchangeExecBuf);
+            agents.add(
+                    createOutboundGateway(listing, perListingMdBuffers.get(i), perExchangeOutBuf, perExchangeExecBuf));
+        }
+        return new OutboundSetup(
+                agents,
+                new ExchangeRouter(orderOutboundBuffer, perExchangeOutBufs, perExchangeExecBufs, omsExecReportBuffer));
+    }
+
+    private record AgentRunners(
+            GnomeAgentRunner strategy,
+            GnomeAgentRunner oms,
+            List<GnomeAgentRunner> outboundAgents,
+            GnomeAgentRunner mux,
+            GnomeAgentRunner router,
+            GnomeAgentRunner pnl,
+            GnomeAgentRunner priceWriter,
+            GnomeAgentRunner riskSync) {}
+
+    private static AgentRunners startAgentRunners(
             List<DefaultInboundOrchestrator<?>> inbounds,
             OmsAgent omsAgent,
             List<GnomeAgent> outboundAgents,
@@ -316,22 +346,54 @@ public class TradingOrchestrator extends Orchestrator {
         for (DefaultInboundOrchestrator<?> inbound : inbounds) {
             inbound.startGatewayAgents();
         }
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(omsAgent, errorHandler));
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(priceWriterAgent, errorHandler));
+        GnomeAgentRunner omsRunner = new GnomeAgentRunner(omsAgent, errorHandler);
+        GnomeAgentRunner.startOnThread(omsRunner);
+        GnomeAgentRunner priceWriterRunner = new GnomeAgentRunner(priceWriterAgent, errorHandler);
+        GnomeAgentRunner.startOnThread(priceWriterRunner);
+        List<GnomeAgentRunner> outboundRunners = new ArrayList<>(outboundAgents.size());
         for (GnomeAgent outbound : outboundAgents) {
-            GnomeAgentRunner.startOnThread(new GnomeAgentRunner(outbound, errorHandler));
+            GnomeAgentRunner runner = new GnomeAgentRunner(outbound, errorHandler);
+            GnomeAgentRunner.startOnThread(runner);
+            outboundRunners.add(runner);
         }
+        GnomeAgentRunner muxRunner = null;
         if (muxAgent != null) {
-            GnomeAgentRunner.startOnThread(new GnomeAgentRunner(muxAgent, errorHandler));
+            muxRunner = new GnomeAgentRunner(muxAgent, errorHandler);
+            GnomeAgentRunner.startOnThread(muxRunner);
         }
+        GnomeAgentRunner routerRunner = null;
         if (routerAgent != null) {
-            GnomeAgentRunner.startOnThread(new GnomeAgentRunner(routerAgent, errorHandler));
+            routerRunner = new GnomeAgentRunner(routerAgent, errorHandler);
+            GnomeAgentRunner.startOnThread(routerRunner);
         }
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(strategy, errorHandler));
+        GnomeAgentRunner strategyRunner = new GnomeAgentRunner(strategy, errorHandler);
+        GnomeAgentRunner.startOnThread(strategyRunner);
+        GnomeAgentRunner pnlRunner = null;
         if (pnlReportingAgent != null) {
-            GnomeAgentRunner.startOnThread(new GnomeAgentRunner(pnlReportingAgent, errorHandler));
+            pnlRunner = new GnomeAgentRunner(pnlReportingAgent, errorHandler);
+            GnomeAgentRunner.startOnThread(pnlRunner);
         }
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(riskSyncAgent, errorHandler));
+        GnomeAgentRunner riskSyncRunner = new GnomeAgentRunner(riskSyncAgent, errorHandler);
+        GnomeAgentRunner.startOnThread(riskSyncRunner);
+        return new AgentRunners(
+                strategyRunner,
+                omsRunner,
+                outboundRunners,
+                muxRunner,
+                routerRunner,
+                pnlRunner,
+                priceWriterRunner,
+                riskSyncRunner);
+    }
+
+    private static void closeQuietly(GnomeAgentRunner runner) {
+        if (runner == null) {
+            return;
+        }
+        try {
+            runner.close();
+        } catch (Exception ignored) { // best-effort close on shutdown
+        }
     }
 
     private GnomeAgent createOutboundGateway(

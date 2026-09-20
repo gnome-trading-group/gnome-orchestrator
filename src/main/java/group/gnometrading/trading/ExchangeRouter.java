@@ -64,6 +64,20 @@ public final class ExchangeRouter implements GnomeAgent {
     public void onStart() {}
 
     @Override
+    public void onClose() {
+        try {
+            orderPoller.poll();
+        } catch (Exception e) { // best-effort drain on shutdown
+        }
+        for (SequencedPoller poller : execReportPollers) {
+            try {
+                poller.poll();
+            } catch (Exception e) { // best-effort drain on shutdown
+            }
+        }
+    }
+
+    @Override
     public int doWork() throws Exception {
         int work = 0;
         work += orderPoller.poll();

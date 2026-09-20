@@ -591,7 +591,7 @@ class PaperTradingOutboundGatewayTest {
 
     private void publishCancelOrder() {
         final CancelOrder cancel = new CancelOrder();
-        cancel.encoder.exchangeId((short) 1).securityId(1).orderId(42L);
+        cancel.encoder.exchangeId((short) 1).securityId(1);
         cancel.encodeClientOid(1L, 0);
         orderBuffer.publishRaw(cancel.buffer, cancel.messageHeaderDecoder.templateId(), cancel.totalMessageSize());
     }
@@ -601,7 +601,6 @@ class PaperTradingOutboundGatewayTest {
         modify.encoder
                 .exchangeId((short) 1)
                 .securityId(1)
-                .orderId(42L)
                 .price(60 * P)
                 .size(20 * S)
                 .orderType(OrderType.LIMIT)
