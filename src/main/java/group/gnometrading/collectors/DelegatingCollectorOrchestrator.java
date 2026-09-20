@@ -1,5 +1,7 @@
 package group.gnometrading.collectors;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collector.MarketDataCollector;
 import group.gnometrading.collector.RawDataCollector;
@@ -30,6 +32,8 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
     static {
         instanceClass = DelegatingCollectorOrchestrator.class;
     }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Provides
     public final Clock provideClock() {
@@ -63,12 +67,11 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
     @Named("LISTING_IDS")
     public final int[] provideListingIds(Properties properties) {
         if (properties.hasProperty("listings")) {
-            String[] parts = properties.getStringProperty("listings").split(",");
-            int[] ids = new int[parts.length];
-            for (int i = 0; i < parts.length; i++) {
-                ids[i] = Integer.parseInt(parts[i].trim());
+            try {
+                return MAPPER.readValue(properties.getStringProperty("listings"), int[].class);
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException("Failed to parse listings property", e);
             }
-            return ids;
         }
         return new int[] {properties.getIntProperty("listing")};
     }

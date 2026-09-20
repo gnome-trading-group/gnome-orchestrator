@@ -1,5 +1,6 @@
 package group.gnometrading.trading;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,7 +48,6 @@ import java.lang.reflect.Parameter;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -81,7 +81,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  * on the outbound side so the strategy and OMS always see single buffers regardless of the number
  * of exchanges.
  *
- * <p>Configure via the {@code listings} property (comma-separated listing IDs).
+ * <p>Configure via the {@code listings} property (JSON array of listing IDs, e.g. {@code [1,2,3]}).
  */
 public class TradingOrchestrator extends Orchestrator {
 
@@ -488,10 +488,15 @@ public class TradingOrchestrator extends Orchestrator {
     }
 
     private List<Listing> resolveListings(Properties properties, SecurityMaster securityMaster) {
-        return Arrays.stream(properties.getStringProperty("listings").split(","))
-                .map(String::trim)
-                .map(Integer::parseInt)
-                .map(securityMaster::getListing)
-                .toList();
+        try {
+            int[] ids = MAPPER.readValue(properties.getStringProperty("listings"), int[].class);
+            List<Listing> result = new ArrayList<>(ids.length);
+            for (int id : ids) {
+                result.add(securityMaster.getListing(id));
+            }
+            return result;
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to parse listings property", e);
+        }
     }
 }
