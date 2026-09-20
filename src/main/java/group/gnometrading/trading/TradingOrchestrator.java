@@ -1,6 +1,7 @@
 package group.gnometrading.trading;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
@@ -52,7 +53,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Function;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -92,18 +92,7 @@ public class TradingOrchestrator extends Orchestrator {
     private static final int OUTBOUND_BUFFER_SIZE = 64;
     private static final Duration DEFAULT_PNL_FLUSH_INTERVAL = Duration.ofSeconds(30);
 
-    private static final Map<Class<?>, Function<String, Object>> CONVERTERS = Map.ofEntries(
-            Map.entry(String.class, (Function<String, Object>) v -> v),
-            Map.entry(int.class, Integer::parseInt),
-            Map.entry(Integer.class, Integer::parseInt),
-            Map.entry(long.class, Long::parseLong),
-            Map.entry(Long.class, Long::parseLong),
-            Map.entry(double.class, Double::parseDouble),
-            Map.entry(Double.class, Double::parseDouble),
-            Map.entry(float.class, Float::parseFloat),
-            Map.entry(Float.class, Float::parseFloat),
-            Map.entry(boolean.class, Boolean::parseBoolean),
-            Map.entry(Boolean.class, Boolean::parseBoolean));
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Provides
     @Singleton
@@ -391,16 +380,16 @@ public class TradingOrchestrator extends Orchestrator {
         }
 
         String className = properties.getStringProperty("strategy.class");
-        Map<String, String> strategyArgs;
+        Map<String, Object> strategyArgs;
         String argsJson = System.getenv("STRATEGY_ARGS_JSON");
         if (argsJson != null && !argsJson.isEmpty()) {
             try {
-                strategyArgs = new ObjectMapper().readValue(argsJson, new TypeReference<>() {});
+                strategyArgs = MAPPER.readValue(argsJson, new TypeReference<>() {});
             } catch (IOException e) {
                 throw new RuntimeException("Failed to parse STRATEGY_ARGS_JSON", e);
             }
         } else {
-            strategyArgs = properties.getPropertiesByPrefix("strategy.args.");
+            strategyArgs = new HashMap<>(properties.getPropertiesByPrefix("strategy.args."));
         }
 
         try {
@@ -428,7 +417,7 @@ public class TradingOrchestrator extends Orchestrator {
             SequencedRingBuffer<Intent> intentBuf,
             PositionView positionView,
             SecurityMaster securityMaster,
-            Map<String, String> strategyArgs)
+            Map<String, Object> strategyArgs)
             throws ReflectiveOperationException {
         Parameter[] params = ctor.getParameters();
         if (params.length < 5 || !isInfrastructureParams(params)) {
@@ -454,7 +443,7 @@ public class TradingOrchestrator extends Orchestrator {
         args[3] = positionView;
         args[4] = securityMaster;
         for (int i = 5; i < params.length; i++) {
-            args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i].getType());
+            args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i]);
         }
         return (StrategyAgent) ctor.newInstance(args);
     }
@@ -467,12 +456,35 @@ public class TradingOrchestrator extends Orchestrator {
                 && SecurityMaster.class.isAssignableFrom(params[4].getType());
     }
 
-    private static Object convertStrategyArg(String value, Class<?> type) {
-        Function<String, Object> converter = CONVERTERS.get(type);
-        if (converter == null) {
-            throw new IllegalArgumentException("Unsupported strategy arg type: " + type.getName());
+    private static Object convertStrategyArg(Object value, Parameter param) {
+        Class<?> type = param.getType();
+        if (type.isInstance(value)) {
+            return value;
         }
-        return converter.apply(value);
+        if (value instanceof Number num) {
+            return coerceNumber(num, type);
+        }
+        if (type == String.class) {
+            return String.valueOf(value);
+        }
+        JavaType javaType = MAPPER.getTypeFactory().constructType(param.getParameterizedType());
+        return MAPPER.convertValue(value, javaType);
+    }
+
+    private static Object coerceNumber(Number num, Class<?> type) {
+        if (type == int.class || type == Integer.class) {
+            return num.intValue();
+        }
+        if (type == long.class || type == Long.class) {
+            return num.longValue();
+        }
+        if (type == double.class || type == Double.class) {
+            return num.doubleValue();
+        }
+        if (type == float.class || type == Float.class) {
+            return num.floatValue();
+        }
+        throw new IllegalArgumentException("Cannot coerce Number to " + type.getName());
     }
 
     private List<Listing> resolveListings(Properties properties, SecurityMaster securityMaster) {
