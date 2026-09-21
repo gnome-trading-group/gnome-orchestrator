@@ -180,8 +180,13 @@ public class TradingOrchestrator extends Orchestrator {
         List<GnomeAgent> outboundAgents = outboundSetup.agents();
         ExchangeRouter routerAgent = outboundSetup.router();
 
-        OmsAgent omsAgent =
-                new OmsAgent(oms, intentBuffer, omsExecReportBuffer, orderOutboundBuffer, stratExecReportBuffer);
+        OmsAgent omsAgent = new OmsAgent(
+                oms,
+                intentBuffer,
+                omsExecReportBuffer,
+                orderOutboundBuffer,
+                stratExecReportBuffer,
+                getInstance(EpochNanoClock.class));
         StrategyAgent strategy = createStrategyAgent(
                 strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
 

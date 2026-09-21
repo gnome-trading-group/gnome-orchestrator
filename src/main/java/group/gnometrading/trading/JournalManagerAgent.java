@@ -12,6 +12,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import org.agrona.concurrent.EpochClock;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -69,6 +71,10 @@ public final class JournalManagerAgent implements GnomeAgent {
     @Override
     public int doWork() {
         flushSchedule.check();
+        long remainingMs = flushSchedule.millisUntilNext();
+        if (remainingMs > 0) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(Math.min(remainingMs, 1000L)));
+        }
         return 0;
     }
 
