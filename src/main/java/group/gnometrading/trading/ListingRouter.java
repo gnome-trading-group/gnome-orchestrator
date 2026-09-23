@@ -16,48 +16,48 @@ import java.util.Map;
 import org.agrona.concurrent.UnsafeBuffer;
 
 /**
- * Handles cross-exchange order routing and execution report aggregation for multi-listing sessions.
+ * Handles per-listing order routing and execution report aggregation for multi-listing sessions.
  *
  * <p>In the outbound direction: reads Order/CancelOrder/ModifyOrder messages from the OMS outbound
- * buffer, inspects {@code exchangeId}, and routes each message to the correct per-exchange outbound
- * buffer consumed by the corresponding outbound gateway.
+ * buffer, inspects {@code exchangeId} and {@code securityId}, and routes each message to the
+ * correct per-listing outbound buffer consumed by the corresponding outbound gateway.
  *
- * <p>In the inbound direction: polls all per-exchange execution report buffers and forwards every
+ * <p>In the inbound direction: polls all per-listing execution report buffers and forwards every
  * report to the single combined execution report buffer consumed by the OmsAgent.
  *
- * <p>Runs on its own thread. Is the sole producer of each per-exchange outbound buffer and of the
+ * <p>Runs on its own thread. Is the sole producer of each per-listing outbound buffer and of the
  * combined execution report buffer, satisfying the single-producer constraint.
  *
- * <p>Only instantiated for multi-exchange sessions. Single-exchange sessions wire buffers directly
+ * <p>Only instantiated for multi-listing sessions. Single-listing sessions wire buffers directly
  * with no routing hop.
  */
-public final class ExchangeRouter implements GnomeAgent {
+public final class ListingRouter implements GnomeAgent {
 
     private final SequencedPoller orderPoller;
     private final List<SequencedPoller> execReportPollers;
-    private final Map<Integer, SequencedRingBuffer<?>> outboundByExchangeId;
+    private final Map<Long, SequencedRingBuffer<?>> outboundByListing;
     private final SequencedRingBuffer<OrderExecutionReport> combinedExecReportBuffer;
 
     private final Order order = new Order();
     private final CancelOrder cancelOrder = new CancelOrder();
     private final ModifyOrder modifyOrder = new ModifyOrder();
 
-    public ExchangeRouter(
+    public ListingRouter(
             SequencedRingBuffer<?> orderOutboundBuffer,
-            Map<Integer, SequencedRingBuffer<?>> outboundByExchangeId,
-            Collection<SequencedRingBuffer<OrderExecutionReport>> perExchangeExecReportBuffers,
+            Map<Long, SequencedRingBuffer<?>> outboundByListing,
+            Collection<SequencedRingBuffer<OrderExecutionReport>> perListingExecReportBuffers,
             SequencedRingBuffer<OrderExecutionReport> combinedExecReportBuffer) {
-        this.outboundByExchangeId = outboundByExchangeId;
+        this.outboundByListing = outboundByListing;
         this.combinedExecReportBuffer = combinedExecReportBuffer;
         this.orderPoller = orderOutboundBuffer.createPoller(this::onOrderOutbound);
-        this.execReportPollers = perExchangeExecReportBuffers.stream()
+        this.execReportPollers = perListingExecReportBuffers.stream()
                 .map(buf -> buf.createPoller(this::onExecReport))
                 .toList();
     }
 
     @Override
     public String roleName() {
-        return "exchange-router";
+        return "listing-router";
     }
 
     @Override
@@ -88,27 +88,31 @@ public final class ExchangeRouter implements GnomeAgent {
     }
 
     private void onOrderOutbound(long globalSeq, int templateId, UnsafeBuffer buf, int len) throws Exception {
-        int exchangeId = readExchangeId(templateId, buf);
-        if (exchangeId >= 0) {
-            SequencedRingBuffer<?> target = outboundByExchangeId.get(exchangeId);
+        long key = readRoutingKey(templateId, buf);
+        if (key >= 0) {
+            SequencedRingBuffer<?> target = outboundByListing.get(key);
             if (target != null) {
                 target.publishRaw(buf, templateId, len);
             }
         }
     }
 
-    private int readExchangeId(int templateId, UnsafeBuffer buf) {
+    private long readRoutingKey(int templateId, UnsafeBuffer buf) {
         if (templateId == OrderDecoder.TEMPLATE_ID) {
             order.wrap(buf);
-            return order.decoder.exchangeId();
+            return routingKey(order.decoder.exchangeId(), order.decoder.securityId());
         } else if (templateId == CancelOrderDecoder.TEMPLATE_ID) {
             cancelOrder.wrap(buf);
-            return cancelOrder.decoder.exchangeId();
+            return routingKey(cancelOrder.decoder.exchangeId(), cancelOrder.decoder.securityId());
         } else if (templateId == ModifyOrderDecoder.TEMPLATE_ID) {
             modifyOrder.wrap(buf);
-            return modifyOrder.decoder.exchangeId();
+            return routingKey(modifyOrder.decoder.exchangeId(), modifyOrder.decoder.securityId());
         }
-        return -1;
+        return -1L;
+    }
+
+    static long routingKey(int exchangeId, long securityId) {
+        return ((long) exchangeId << 32) | (securityId & 0xFFFFFFFFL);
     }
 
     private void onExecReport(long globalSeq, int templateId, UnsafeBuffer buf, int len) throws Exception {

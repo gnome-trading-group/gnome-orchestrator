@@ -77,7 +77,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  * </ul>
  *
  * <p>Single-listing sessions wire buffers directly — no mux/demux agents are created. Multi-listing
- * sessions insert a {@link MarketDataMultiplexer} on the inbound side and an {@link ExchangeRouter}
+ * sessions insert a {@link MarketDataMultiplexer} on the inbound side and an {@link ListingRouter}
  * on the outbound side so the strategy and OMS always see single buffers regardless of the number
  * of exchanges.
  *
@@ -178,7 +178,7 @@ public class TradingOrchestrator extends Orchestrator {
         OutboundSetup outboundSetup =
                 setupOutbound(listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, globalSequence);
         List<GnomeAgent> outboundAgents = outboundSetup.agents();
-        ExchangeRouter routerAgent = outboundSetup.router();
+        ListingRouter routerAgent = outboundSetup.router();
 
         OmsAgent omsAgent = new OmsAgent(
                 oms,
@@ -294,7 +294,7 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
-    private record OutboundSetup(List<GnomeAgent> agents, ExchangeRouter router) {}
+    private record OutboundSetup(List<GnomeAgent> agents, ListingRouter router) {}
 
     private OutboundSetup setupOutbound(
             List<Listing> listings,
@@ -308,23 +308,24 @@ public class TradingOrchestrator extends Orchestrator {
                     listings.get(0), perListingMdBuffers.get(0), orderOutboundBuffer, omsExecReportBuffer));
             return new OutboundSetup(agents, null);
         }
-        Map<Integer, SequencedRingBuffer<?>> perExchangeOutBufs = new HashMap<>();
+        Map<Long, SequencedRingBuffer<?>> perListingOutBufs = new HashMap<>();
         List<SequencedRingBuffer<OrderExecutionReport>> perExchangeExecBufs = new ArrayList<>(listings.size());
         for (int i = 0; i < listings.size(); i++) {
             Listing listing = listings.get(i);
-            int exchangeId = listing.exchange().exchangeId();
+            long routingKey = ListingRouter.routingKey(
+                    listing.exchange().exchangeId(), listing.security().securityId());
             SequencedRingBuffer<Intent> perExchangeOutBuf =
                     new SequencedRingBuffer<>(Intent::new, globalSequence, OUTBOUND_BUFFER_SIZE);
             SequencedRingBuffer<OrderExecutionReport> perExchangeExecBuf =
                     new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
-            perExchangeOutBufs.put(exchangeId, perExchangeOutBuf);
+            perListingOutBufs.put(routingKey, perExchangeOutBuf);
             perExchangeExecBufs.add(perExchangeExecBuf);
             agents.add(
                     createOutboundGateway(listing, perListingMdBuffers.get(i), perExchangeOutBuf, perExchangeExecBuf));
         }
         return new OutboundSetup(
                 agents,
-                new ExchangeRouter(orderOutboundBuffer, perExchangeOutBufs, perExchangeExecBufs, omsExecReportBuffer));
+                new ListingRouter(orderOutboundBuffer, perListingOutBufs, perExchangeExecBufs, omsExecReportBuffer));
     }
 
     private record AgentRunners(
@@ -342,7 +343,7 @@ public class TradingOrchestrator extends Orchestrator {
             OmsAgent omsAgent,
             List<GnomeAgent> outboundAgents,
             MarketDataMultiplexer muxAgent,
-            ExchangeRouter routerAgent,
+            ListingRouter routerAgent,
             StrategyAgent strategy,
             PnlReportingAgent pnlReportingAgent,
             PriceWriterAgent priceWriterAgent,
