@@ -81,6 +81,15 @@ export class EcsStack extends cdk.Stack {
       actions: ['apigateway:GET'],
       resources: [`arn:aws:apigateway:us-east-1::/apikeys/${props.registryApiKeyId}`],
     }));
+    taskRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'ssmmessages:CreateControlChannel',
+        'ssmmessages:CreateDataChannel',
+        'ssmmessages:OpenControlChannel',
+        'ssmmessages:OpenDataChannel',
+      ],
+      resources: ['*'],
+    }));
 
     const logGroup = new logs.LogGroup(this, 'OrchestratorLogGroup', {
       logGroupName: `/gnome/orchestrator/${this.region}`,
