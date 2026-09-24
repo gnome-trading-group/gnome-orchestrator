@@ -22,7 +22,11 @@ FROM --platform=linux/amd64 python:3.13-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
 
 # trixie ships libstdc++6 with GLIBCXX_3.4.32, required by libNativeSockets.so
 # (bookworm's GCC 12 only goes to GLIBCXX_3.4.31)

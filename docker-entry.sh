@@ -51,5 +51,6 @@ else
               --add-opens=java.base/java.lang.reflect=ALL-UNNAMED \
               --add-opens=java.base/java.util=ALL-UNNAMED \
               --add-opens=jdk.compiler/com.sun.tools.javac=ALL-UNNAMED \
+              -XX:+UseZGC -XX:ConcGCThreads=2 \
               -cp app.jar "$MAIN_CLASS"
 fi

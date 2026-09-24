@@ -126,6 +126,10 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
         final ManyToOneRingBuffer<OrderContext> rejectQueue = createOrderContextQueue();
         final ManyToOneRingBuffer<OrderContext> completionQueue = createOrderContextQueue();
 
+        final Properties properties = getInstance(Properties.class);
+        final double takerFee = properties.getDoubleProperty("polymarket.taker.fee");
+        final double makerFee = properties.getDoubleProperty("polymarket.maker.fee");
+
         final PolymarketOutboundReader reader = new PolymarketOutboundReader(
                 logger,
                 execReportBuffer,
@@ -138,7 +142,9 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
                 new JsonDecoder(),
                 credentials.apiKey(),
                 credentials.secret(),
-                credentials.passphrase());
+                credentials.passphrase(),
+                takerFee,
+                makerFee);
 
         final PolymarketOutboundWriter writer = new PolymarketOutboundWriter(
                 orderOutboundBuffer,

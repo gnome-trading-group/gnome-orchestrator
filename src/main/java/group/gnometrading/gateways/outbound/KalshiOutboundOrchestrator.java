@@ -122,6 +122,10 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
         final ManyToOneRingBuffer<OrderContext> rejectQueue = createOrderContextQueue();
         final ManyToOneRingBuffer<OrderContext> completionQueue = createOrderContextQueue();
 
+        final Properties properties = getInstance(Properties.class);
+        final double takerFee = properties.getDoubleProperty("kalshi.taker.fee");
+        final double makerFee = properties.getDoubleProperty("kalshi.maker.fee");
+
         final KalshiOutboundReader reader = new KalshiOutboundReader(
                 logger,
                 execReportBuffer,
@@ -132,7 +136,9 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 listing,
                 wsClient,
                 new JsonDecoder(),
-                readerSigner);
+                readerSigner,
+                takerFee,
+                makerFee);
 
         final KalshiOutboundWriter writer = new KalshiOutboundWriter(
                 orderOutboundBuffer,
