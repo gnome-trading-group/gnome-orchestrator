@@ -9,6 +9,7 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.credentials.PolymarketIntlCredentials;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlAuthHeaders;
+import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlMarketInfo;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOrderSigner;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOutboundReader;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOutboundWriter;
@@ -59,20 +60,36 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
     @Provides
     @Singleton
     public PolymarketIntlOrderSigner provideOrderSigner(PolymarketIntlCredentials credentials) {
-        return new PolymarketIntlOrderSigner(credentials.ethereumPrivateKey(), credentials.signerAddress());
+        return new PolymarketIntlOrderSigner(
+                credentials.ethereumPrivateKey(),
+                credentials.signerAddress(),
+                credentials.funderAddress(),
+                credentials.signatureType());
     }
 
     @Provides
     @Singleton
     public PolymarketIntlAuthHeaders provideAuthHeaders(PolymarketIntlCredentials credentials) {
+        // POLY_ADDRESS is the address the API key was derived from: the signing EOA, not the funder.
         return new PolymarketIntlAuthHeaders(
-                credentials.apiKey(), credentials.secret(), credentials.passphrase(), credentials.proxyWalletAddress());
+                credentials.apiKey(), credentials.secret(), credentials.passphrase(), credentials.signerAddress());
     }
 
     @Provides
     @Singleton
     public HTTPClient provideHttpClient() {
         return new HTTPClient();
+    }
+
+    /** The listing's market parameters, fetched once at startup; refuses to start on an unsupported venue version. */
+    @Provides
+    @Singleton
+    public PolymarketIntlMarketInfo provideMarketInfo(
+            HTTPClient httpClient, @Named("CLOB_HOST") String clobHost, Listing listing) throws IOException {
+        // exchangeSecurityId is "{condition_id}:{token_id}"
+        final String exchangeSecurityId = listing.exchangeSecurityId();
+        final String conditionId = exchangeSecurityId.substring(0, exchangeSecurityId.indexOf(':'));
+        return PolymarketIntlMarketInfo.load(httpClient, clobHost, conditionId);
     }
 
     @Provides
@@ -126,9 +143,7 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
         final ManyToOneRingBuffer<OrderContext> writerReportQueue = createOrderContextQueue();
         final ManyToOneRingBuffer<OrderContext> releasedOrderQueue = createOrderContextQueue();
 
-        final Properties properties = getInstance(Properties.class);
-        final double takerFee = properties.getDoubleProperty("polymarket.intl.taker.fee");
-        final double makerFee = properties.getDoubleProperty("polymarket.intl.maker.fee");
+        final PolymarketIntlMarketInfo marketInfo = getInstance(PolymarketIntlMarketInfo.class);
 
         final PolymarketIntlOutboundReader reader = new PolymarketIntlOutboundReader(
                 logger,
@@ -143,8 +158,7 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
                 credentials.apiKey(),
                 credentials.secret(),
                 credentials.passphrase(),
-                takerFee,
-                makerFee);
+                marketInfo);
 
         final PolymarketIntlOutboundWriter writer = new PolymarketIntlOutboundWriter(
                 orderOutboundBuffer,
@@ -155,6 +169,8 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
                 clobHost,
                 orderSigner,
                 authHeaders,
+                marketInfo,
+                nanoClock,
                 listing);
 
         return startAgents(reader, writer, config, logger, epochClock, errorHandler);

@@ -3,13 +3,21 @@ package group.gnometrading.gateways.credentials;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 
+/**
+ * Secret {@code gnome/exchange-credentials/polymarket-intl}.
+ *
+ * @param signerAddress the EOA that holds {@code ethereumPrivateKey}; the API key belongs to it
+ * @param funderAddress the wallet the orders trade from: the EOA itself, or the polymarket.com proxy or Safe
+ * @param signatureType how orders are signed: 0 EOA, 1 Polymarket proxy, 2 Gnosis Safe (polymarket.com)
+ */
 public record PolymarketIntlCredentials(
         String apiKey,
         String secret,
         String passphrase,
         byte[] ethereumPrivateKey,
         String signerAddress,
-        String proxyWalletAddress)
+        String funderAddress,
+        int signatureType)
         implements ExchangeCredentials {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -23,32 +31,28 @@ public record PolymarketIntlCredentials(
     public static PolymarketIntlCredentials fromJson(final String json) {
         try {
             final Map<String, String> fields = MAPPER.readValue(json, Map.class);
-            final String apiKey = fields.get("apiKey");
-            final String secret = fields.get("secret");
-            final String passphrase = fields.get("passphrase");
-            final String privateKeyHex = fields.get("ethereumPrivateKey");
-            final String signerAddress = fields.get("signerAddress");
-            final String proxyWalletAddress = fields.get("proxyWalletAddress");
-            if (apiKey == null
-                    || secret == null
-                    || passphrase == null
-                    || privateKeyHex == null
-                    || signerAddress == null
-                    || proxyWalletAddress == null) {
-                throw new RuntimeException("Polymarket International credentials missing required field");
-            }
+            final String privateKeyHex = required(fields, "ethereumPrivateKey");
             return new PolymarketIntlCredentials(
-                    apiKey,
-                    secret,
-                    passphrase,
+                    required(fields, "apiKey"),
+                    required(fields, "secret"),
+                    required(fields, "passphrase"),
                     hexToBytes(privateKeyHex.startsWith("0x") ? privateKeyHex.substring(2) : privateKeyHex),
-                    signerAddress,
-                    proxyWalletAddress);
+                    required(fields, "signerAddress"),
+                    required(fields, "funderAddress"),
+                    Integer.parseInt(required(fields, "signatureType")));
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse Polymarket International credentials JSON", e);
         }
+    }
+
+    private static String required(final Map<String, String> fields, final String name) {
+        final String value = fields.get(name);
+        if (value == null) {
+            throw new RuntimeException("Polymarket International credentials missing " + name);
+        }
+        return value;
     }
 
     private static byte[] hexToBytes(final String hex) {
