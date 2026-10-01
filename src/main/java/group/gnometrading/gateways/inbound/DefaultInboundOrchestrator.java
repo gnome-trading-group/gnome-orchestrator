@@ -30,24 +30,25 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     }
 
     public static Class<? extends DefaultInboundOrchestrator<?>> findInboundOrchestrator(final Listing listing) {
-        switch (listing.exchange().exchangeName().toLowerCase()) {
-            case "hyperliquid" -> {
+        switch (listing.exchange().exchangeCode()) {
+            case "HYPERLIQUID" -> {
                 return HyperliquidInboundOrchestrator.class;
             }
-            case "lighter" -> {
+            case "LIGHTER" -> {
                 return LighterInboundOrchestrator.class;
             }
-            case "binance" -> {
+            case "BINANCE" -> {
                 return BinanceInboundOrchestrator.class;
             }
-            case "polymarket" -> {
+            case "POLYMARKET_INTL" -> {
                 return PolymarketInboundOrchestrator.class;
             }
-            case "kalshi" -> {
+            case "KALSHI" -> {
                 return KalshiInboundOrchestrator.class;
             }
             default -> throw new IllegalArgumentException(
-                    "Unmapped exchange: " + listing.exchange().exchangeName());
+                    "Unmapped exchange code: " + listing.exchange().exchangeCode() + " ("
+                            + listing.exchange().exchangeName() + ")");
         }
     }
 

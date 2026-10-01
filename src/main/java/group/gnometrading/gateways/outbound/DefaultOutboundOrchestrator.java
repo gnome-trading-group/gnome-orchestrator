@@ -14,23 +14,22 @@ import org.agrona.concurrent.EpochClock;
 
 public abstract class DefaultOutboundOrchestrator extends Orchestrator {
 
-    protected static final int DEFAULT_QUEUE_CAPACITY = 1 << 7;
-
     public static Class<? extends DefaultOutboundOrchestrator> findOutboundOrchestrator(final Listing listing) {
-        switch (listing.exchange().exchangeName().toLowerCase()) {
-            case "polymarket" -> {
+        switch (listing.exchange().exchangeCode()) {
+            case "POLYMARKET_INTL" -> {
                 return PolymarketOutboundOrchestrator.class;
             }
-            case "kalshi" -> {
+            case "KALSHI" -> {
                 return KalshiOutboundOrchestrator.class;
             }
-            default -> throw new IllegalArgumentException("No live outbound gateway for exchange: "
-                    + listing.exchange().exchangeName());
+            default -> throw new IllegalArgumentException("No live outbound gateway for exchange code: "
+                    + listing.exchange().exchangeCode() + " ("
+                    + listing.exchange().exchangeName() + ")");
         }
     }
 
     protected final ManyToOneRingBuffer<OrderContext> createOrderContextQueue() {
-        return new ManyToOneRingBuffer<>(OrderContext[]::new, OrderContext::new, DEFAULT_QUEUE_CAPACITY);
+        return new ManyToOneRingBuffer<>(OrderContext[]::new, OrderContext::new, OrderContext.HANDOFF_QUEUE_CAPACITY);
     }
 
     protected final GnomeAgent startAgents(

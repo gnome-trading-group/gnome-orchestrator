@@ -118,9 +118,9 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
         final KalshiAuthSigner readerSigner = getInstance(KalshiAuthSigner.class, "READER");
         final HTTPClient httpClient = getInstance(HTTPClient.class);
 
-        final ManyToOneRingBuffer<OrderContext> contextQueue = createOrderContextQueue();
-        final ManyToOneRingBuffer<OrderContext> rejectQueue = createOrderContextQueue();
-        final ManyToOneRingBuffer<OrderContext> completionQueue = createOrderContextQueue();
+        final ManyToOneRingBuffer<OrderContext> newOrderQueue = createOrderContextQueue();
+        final ManyToOneRingBuffer<OrderContext> writerReportQueue = createOrderContextQueue();
+        final ManyToOneRingBuffer<OrderContext> releasedOrderQueue = createOrderContextQueue();
 
         final Properties properties = getInstance(Properties.class);
         final double takerFee = properties.getDoubleProperty("kalshi.taker.fee");
@@ -129,9 +129,9 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
         final KalshiOutboundReader reader = new KalshiOutboundReader(
                 logger,
                 execReportBuffer,
-                contextQueue,
-                rejectQueue,
-                completionQueue,
+                newOrderQueue,
+                writerReportQueue,
+                releasedOrderQueue,
                 nanoClock,
                 listing,
                 wsClient,
@@ -142,9 +142,9 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
 
         final KalshiOutboundWriter writer = new KalshiOutboundWriter(
                 orderOutboundBuffer,
-                contextQueue,
-                rejectQueue,
-                completionQueue,
+                newOrderQueue,
+                writerReportQueue,
+                releasedOrderQueue,
                 httpClient,
                 apiHost,
                 writerSigner,

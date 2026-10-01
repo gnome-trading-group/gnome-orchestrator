@@ -122,9 +122,9 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
         final PolymarketAuthHeaders authHeaders = getInstance(PolymarketAuthHeaders.class);
         final HTTPClient httpClient = getInstance(HTTPClient.class);
 
-        final ManyToOneRingBuffer<OrderContext> contextQueue = createOrderContextQueue();
-        final ManyToOneRingBuffer<OrderContext> rejectQueue = createOrderContextQueue();
-        final ManyToOneRingBuffer<OrderContext> completionQueue = createOrderContextQueue();
+        final ManyToOneRingBuffer<OrderContext> newOrderQueue = createOrderContextQueue();
+        final ManyToOneRingBuffer<OrderContext> writerReportQueue = createOrderContextQueue();
+        final ManyToOneRingBuffer<OrderContext> releasedOrderQueue = createOrderContextQueue();
 
         final Properties properties = getInstance(Properties.class);
         final double takerFee = properties.getDoubleProperty("polymarket.taker.fee");
@@ -133,9 +133,9 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
         final PolymarketOutboundReader reader = new PolymarketOutboundReader(
                 logger,
                 execReportBuffer,
-                contextQueue,
-                rejectQueue,
-                completionQueue,
+                newOrderQueue,
+                writerReportQueue,
+                releasedOrderQueue,
                 nanoClock,
                 listing,
                 wsClient,
@@ -148,9 +148,9 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
 
         final PolymarketOutboundWriter writer = new PolymarketOutboundWriter(
                 orderOutboundBuffer,
-                contextQueue,
-                rejectQueue,
-                completionQueue,
+                newOrderQueue,
+                writerReportQueue,
+                releasedOrderQueue,
                 httpClient,
                 clobHost,
                 orderSigner,
