@@ -7,11 +7,11 @@ import group.gnometrading.di.Named;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
-import group.gnometrading.gateways.credentials.PolymarketCredentials;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketAuthHeaders;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketOrderSigner;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketOutboundReader;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.PolymarketOutboundWriter;
+import group.gnometrading.gateways.credentials.PolymarketIntlCredentials;
+import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlAuthHeaders;
+import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOrderSigner;
+import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOutboundReader;
+import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOutboundWriter;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -33,7 +33,7 @@ import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 
-public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchestrator {
+public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrchestrator {
 
     @Provides
     public EpochClock provideEpochClock() {
@@ -47,25 +47,25 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
 
     @Provides
     @Singleton
-    public PolymarketCredentials provideCredentials(SecretsManagerClient secretsManager) {
+    public PolymarketIntlCredentials provideCredentials(SecretsManagerClient secretsManager) {
         final String secretJson = secretsManager
                 .getSecretValue(GetSecretValueRequest.builder()
-                        .secretId("gnome/exchange-credentials/polymarket")
+                        .secretId("gnome/exchange-credentials/polymarket-intl")
                         .build())
                 .secretString();
-        return PolymarketCredentials.fromJson(secretJson);
+        return PolymarketIntlCredentials.fromJson(secretJson);
     }
 
     @Provides
     @Singleton
-    public PolymarketOrderSigner provideOrderSigner(PolymarketCredentials credentials) {
-        return new PolymarketOrderSigner(credentials.ethereumPrivateKey(), credentials.signerAddress());
+    public PolymarketIntlOrderSigner provideOrderSigner(PolymarketIntlCredentials credentials) {
+        return new PolymarketIntlOrderSigner(credentials.ethereumPrivateKey(), credentials.signerAddress());
     }
 
     @Provides
     @Singleton
-    public PolymarketAuthHeaders provideAuthHeaders(PolymarketCredentials credentials) {
-        return new PolymarketAuthHeaders(
+    public PolymarketIntlAuthHeaders provideAuthHeaders(PolymarketIntlCredentials credentials) {
+        return new PolymarketIntlAuthHeaders(
                 credentials.apiKey(), credentials.secret(), credentials.passphrase(), credentials.proxyWalletAddress());
     }
 
@@ -78,13 +78,13 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
     @Provides
     @Singleton
     public URI provideUserWsUri(Properties properties) throws URISyntaxException {
-        return new URI(properties.getStringProperty("polymarket.user.ws.url"));
+        return new URI(properties.getStringProperty("polymarket.intl.user.ws.url"));
     }
 
     @Provides
     @Named("CLOB_HOST")
     public String provideClobHost(Properties properties) throws URISyntaxException {
-        return new URI(properties.getStringProperty("polymarket.clob.url")).getHost();
+        return new URI(properties.getStringProperty("polymarket.intl.clob.url")).getHost();
     }
 
     @Provides
@@ -110,7 +110,7 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
             final SequencedRingBuffer<?> orderOutboundBuffer,
             final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             final ErrorHandler errorHandler) {
-        final PolymarketCredentials credentials = getInstance(PolymarketCredentials.class);
+        final PolymarketIntlCredentials credentials = getInstance(PolymarketIntlCredentials.class);
         final Logger logger = getInstance(Logger.class);
         final EpochNanoClock nanoClock = getInstance(EpochNanoClock.class);
         final EpochClock epochClock = getInstance(EpochClock.class);
@@ -118,8 +118,8 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
         final WebSocketClient wsClient = getInstance(WebSocketClient.class);
         final String clobHost = getInstance(String.class, "CLOB_HOST");
         final GatewayConfig config = getInstance(GatewayConfig.class);
-        final PolymarketOrderSigner orderSigner = getInstance(PolymarketOrderSigner.class);
-        final PolymarketAuthHeaders authHeaders = getInstance(PolymarketAuthHeaders.class);
+        final PolymarketIntlOrderSigner orderSigner = getInstance(PolymarketIntlOrderSigner.class);
+        final PolymarketIntlAuthHeaders authHeaders = getInstance(PolymarketIntlAuthHeaders.class);
         final HTTPClient httpClient = getInstance(HTTPClient.class);
 
         final ManyToOneRingBuffer<OrderContext> newOrderQueue = createOrderContextQueue();
@@ -127,10 +127,10 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
         final ManyToOneRingBuffer<OrderContext> releasedOrderQueue = createOrderContextQueue();
 
         final Properties properties = getInstance(Properties.class);
-        final double takerFee = properties.getDoubleProperty("polymarket.taker.fee");
-        final double makerFee = properties.getDoubleProperty("polymarket.maker.fee");
+        final double takerFee = properties.getDoubleProperty("polymarket.intl.taker.fee");
+        final double makerFee = properties.getDoubleProperty("polymarket.intl.maker.fee");
 
-        final PolymarketOutboundReader reader = new PolymarketOutboundReader(
+        final PolymarketIntlOutboundReader reader = new PolymarketIntlOutboundReader(
                 logger,
                 execReportBuffer,
                 newOrderQueue,
@@ -146,7 +146,7 @@ public final class PolymarketOutboundOrchestrator extends DefaultOutboundOrchest
                 takerFee,
                 makerFee);
 
-        final PolymarketOutboundWriter writer = new PolymarketOutboundWriter(
+        final PolymarketIntlOutboundWriter writer = new PolymarketIntlOutboundWriter(
                 orderOutboundBuffer,
                 newOrderQueue,
                 writerReportQueue,

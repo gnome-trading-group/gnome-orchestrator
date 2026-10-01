@@ -8,10 +8,10 @@ import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.inbound.HyperliquidInboundOrchestrator;
 import group.gnometrading.gateways.inbound.KalshiInboundOrchestrator;
 import group.gnometrading.gateways.inbound.LighterInboundOrchestrator;
-import group.gnometrading.gateways.inbound.PolymarketInboundOrchestrator;
+import group.gnometrading.gateways.inbound.PolymarketIntlInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.KalshiOutboundOrchestrator;
-import group.gnometrading.gateways.outbound.PolymarketOutboundOrchestrator;
+import group.gnometrading.gateways.outbound.PolymarketIntlOutboundOrchestrator;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
@@ -38,7 +38,7 @@ class GatewaySelectionTest {
                 KalshiInboundOrchestrator.class,
                 DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("KALSHI", "Kalshi")));
         assertEquals(
-                PolymarketInboundOrchestrator.class,
+                PolymarketIntlInboundOrchestrator.class,
                 DefaultInboundOrchestrator.findInboundOrchestrator(
                         listingOn("POLYMARKET_INTL", "Polymarket (International)")));
     }
@@ -49,7 +49,7 @@ class GatewaySelectionTest {
                 KalshiOutboundOrchestrator.class,
                 DefaultOutboundOrchestrator.findOutboundOrchestrator(listingOn("KALSHI", "Kalshi")));
         assertEquals(
-                PolymarketOutboundOrchestrator.class,
+                PolymarketIntlOutboundOrchestrator.class,
                 DefaultOutboundOrchestrator.findOutboundOrchestrator(
                         listingOn("POLYMARKET_INTL", "Polymarket (International)")));
     }
@@ -61,7 +61,7 @@ class GatewaySelectionTest {
                 IllegalArgumentException.class,
                 () -> DefaultOutboundOrchestrator.findOutboundOrchestrator(listingOn("SOMETHING_ELSE", "Polymarket")));
         assertEquals(
-                PolymarketOutboundOrchestrator.class,
+                PolymarketIntlOutboundOrchestrator.class,
                 DefaultOutboundOrchestrator.findOutboundOrchestrator(listingOn("POLYMARKET_INTL", "Renamed Anything")));
     }
 

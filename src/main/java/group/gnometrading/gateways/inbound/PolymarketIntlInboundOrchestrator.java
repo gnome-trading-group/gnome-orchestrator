@@ -5,7 +5,7 @@ import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
-import group.gnometrading.gateways.inbound.exchanges.polymarket.PolymarketInboundReader;
+import group.gnometrading.gateways.inbound.exchanges.polymarket.intl.PolymarketIntlInboundReader;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -22,15 +22,15 @@ import java.net.URISyntaxException;
 import java.time.Duration;
 import org.agrona.concurrent.EpochNanoClock;
 
-public class PolymarketInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10Schema> {
+public class PolymarketIntlInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10Schema> {
 
     static {
-        instanceClass = PolymarketInboundOrchestrator.class;
+        instanceClass = PolymarketIntlInboundOrchestrator.class;
     }
 
     @Provides
     public final URI provideUri(Properties properties) throws URISyntaxException {
-        return new URI(properties.getStringProperty("polymarket.ws.url"));
+        return new URI(properties.getStringProperty("polymarket.intl.ws.url"));
     }
 
     @Provides
@@ -69,7 +69,7 @@ public class PolymarketInboundOrchestrator extends DefaultInboundOrchestrator<Mb
     @Singleton
     @SuppressWarnings("unchecked")
     public final InboundSocketReader<Mbp10Schema> provideSocketReader() {
-        return new PolymarketInboundReader(
+        return new PolymarketIntlInboundReader(
                 getInstance(Logger.class),
                 getInstance(SequencedRingBuffer.class),
                 getInstance(EpochNanoClock.class),

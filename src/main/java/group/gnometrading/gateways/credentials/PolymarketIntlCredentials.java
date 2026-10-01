@@ -3,7 +3,7 @@ package group.gnometrading.gateways.credentials;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 
-public record PolymarketCredentials(
+public record PolymarketIntlCredentials(
         String apiKey,
         String secret,
         String passphrase,
@@ -16,11 +16,11 @@ public record PolymarketCredentials(
 
     @Override
     public String exchange() {
-        return "polymarket";
+        return "polymarket-intl";
     }
 
     @SuppressWarnings("unchecked")
-    public static PolymarketCredentials fromJson(final String json) {
+    public static PolymarketIntlCredentials fromJson(final String json) {
         try {
             final Map<String, String> fields = MAPPER.readValue(json, Map.class);
             final String apiKey = fields.get("apiKey");
@@ -35,9 +35,9 @@ public record PolymarketCredentials(
                     || privateKeyHex == null
                     || signerAddress == null
                     || proxyWalletAddress == null) {
-                throw new RuntimeException("Polymarket credentials missing required field");
+                throw new RuntimeException("Polymarket International credentials missing required field");
             }
-            return new PolymarketCredentials(
+            return new PolymarketIntlCredentials(
                     apiKey,
                     secret,
                     passphrase,
@@ -47,7 +47,7 @@ public record PolymarketCredentials(
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
-            throw new RuntimeException("Failed to parse Polymarket credentials JSON", e);
+            throw new RuntimeException("Failed to parse Polymarket International credentials JSON", e);
         }
     }
 

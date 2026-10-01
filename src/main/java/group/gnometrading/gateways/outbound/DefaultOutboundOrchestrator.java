@@ -17,7 +17,7 @@ public abstract class DefaultOutboundOrchestrator extends Orchestrator {
     public static Class<? extends DefaultOutboundOrchestrator> findOutboundOrchestrator(final Listing listing) {
         switch (listing.exchange().exchangeCode()) {
             case "POLYMARKET_INTL" -> {
-                return PolymarketOutboundOrchestrator.class;
+                return PolymarketIntlOutboundOrchestrator.class;
             }
             case "KALSHI" -> {
                 return KalshiOutboundOrchestrator.class;
