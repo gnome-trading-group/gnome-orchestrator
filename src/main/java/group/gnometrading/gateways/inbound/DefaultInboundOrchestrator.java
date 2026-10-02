@@ -43,6 +43,9 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
             case "POLYMARKET_INTL" -> {
                 return PolymarketIntlInboundOrchestrator.class;
             }
+            case "POLYMARKET_US" -> {
+                return PolymarketUsInboundOrchestrator.class;
+            }
             case "KALSHI" -> {
                 return KalshiInboundOrchestrator.class;
             }

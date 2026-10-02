@@ -9,6 +9,7 @@ import group.gnometrading.gateways.inbound.HyperliquidInboundOrchestrator;
 import group.gnometrading.gateways.inbound.KalshiInboundOrchestrator;
 import group.gnometrading.gateways.inbound.LighterInboundOrchestrator;
 import group.gnometrading.gateways.inbound.PolymarketIntlInboundOrchestrator;
+import group.gnometrading.gateways.inbound.PolymarketUsInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.KalshiOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.PolymarketIntlOutboundOrchestrator;
@@ -41,6 +42,9 @@ class GatewaySelectionTest {
                 PolymarketIntlInboundOrchestrator.class,
                 DefaultInboundOrchestrator.findInboundOrchestrator(
                         listingOn("POLYMARKET_INTL", "Polymarket (International)")));
+        assertEquals(
+                PolymarketUsInboundOrchestrator.class,
+                DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("POLYMARKET_US", "Polymarket (US)")));
     }
 
     @Test
@@ -69,8 +73,7 @@ class GatewaySelectionTest {
     void unknownCode_FailsLoudly() {
         assertThrows(
                 IllegalArgumentException.class,
-                () -> DefaultInboundOrchestrator.findInboundOrchestrator(
-                        listingOn("POLYMARKET_US", "Polymarket (US)")));
+                () -> DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("UNKNOWN_VENUE", "Unknown")));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> DefaultOutboundOrchestrator.findOutboundOrchestrator(listingOn("BINANCE", "Binance")));
