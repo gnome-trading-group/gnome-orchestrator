@@ -70,7 +70,7 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
     @Provides
     @Singleton
     public HTTPClient provideHttpClient() {
-        return new HTTPClient();
+        return OrderEntryHttpClients.create();
     }
 
     @Provides

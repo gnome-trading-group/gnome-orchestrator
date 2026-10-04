@@ -29,6 +29,7 @@ import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.oms.state.RingBufferOrderStateManager;
 import group.gnometrading.resources.Properties;
+import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.GlobalSequence;
@@ -209,7 +210,15 @@ public class TradingOrchestrator extends Orchestrator {
                     priceSlotRegistry);
         }
 
-        RiskSyncAgent riskSyncAgent = getInstance(RiskSyncAgent.class);
+        // Built here rather than injected so the policies that value positions get the session's mark prices.
+        RiskSyncAgent riskSyncAgent = new RiskSyncAgent(
+                getInstance(RiskMaster.class),
+                riskEngine,
+                epochClock,
+                Duration.ofMillis(properties.getIntProperty("risk.refresh.interval.ms")),
+                logger,
+                priceBuffer,
+                priceSlotRegistry);
 
         ErrorHandler errorHandler = error -> {
             logger.logf(LogMessage.FATAL_ERROR_EXITING, "Agent error: %s", error);

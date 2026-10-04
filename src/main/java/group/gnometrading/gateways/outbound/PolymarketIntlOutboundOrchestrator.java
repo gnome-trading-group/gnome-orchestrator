@@ -78,7 +78,7 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
     @Provides
     @Singleton
     public HTTPClient provideHttpClient() {
-        return new HTTPClient();
+        return OrderEntryHttpClients.create();
     }
 
     /** The listing's market parameters, fetched once at startup; refuses to start on an unsupported venue version. */
