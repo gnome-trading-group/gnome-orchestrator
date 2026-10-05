@@ -61,7 +61,15 @@ def cpus(spec):
         lo, _, hi = part.partition("-")
         out.update(range(int(lo), int(hi or lo) + 1))
     return out
-print(",".join(str(c) for c in sorted(cpus(sys.argv[1]) - cpus(sys.argv[2]))))
+housekeeping = sorted(cpus(sys.argv[1]) - cpus(sys.argv[2]))
+# Only checkable on the real instance size, not in the AMI test: OS noise on a hot thread's physical core.
+for cpu in housekeeping:
+    with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list") as f:
+        shared = cpus(f.read().strip()) & cpus(sys.argv[2])
+    if shared:
+        print(f"run-strategy: WARNING housekeeping cpu{cpu} shares a physical core with isolated cpus {sorted(shared)}",
+              file=sys.stderr)
+print(",".join(str(c) for c in housekeeping))
 PY
 )
   echo "run-strategy: isolated cpus ${CPU_ISOLATED}, housekeeping cpus ${CPU_HOUSEKEEPING}"

@@ -4,6 +4,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as imagebuilder from 'aws-cdk-lib/aws-imagebuilder';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Construct } from 'constructs';
 import { createHash } from 'crypto';
@@ -46,8 +47,9 @@ interface Props extends cdk.StackProps {
 }
 
 /**
- * Builds the strategy AMIs and publishes each one's id per region to SSM. Pipelines have no schedule: an AMI
- * change reaches new sessions as soon as it is published, so builds are run deliberately.
+ * Builds the strategy AMIs and publishes each one's id per region to SSM. A build starts on deploy whenever the
+ * image's content changed, and only then; the image tests gate publishing, so a failed build never replaces the
+ * AMI new sessions launch from. Pipelines can still be started by hand, e.g. to pick up a newer Ubuntu base.
  */
 export class AmiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
@@ -95,7 +97,8 @@ export class AmiStack extends cdk.Stack {
         // LibraryLoader extracts native libraries to /tmp and loads them from there.
         "! findmnt -no OPTIONS /tmp | grep -q noexec",
         'systemctl is-enabled gnome-boot-guard.service',
-        '! systemctl is-enabled gnome-strategy.service',
+        // No [Install] section, so systemd reports it "static" (exit 0): it can only be started, by user data.
+        'test "$(systemctl is-enabled gnome-strategy.service || true)" != enabled',
       ].join('\n')],
     ]);
 
@@ -142,13 +145,34 @@ export class AmiStack extends cdk.Stack {
         }],
       });
 
-      new imagebuilder.CfnImagePipeline(this, `Pipeline-${variant.name}`, {
+      const pipeline = new imagebuilder.CfnImagePipeline(this, `Pipeline-${variant.name}`, {
         name: recipeName,
         imageRecipeArn: recipe.attrArn,
         infrastructureConfigurationArn: infrastructure.attrArn,
         distributionConfigurationArn: distribution.attrArn,
         imageTestsConfiguration: { imageTestsEnabled: true, timeoutMinutes: 60 },
         status: 'ENABLED',
+      });
+
+      // The recipe version is a hash of everything baked into the image, so keying the build on it starts one
+      // exactly when a deploy changes the image. Starting is asynchronous; the deploy does not wait for the build.
+      const buildId = `${variant.name}-${recipe.version}`;
+      const startBuild: cr.AwsSdkCall = {
+        service: 'imagebuilder',
+        action: 'StartImagePipelineExecution',
+        parameters: { imagePipelineArn: pipeline.attrArn, clientToken: buildId },
+        physicalResourceId: cr.PhysicalResourceId.of(buildId),
+      };
+      new cr.AwsCustomResource(this, `BuildOnChange-${variant.name}`, {
+        onCreate: startBuild,
+        onUpdate: startBuild,
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['imagebuilder:StartImagePipelineExecution'],
+            resources: [pipeline.attrArn],
+          }),
+        ]),
+        installLatestAwsSdk: false,
       });
     }
 
@@ -194,13 +218,14 @@ function installFile(source: string, destination: string, mode: string): string 
   return `echo '${content}' | base64 -d > ${destination}\nchmod ${mode} ${destination}`;
 }
 
+// Runs on the small build-size test instance, where most of the range does not exist: the kernel isolates only the
+// CPUs it has, so this checks the command line and that intersection. Sibling layout is checked at session boot.
 function checkIsolationScript(isolated: string): string {
   return [
     'set -euxo pipefail',
     'cat /proc/cmdline',
-    'lscpu -e',
-    `test "$(cat /sys/devices/system/cpu/isolated)" = "${isolated}"`,
-    // A housekeeping CPU's sibling must not be isolated, or OS noise shares a physical core with a hot thread.
+    `grep -qw "isolcpus=${isolated}" /proc/cmdline`,
+    `grep -qw "nohz_full=${isolated}" /proc/cmdline`,
     'python3 - <<\'PY\'',
     'from pathlib import Path',
     'def cpus(spec):',
@@ -210,10 +235,9 @@ function checkIsolationScript(isolated: string): string {
     '        out.update(range(int(lo), int(hi or lo) + 1))',
     '    return out',
     'base = Path("/sys/devices/system/cpu")',
-    'isolated = cpus((base / "isolated").read_text())',
-    'for cpu in sorted(cpus((base / "online").read_text()) - isolated):',
-    '    siblings = cpus((base / f"cpu{cpu}/topology/thread_siblings_list").read_text())',
-    '    assert not siblings & isolated, f"cpu{cpu} shares a core with isolated cpus {sorted(siblings & isolated)}"',
+    `expected = cpus("${isolated}") & cpus((base / "possible").read_text())`,
+    'actual = cpus((base / "isolated").read_text())',
+    'assert actual == expected, f"isolated {sorted(actual)}, expected {sorted(expected)}"',
     'PY',
   ].join('\n');
 }
