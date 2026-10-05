@@ -1,0 +1,13 @@
+[Unit]
+Description=Shut down an instance that rebooted after running a strategy session
+# User data does not run again after a reboot, so an instance that already ran its session has nothing to do.
+ConditionPathExists=/var/lib/gnome/session-ran
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/shutdown -h now
+
+[Install]
+WantedBy=multi-user.target

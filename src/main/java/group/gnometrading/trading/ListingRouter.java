@@ -1,6 +1,7 @@
 package group.gnometrading.trading;
 
 import group.gnometrading.concurrent.GnomeAgent;
+import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ModifyOrder;
@@ -58,6 +59,11 @@ public final class ListingRouter implements GnomeAgent {
     @Override
     public String roleName() {
         return "listing-router";
+    }
+
+    @Override
+    public ThreadProfile threadProfile() {
+        return ThreadProfile.HOT_PATH;
     }
 
     @Override

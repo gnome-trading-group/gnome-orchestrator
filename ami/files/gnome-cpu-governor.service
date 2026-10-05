@@ -1,0 +1,11 @@
+[Unit]
+Description=Pin the CPU frequency governor to performance
+After=multi-user.target
+
+[Service]
+Type=oneshot
+# Best effort: non-metal instance sizes may not expose frequency control at all.
+ExecStart=/bin/sh -c 'cpupower frequency-set -g performance || true'
+
+[Install]
+WantedBy=multi-user.target

@@ -36,6 +36,7 @@ import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.JournalWriter;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.AwsModule;
+import group.gnometrading.shared.RegistryEndpoint;
 import group.gnometrading.shared.RiskModule;
 import group.gnometrading.simulation.config.ExchangeProfileConfig;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
@@ -46,6 +47,7 @@ import group.gnometrading.strategies.StrategyAgent;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Parameter;
+import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -119,6 +121,7 @@ public class TradingOrchestrator extends Orchestrator {
 
         int strategyId = properties.getIntProperty("strategy.id");
         List<Listing> listings = resolveListings(properties, securityMaster);
+        AgentRuntimeInstaller.install(properties, logger, listings.size());
 
         GlobalSequence globalSequence = new GlobalSequence();
 
@@ -243,6 +246,11 @@ public class TradingOrchestrator extends Orchestrator {
                 priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
+        registerShutdownHook(runners);
+        reportRunning(sessionId, logger);
+    }
+
+    private static void registerShutdownHook(AgentRunners runners) {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             closeQuietly(runners.strategy());
             closeQuietly(runners.oms());
@@ -255,6 +263,15 @@ public class TradingOrchestrator extends Orchestrator {
             closeQuietly(runners.priceWriter());
             closeQuietly(runners.riskSync());
         }));
+    }
+
+    private void reportRunning(String sessionId, Logger logger) {
+        if (sessionId == null) {
+            return;
+        }
+        RegistryEndpoint registry = getInstance(RegistryEndpoint.class);
+        new SessionStatusReporter(URI.create("https://" + registry.host()), registry.apiKey(), logger)
+                .reportRunning(sessionId);
     }
 
     private void wireJournal(

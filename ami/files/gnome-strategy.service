@@ -1,0 +1,23 @@
+[Unit]
+Description=gnome strategy session
+Wants=network-online.target
+After=network-online.target amazon-cloudwatch-agent.service
+
+[Service]
+Type=simple
+ExecStart=/opt/gnome/run-strategy.sh
+# Whatever ends the session (crash, bootstrap failure, operator stop) ends the instance: the launch template
+# turns an OS shutdown into termination.
+ExecStopPost=/sbin/shutdown -h now
+# Time for the JVM shutdown hooks to close agents and flush before the instance goes away.
+TimeoutStopSec=60
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/gnome/orchestrator.log
+StandardError=inherit
+Environment=JAVA_HOME=/usr/lib/jvm/current
+Environment=MAIN_CLASS=group.gnometrading.trading.TradingOrchestrator
+Environment=PYTHONUNBUFFERED=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1

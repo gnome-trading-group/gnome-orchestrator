@@ -1,6 +1,7 @@
 package group.gnometrading.trading;
 
 import group.gnometrading.concurrent.GnomeAgent;
+import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import java.util.Collection;
@@ -31,6 +32,11 @@ public final class MarketDataMultiplexer implements GnomeAgent {
     @Override
     public String roleName() {
         return "market-data-multiplexer";
+    }
+
+    @Override
+    public ThreadProfile threadProfile() {
+        return ThreadProfile.HOT_PATH;
     }
 
     @Override

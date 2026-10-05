@@ -2,6 +2,7 @@ package group.gnometrading.trading;
 
 import group.gnometrading.collections.FixedCapacityQueue;
 import group.gnometrading.concurrent.GnomeAgent;
+import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.CancelOrderEncoder;
@@ -77,6 +78,11 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
     @Override
     public String roleName() {
         return "paper-trading-outbound-gateway";
+    }
+
+    @Override
+    public ThreadProfile threadProfile() {
+        return ThreadProfile.HOT_PATH;
     }
 
     @Override

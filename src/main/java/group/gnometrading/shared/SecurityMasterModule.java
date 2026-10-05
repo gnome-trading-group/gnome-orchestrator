@@ -16,9 +16,9 @@ public class SecurityMasterModule extends Module {
         return new Module[] {new PropertiesModule()};
     }
 
-    // Not @Singleton: RetryableHTTPClient isn't thread-safe, so each consumer thread needs its own connection.
     @Provides
-    public final RegistryConnection provideRegistryConnection(Properties properties) {
+    @Singleton
+    public final RegistryEndpoint provideRegistryEndpoint(Properties properties) {
         String keyId = properties.getStringProperty("registry.api.key.id");
         String apiKey;
         if (!keyId.isEmpty()) {
@@ -30,7 +30,13 @@ public class SecurityMasterModule extends Module {
         } else {
             apiKey = "";
         }
-        return new RegistryConnection(properties.getStringProperty("registry.url"), apiKey);
+        return new RegistryEndpoint(properties.getStringProperty("registry.url"), apiKey);
+    }
+
+    // Not @Singleton: RetryableHTTPClient isn't thread-safe, so each consumer thread needs its own connection.
+    @Provides
+    public final RegistryConnection provideRegistryConnection(RegistryEndpoint endpoint) {
+        return new RegistryConnection(endpoint.host(), endpoint.apiKey());
     }
 
     @Provides
