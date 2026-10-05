@@ -27,7 +27,7 @@ import group.gnometrading.oms.position.PositionView;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSyncAgent;
-import group.gnometrading.oms.state.RingBufferOrderStateManager;
+import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.schemas.Intent;
@@ -40,6 +40,7 @@ import group.gnometrading.shared.RegistryEndpoint;
 import group.gnometrading.shared.RiskModule;
 import group.gnometrading.simulation.config.ExchangeProfileConfig;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
+import group.gnometrading.simulation.latency.LatencySeeds;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
@@ -94,6 +95,8 @@ public class TradingOrchestrator extends Orchestrator {
 
     private static final int OUTBOUND_BUFFER_SIZE = 64;
     private static final Duration DEFAULT_PNL_FLUSH_INTERVAL = Duration.ofSeconds(30);
+    // Paper sessions are reproducible by default; set simulation.seed to vary the latency draws.
+    private static final long PAPER_TRADING_DEFAULT_SEED = 0x9E3779B97F4A7C15L;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -147,12 +150,13 @@ public class TradingOrchestrator extends Orchestrator {
         }
         OrderManagementSystem oms = new OrderManagementSystem(
                 logger,
-                new RingBufferOrderStateManager(),
+                new PooledOrderStateManager(),
                 positionTracker,
                 riskEngine,
                 securityMaster,
                 priceBuffer,
-                priceSlotRegistry);
+                priceSlotRegistry,
+                getInstance(EpochNanoClock.class));
         for (Listing listing : listings) {
             positionTracker.registerSlot(strategyId, listing.listingId());
         }
@@ -246,22 +250,26 @@ public class TradingOrchestrator extends Orchestrator {
                 priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
-        registerShutdownHook(runners);
+        registerShutdownHook(runners, logger);
         reportRunning(sessionId, logger);
     }
 
-    private static void registerShutdownHook(AgentRunners runners) {
+    // Both lines are the only evidence an operator stop shut down cleanly rather than being cut off at the timeout.
+    private static void registerShutdownHook(AgentRunners runners, Logger logger) {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            closeQuietly(runners.strategy());
-            closeQuietly(runners.oms());
-            closeQuietly(runners.router());
+            logger.logf(LogMessage.DEBUG, "Shutting down: closing agents");
+            final long start = System.nanoTime();
+            closeQuietly(runners.strategy(), logger);
+            closeQuietly(runners.oms(), logger);
+            closeQuietly(runners.router(), logger);
             for (GnomeAgentRunner outbound : runners.outboundAgents()) {
-                closeQuietly(outbound);
+                closeQuietly(outbound, logger);
             }
-            closeQuietly(runners.mux());
-            closeQuietly(runners.pnl());
-            closeQuietly(runners.priceWriter());
-            closeQuietly(runners.riskSync());
+            closeQuietly(runners.mux(), logger);
+            closeQuietly(runners.pnl(), logger);
+            closeQuietly(runners.priceWriter(), logger);
+            closeQuietly(runners.riskSync(), logger);
+            logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
         }));
     }
 
@@ -418,13 +426,18 @@ public class TradingOrchestrator extends Orchestrator {
                 riskSyncRunner);
     }
 
-    private static void closeQuietly(GnomeAgentRunner runner) {
+    private static void closeQuietly(GnomeAgentRunner runner, Logger logger) {
         if (runner == null) {
             return;
         }
         try {
             runner.close();
-        } catch (Exception ignored) { // best-effort close on shutdown
+        } catch (Exception e) { // best-effort: one agent failing to close must not stop the others closing
+            logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Failed to close %s: %s",
+                    runner.getAgent().roleName(),
+                    e);
         }
     }
 
@@ -438,7 +451,11 @@ public class TradingOrchestrator extends Orchestrator {
 
         if ("paper".equals(mode)) {
             ExchangeProfileConfig profile = ExchangeProfileConfig.resolveForListing(properties, listing.listingId());
-            MbpSimulatedExchange exchange = (MbpSimulatedExchange) profile.toSimulatedExchange();
+            long baseSeed = properties.hasProperty("simulation.seed")
+                    ? properties.getLongProperty("simulation.seed")
+                    : PAPER_TRADING_DEFAULT_SEED;
+            MbpSimulatedExchange exchange = (MbpSimulatedExchange)
+                    profile.toSimulatedExchange(LatencySeeds.derive(baseSeed, listing.listingId()));
             return new PaperTradingOutboundGateway(
                     exchange,
                     marketDataBuffer,

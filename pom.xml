@@ -60,7 +60,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-oms</artifactId>
-            <version>1.7.0</version>
+            <version>1.7.1</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -75,7 +75,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-simulation</artifactId>
-            <version>1.4.4</version>
+            <version>1.4.5</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>

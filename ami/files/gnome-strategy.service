@@ -7,8 +7,9 @@ After=network-online.target amazon-cloudwatch-agent.service
 Type=simple
 ExecStart=/opt/gnome/run-strategy.sh
 # Whatever ends the session (crash, bootstrap failure, operator stop) ends the instance: the launch template
-# turns an OS shutdown into termination.
-ExecStopPost=/sbin/shutdown -h now
+# turns an OS shutdown into termination. The pause lets the CloudWatch agent ship the log's last lines first;
+# they are usually the error that explains a failed session, and the root volume goes with the instance.
+ExecStopPost=/bin/sh -c 'sleep 10; exec /sbin/shutdown -h now'
 # Time for the JVM shutdown hooks to close agents and flush before the instance goes away.
 TimeoutStopSec=60
 KillSignal=SIGTERM

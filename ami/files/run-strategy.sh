@@ -27,6 +27,7 @@ export AWS_DEFAULT_REGION=$AWS_REGION
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CWA
 {
   "logs": {
+    "force_flush_interval": 1,
     "logs_collected": {
       "files": {
         "collect_list": [
