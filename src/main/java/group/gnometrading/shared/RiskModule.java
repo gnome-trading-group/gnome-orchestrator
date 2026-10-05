@@ -19,8 +19,10 @@ public class RiskModule extends Module {
 
     @Provides
     @Singleton
-    public final RiskMaster provideRiskMaster(RegistryConnection connection) {
-        return new RiskMaster(connection);
+    public final RiskMaster provideRiskMaster(final RegistryConnection connection, final Properties properties) {
+        final String sessionId =
+                properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
+        return new RiskMaster(connection, properties.getIntProperty("strategy.id"), sessionId);
     }
 
     @Provides
