@@ -100,6 +100,11 @@ public class TradingOrchestrator extends Orchestrator {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    // Set once configure() has started them; read by onClose(), which may run on a shutdown hook thread.
+    private volatile AgentRunners runners;
+    private volatile GnomeAgentRunner journalRunner;
+    private volatile Logger logger;
+
     @Provides
     @Singleton
     public final EpochNanoClock provideEpochNanoClock() {
@@ -118,6 +123,7 @@ public class TradingOrchestrator extends Orchestrator {
         install(new AwsModule());
 
         Logger logger = getInstance(Logger.class);
+        this.logger = logger;
         SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         Properties properties = getInstance(Properties.class);
         RiskEngine riskEngine = getInstance(RiskEngine.class);
@@ -237,9 +243,10 @@ public class TradingOrchestrator extends Orchestrator {
         journaledBuffers.add(stratExecReportBuffer);
         journaledBuffers.add(orderOutboundBuffer);
         journaledBuffers.add(omsExecReportBuffer);
-        wireJournal(strategyId, sessionId, journaledBuffers, epochClock, errorHandler, logger, properties);
+        this.journalRunner =
+                wireJournal(strategyId, sessionId, journaledBuffers, epochClock, errorHandler, logger, properties);
 
-        AgentRunners runners = startAgentRunners(
+        this.runners = startAgentRunners(
                 inbounds,
                 omsAgent,
                 outboundAgents,
@@ -250,27 +257,33 @@ public class TradingOrchestrator extends Orchestrator {
                 priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
-        registerShutdownHook(runners, logger);
+        // A fallback for plain Java runs; an embedding process closes first, which makes this a no-op.
+        Runtime.getRuntime().addShutdownHook(new Thread(this::close, "orchestrator-shutdown"));
         reportRunning(sessionId, logger);
     }
 
     // Both lines are the only evidence an operator stop shut down cleanly rather than being cut off at the timeout.
-    private static void registerShutdownHook(AgentRunners runners, Logger logger) {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            logger.logf(LogMessage.DEBUG, "Shutting down: closing agents");
-            final long start = System.nanoTime();
-            closeQuietly(runners.strategy(), logger);
-            closeQuietly(runners.oms(), logger);
-            closeQuietly(runners.router(), logger);
-            for (GnomeAgentRunner outbound : runners.outboundAgents()) {
-                closeQuietly(outbound, logger);
-            }
-            closeQuietly(runners.mux(), logger);
-            closeQuietly(runners.pnl(), logger);
-            closeQuietly(runners.priceWriter(), logger);
-            closeQuietly(runners.riskSync(), logger);
-            logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
-        }));
+    @Override
+    protected final void onClose() {
+        AgentRunners started = this.runners;
+        if (started == null) {
+            return;
+        }
+        logger.logf(LogMessage.DEBUG, "Shutting down: closing agents");
+        final long start = System.nanoTime();
+        closeQuietly(started.strategy(), logger);
+        closeQuietly(started.oms(), logger);
+        closeQuietly(started.router(), logger);
+        for (GnomeAgentRunner outbound : started.outboundAgents()) {
+            closeQuietly(outbound, logger);
+        }
+        closeQuietly(started.mux(), logger);
+        closeQuietly(started.pnl(), logger);
+        closeQuietly(started.priceWriter(), logger);
+        closeQuietly(started.riskSync(), logger);
+        // Last, so the journal holds everything the agents wrote while closing.
+        closeQuietly(journalRunner, logger);
+        logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
     }
 
     private void reportRunning(String sessionId, Logger logger) {
@@ -282,7 +295,7 @@ public class TradingOrchestrator extends Orchestrator {
                 .reportRunning(sessionId);
     }
 
-    private void wireJournal(
+    private GnomeAgentRunner wireJournal(
             int strategyId,
             String sessionId,
             List<SequencedRingBuffer<?>> journaledBuffers,
@@ -291,7 +304,7 @@ public class TradingOrchestrator extends Orchestrator {
             Logger logger,
             Properties properties) {
         if (!properties.getBooleanProperty("journal.enabled")) {
-            return;
+            return null;
         }
         Path journalPath = Path.of("/tmp/journal-" + sessionId + ".bin");
         long fileSizeBytes = (long) properties.getIntProperty("journal.file.size.mb") * 1024L * 1024L;
@@ -316,13 +329,7 @@ public class TradingOrchestrator extends Orchestrator {
                     logger);
             GnomeAgentRunner journalRunner = new GnomeAgentRunner(journalManagerAgent, errorHandler);
             GnomeAgentRunner.startOnThread(journalRunner);
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                try {
-                    journalRunner.close();
-                } catch (Exception e) {
-                    /* best effort */
-                }
-            }));
+            return journalRunner;
         } catch (IOException e) {
             throw new RuntimeException("Failed to create journal writer", e);
         }

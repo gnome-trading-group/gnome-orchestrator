@@ -2,9 +2,8 @@ services:
   collector:
     build:
       context: .
-      args:
-        GITHUB_ACTOR:
-        GITHUB_TOKEN:
+      secrets:
+        - maven_settings
     image: gnome-orchestrator:latest
     stop_grace_period: 75s
     privileged: true
@@ -23,9 +22,8 @@ services:
   testing:
     build:
       context: .
-      args:
-        GITHUB_ACTOR:
-        GITHUB_TOKEN:
+      secrets:
+        - maven_settings
     image: gnome-orchestrator:latest
     privileged: true
     container_name: gnome-orchestrator-testing
@@ -43,3 +41,41 @@ services:
       - ~/.aws/:/root/.aws:ro
       - ./market-data:/app/market-data
     shm_size: '4gb'
+
+  # A paper session run exactly as on EC2, minus the EC2 wrapper. Uses the jar built from this checkout unless
+  # ORCHESTRATOR_VERSION is set; `docker compose stop strategy` sends the same SIGTERM an instance stop does.
+  strategy:
+    build:
+      context: .
+      secrets:
+        - maven_settings
+    image: gnome-orchestrator:latest
+    container_name: gnome-orchestrator-strategy
+    stop_grace_period: 60s
+    environment:
+      STAGE: dev
+      AWS_PROFILE: dev
+      AWS_REGION: us-east-1
+      STRATEGY_ID: 5
+      MODE: paper
+      LISTINGS: "[6]"
+      STRATEGY_TYPE: python
+      STRATEGY_CLASS: gnomepy_research.strategies.random_trader:RandomTrader
+      STRATEGY_ARGS_JSON: '{"interval_seconds": 3, "size": 10, "max_position": 3}'
+      RESEARCH_COMMIT: test/random-trader
+      LATENCY_PROFILE: standard
+      SIMULATION_LISTING_6_PROFILE: default
+      SIMULATION_PROFILES_DEFAULT_FEE_MODEL: static
+      SIMULATION_PROFILES_DEFAULT_FEE_TAKER: 0
+      SIMULATION_PROFILES_DEFAULT_FEE_MAKER: 0
+      SIMULATION_PROFILES_DEFAULT_NETWORK_LATENCY_MODEL: static
+      SIMULATION_PROFILES_DEFAULT_NETWORK_LATENCY_NANOS: 0
+      SIMULATION_PROFILES_DEFAULT_ORDER_LATENCY_MODEL: static
+      SIMULATION_PROFILES_DEFAULT_ORDER_LATENCY_NANOS: 0
+      SIMULATION_PROFILES_DEFAULT_QUEUE_MODEL: risk_averse
+    volumes:
+      - ~/.aws/:/root/.aws:ro
+
+secrets:
+  maven_settings:
+    file: ~/.m2/settings.xml

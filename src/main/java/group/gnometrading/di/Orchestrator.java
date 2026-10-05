@@ -8,9 +8,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 
-public abstract class Orchestrator {
+public abstract class Orchestrator implements AutoCloseable {
 
     protected static Class<? extends Orchestrator> instanceClass;
 
@@ -19,6 +20,7 @@ public abstract class Orchestrator {
     protected final Map<String, Object> providerInstances;
     final Set<Class<? extends Module>> installedModules;
     protected String[] cliArgs;
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     public Orchestrator() {
         this.singletonCache = new HashMap<>();
@@ -205,9 +207,30 @@ public abstract class Orchestrator {
         /* Default NO-OP */
     }
 
-    public static void main(String[] args) throws Exception {
+    /**
+     * Stops what {@link #configure()} started. Idempotent, so an embedding process (gnomepy runs the orchestrator
+     * in-process) can close it explicitly before exiting while a JVM shutdown hook still covers plain Java runs.
+     */
+    @Override
+    public final void close() {
+        if (closed.compareAndSet(false, true)) {
+            onClose();
+        }
+    }
+
+    protected void onClose() {
+        /* Default NO-OP */
+    }
+
+    /** Configures the orchestrator and returns it running, so the caller can {@link #close()} it. */
+    public static Orchestrator start(String[] args) throws Exception {
         Orchestrator orchestrator = instanceClass.getDeclaredConstructor().newInstance();
         orchestrator.cliArgs = args;
         orchestrator.configure();
+        return orchestrator;
+    }
+
+    public static void main(String[] args) throws Exception {
+        start(args);
     }
 }

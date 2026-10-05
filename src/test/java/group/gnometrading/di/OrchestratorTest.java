@@ -292,4 +292,41 @@ class OrchestratorTest {
         var res = orchestrator.getInstance(String.class, "result");
         assertEquals("whats up man -- not much", res);
     }
+
+    static class LifecycleOrchestrator extends Orchestrator {
+        int configured;
+        int closed;
+
+        @Override
+        public void configure() {
+            configured++;
+        }
+
+        @Override
+        protected void onClose() {
+            closed++;
+        }
+    }
+
+    @Test
+    void testStartReturnsTheConfiguredInstance() throws Exception {
+        Class<? extends Orchestrator> previous = Orchestrator.instanceClass;
+        try {
+            Orchestrator.instanceClass = LifecycleOrchestrator.class;
+            Orchestrator started = Orchestrator.start(new String[] {"--a=b"});
+            LifecycleOrchestrator lifecycle = assertInstanceOf(LifecycleOrchestrator.class, started);
+            assertEquals(1, lifecycle.configured);
+            assertArrayEquals(new String[] {"--a=b"}, lifecycle.provideCliArgs());
+        } finally {
+            Orchestrator.instanceClass = previous;
+        }
+    }
+
+    @Test
+    void testCloseRunsOnCloseOnlyOnce() {
+        LifecycleOrchestrator orchestrator = new LifecycleOrchestrator();
+        orchestrator.close();
+        orchestrator.close();
+        assertEquals(1, orchestrator.closed);
+    }
 }

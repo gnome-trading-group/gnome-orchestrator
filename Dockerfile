@@ -1,59 +1,42 @@
-# Stage 1: Build the JAR
-FROM maven:3.9-eclipse-temurin-21 AS builder
+# Local image built from the same scripts as the strategy AMI, so a session started here runs the way it does on
+# EC2. Only the EC2 wrapper (session.json, instance metadata, CloudWatch, CPU isolation) is left out: the
+# environment comes from docker-compose instead.
+
+# Stage 1: build the JAR from this checkout.
+FROM --platform=linux/amd64 maven:3.9-eclipse-temurin-17 AS builder
 
 WORKDIR /app
 
-ARG GITHUB_ACTOR
-ARG GITHUB_TOKEN
-
-# To test local SNAPSHOT dependencies (e.g. gnome-schemas), copy your Maven cache and uncomment:
-# $ cp -r ~/.m2 .
-# RUN mkdir -p /root/.m2
-# COPY .m2 /root/.m2
-
-COPY settings.xml /root/.m2/settings.xml
 COPY pom.xml .
 COPY src ./src
 
-RUN mvn clean package -DskipTests
+# Your own Maven settings (GitHub Packages credentials) are mounted for this step only, so they never land in an
+# image layer or its history. docker-compose passes ~/.m2/settings.xml as the maven_settings secret.
+RUN --mount=type=secret,id=maven_settings,target=/root/.m2/settings.xml \
+    --mount=type=cache,target=/root/.m2/repository \
+    mvn -B clean package -DskipTests
 
-# Stage 2: Runtime — unified Java + Python image
-FROM --platform=linux/amd64 python:3.13-slim-bookworm
+# Stage 2: the AMI's runtime.
+FROM --platform=linux/amd64 ubuntu:24.04
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PIP_NO_CACHE_DIR=1 \
+COPY ami/scripts/install-runtime.sh /tmp/install-runtime.sh
+RUN bash /tmp/install-runtime.sh && rm -rf /tmp/install-runtime.sh /var/lib/apt/lists/*
+
+# Pinned with --build-arg GNOMEPY_VERSION=x.y.z, or a session can install its own via the GNOMEPY_VERSION env var.
+ARG GNOMEPY_VERSION=""
+RUN /opt/gnome/venv/bin/pip install --quiet "gnomepy[strategy]${GNOMEPY_VERSION:+==$GNOMEPY_VERSION}"
+
+COPY --from=builder /app/target/gnome-orchestrator-*.jar /opt/gnome/app.jar
+COPY ami/files/start-session.sh /opt/gnome/start-session.sh
+
+# The same environment the gnome-strategy systemd unit sets on EC2.
+ENV JAVA_HOME=/usr/lib/jvm/current \
+    MAIN_CLASS=group.gnometrading.trading.TradingOrchestrator \
     PYTHONUNBUFFERED=1 \
     OPENBLAS_NUM_THREADS=1 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1
 
-# trixie ships libstdc++6 with GLIBCXX_3.4.32, required by libNativeSockets.so
-# (bookworm's GCC 12 only goes to GLIBCXX_3.4.31)
-RUN echo "deb http://deb.debian.org/debian trixie main" > /etc/apt/sources.list.d/trixie.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        git \
-        ca-certificates \
-        openjdk-17-jre-headless \
-    && apt-get install -y --no-install-recommends -t trixie libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN ln -sf "$(dirname "$(dirname "$(readlink -f "$(which java)")")")" /usr/lib/jvm/current
-ENV JAVA_HOME=/usr/lib/jvm/current
-
-WORKDIR /app
-
-COPY --from=builder /app/target/gnome-orchestrator-*.jar app.jar
-
-# GNOME_JARS tells gnomepy's _classpath.py where the orchestrator uber JAR is
-ENV GNOME_JARS=/app/app.jar
-
-# Defaults to latest gnomepy from PyPI; pin with --build-arg GNOMEPY_VERSION=x.y.z
-ARG GNOMEPY_VERSION=""
-RUN if [ -n "$GNOMEPY_VERSION" ]; then pip install "gnomepy[strategy]==${GNOMEPY_VERSION}"; else pip install "gnomepy[strategy]"; fi
-
-ENV MAIN_CLASS="group.gnometrading.trading.TradingOrchestrator"
-
-COPY docker-entry.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
+WORKDIR /opt/gnome
+ENTRYPOINT ["/opt/gnome/start-session.sh"]

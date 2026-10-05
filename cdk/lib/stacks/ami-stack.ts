@@ -82,6 +82,7 @@ export class AmiStack extends cdk.Stack {
       ['InstallRuntime', readAmiFile('scripts/install-runtime.sh')],
       ['InstallBootstrap', [
         installFile('files/run-strategy.sh', '/opt/gnome/run-strategy.sh', '0755'),
+        installFile('files/start-session.sh', '/opt/gnome/start-session.sh', '0755'),
         installFile('files/gnome-strategy.service', '/etc/systemd/system/gnome-strategy.service', '0644'),
         installFile('files/gnome-boot-guard.service', '/etc/systemd/system/gnome-boot-guard.service', '0644'),
         'systemctl daemon-reload',

@@ -1,11 +1,10 @@
 #!/bin/bash
 # Starts one strategy session from /etc/gnome/session.json, written by the launcher's user data. Runs as the
 # gnome-strategy systemd unit; whatever happens, the unit's ExecStopPost shuts the instance down afterwards.
+# Only the EC2-specific setup lives here; start-session.sh is the part shared with the local Docker image.
 set -euo pipefail
 
 SESSION_FILE=/etc/gnome/session.json
-APP_JAR=/opt/gnome/app.jar
-VENV=/opt/gnome/venv
 
 # Marks the instance as used so the boot guard shuts it down if it ever reboots: user data only runs once.
 touch /var/lib/gnome/session-ran
@@ -76,36 +75,4 @@ PY
   echo "run-strategy: isolated cpus ${CPU_ISOLATED}, housekeeping cpus ${CPU_HOUSEKEEPING}"
 fi
 
-secret() {
-  aws secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text 2>/dev/null \
-    || aws secretsmanager get-secret-value --region us-east-1 --secret-id "$1" --query SecretString --output text
-}
-GH_SECRET=$(secret gnomepy/gh-token)
-GH_TOKEN=$(echo "$GH_SECRET" | jq -r '.token? // empty' 2>/dev/null || true)
-GH_TOKEN=${GH_TOKEN:-$GH_SECRET}
-
-echo "run-strategy: fetching gnome-orchestrator ${ORCHESTRATOR_VERSION}"
-curl -fsSL -u "gnome:${GH_TOKEN}" -o "$APP_JAR" \
-  "https://maven.pkg.github.com/gnome-trading-group/gnome-orchestrator/group/gnometrading/gnome-orchestrator/${ORCHESTRATOR_VERSION}/gnome-orchestrator-${ORCHESTRATOR_VERSION}.jar"
-export GNOME_JARS=$APP_JAR
-
-echo "run-strategy: installing gnomepy ${GNOMEPY_VERSION}"
-"$VENV/bin/pip" install --quiet "gnomepy[strategy]==${GNOMEPY_VERSION}"
-
-if [ "${STRATEGY_TYPE:-java}" = "python" ]; then
-  RESEARCH_DIR=/opt/gnome/gnomepy-research
-  git clone --filter=blob:none --quiet \
-    "https://x-access-token:${GH_TOKEN}@github.com/gnome-trading-group/gnomepy-research.git" "$RESEARCH_DIR"
-  git -C "$RESEARCH_DIR" checkout --quiet "${RESEARCH_COMMIT:-main}"
-  git -C "$RESEARCH_DIR" --no-pager log -1 --oneline
-  "$VENV/bin/pip" install --quiet --no-deps "$RESEARCH_DIR"
-  unset GH_TOKEN GH_SECRET
-  echo "run-strategy: starting python strategy ${STRATEGY_CLASS}"
-  exec "$VENV/bin/python" -m gnomepy.java.strategy.runner
-fi
-
-unset GH_TOKEN GH_SECRET
-# JVM flags live in gnomepy so the Java and Python launch paths cannot drift apart.
-mapfile -t JVM_ARGS < <("$VENV/bin/python" -c 'from gnomepy.java._jvm import STRATEGY_JVM_ARGS; print("\n".join(STRATEGY_JVM_ARGS))')
-echo "run-strategy: starting java strategy ${STRATEGY_CLASS:-}"
-exec java "${JVM_ARGS[@]}" -cp "$APP_JAR" "$MAIN_CLASS"
+exec /opt/gnome/start-session.sh
