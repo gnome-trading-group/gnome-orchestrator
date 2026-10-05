@@ -6,7 +6,6 @@ import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.CancelOrderEncoder;
-import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Mbp10Decoder;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.MessageHeaderEncoder;
@@ -30,9 +29,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  * into the simulation so the book state stays current, and converting simulated fills back into
  * {@link OrderExecutionReport} messages that the OMS forwards to the strategy.
  *
- * <p>Polling order: market data first so the book is up to date, then drain matured actions so
- * orders are matched against the current book, then enqueue new pending actions, then deliver
- * ready reports.
+ * <p>Polling order: market data first so the book is up to date, then hand actions that have
+ * reached the exchange to it, then let it process whatever has come due (it holds each message for
+ * its processing time before matching), then enqueue new actions, then deliver ready reports.
  *
  * <p>{@link SimulatedExchange} is not thread-safe. All calls to it happen on this agent's thread.
  */
@@ -93,6 +92,7 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
         int work = 0;
         work += marketDataPoller.poll();
         work += drainReadyActions();
+        work += processDue();
         work += orderOutboundPoller.poll();
         work += drainReadyReports();
         return work;
@@ -132,28 +132,29 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
         return count;
     }
 
+    /** Hands an action to the exchange as it arrives; it answers at once only to reject. */
     private void processAction(final PendingAction action) {
-        final List<OrderExecutionReport> reports;
-        final long returnDelay;
-
+        final long now = clock.nanoTime();
+        final List<OrderExecutionReport> rejects;
         if (action.templateId == OrderDecoder.TEMPLATE_ID) {
             order.wrap(action.buffer);
-            reports = exchange.submitOrder(order);
-            final boolean isMaker = !hasFill(reports);
-            returnDelay = exchange.simulateOrderProcessingTime(isMaker) + exchange.simulateNetworkLatency();
+            rejects = exchange.submitOrder(order, now);
         } else if (action.templateId == CancelOrderDecoder.TEMPLATE_ID) {
             cancelOrder.wrap(action.buffer);
-            reports = exchange.cancelOrder(cancelOrder);
-            returnDelay = exchange.simulateOrderProcessingTime() + exchange.simulateNetworkLatency();
+            rejects = exchange.cancelOrder(cancelOrder, now);
         } else if (action.templateId == ModifyOrderDecoder.TEMPLATE_ID) {
             modifyOrder.wrap(action.buffer);
-            reports = exchange.modifyOrder(modifyOrder);
-            returnDelay = exchange.simulateOrderProcessingTime() + exchange.simulateNetworkLatency();
+            rejects = exchange.modifyOrder(modifyOrder, now);
         } else {
             return;
         }
+        scheduleExecReports(rejects, exchange.simulateNetworkLatency());
+    }
 
-        scheduleExecReports(reports, returnDelay);
+    private int processDue() {
+        final List<OrderExecutionReport> reports = exchange.processDue(clock.nanoTime());
+        scheduleExecReports(reports, exchange.simulateNetworkLatency());
+        return reports.size();
     }
 
     private void scheduleExecReports(final List<OrderExecutionReport> reports, final long delay) {
@@ -186,16 +187,6 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
             count++;
         }
         return count;
-    }
-
-    private static boolean hasFill(final List<OrderExecutionReport> reports) {
-        for (int i = 0; i < reports.size(); i++) {
-            final ExecType et = reports.get(i).decoder.execType();
-            if (et == ExecType.FILL || et == ExecType.PARTIAL_FILL) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static final class PendingAction {

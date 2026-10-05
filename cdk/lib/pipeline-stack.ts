@@ -6,7 +6,6 @@ import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONFIGS, GITHUB_BRANCH, GITHUB_REPO, OrchestratorConfig } from './config';
-import { EcrStack } from './stacks/ecr-stack';
 import { AmiStack } from './stacks/ami-stack';
 import { Ec2Stack } from './stacks/ec2-stack';
 import { NetworkStack } from './stacks/network-stack';
@@ -33,16 +32,12 @@ class AppStage extends cdk.Stage {
   constructor(scope: Construct, id: string, config: OrchestratorConfig) {
     super(scope, id, { env: config.account.environment });
 
-    const ecrStack = new EcrStack(this, 'OrchestratorEcrStack', {
-      ecsRegions: config.ecsRegions,
-    });
-
     new StorageStack(this, 'OrchestratorStorageStack', {
       stage: config.account.stage,
       orchestratorVersion: releasedOrchestratorVersion(),
     });
 
-    for (const region of config.ecsRegions) {
+    for (const region of config.regions) {
       const env = { account: config.account.accountId, region };
       // Construct id kept from when this stack held the ECS cluster; changing it would recreate the VPC.
       const network = new NetworkStack(this, `OrchestratorEcsStack-${region}`, { env });
@@ -58,7 +53,7 @@ class AppStage extends cdk.Stage {
           env,
           vpc: network.vpc,
           securityGroup: network.securityGroup,
-          regions: config.ecsRegions,
+          regions: config.regions,
         });
       }
     }
