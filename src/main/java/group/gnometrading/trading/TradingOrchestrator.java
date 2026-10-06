@@ -42,6 +42,7 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.RegistryEndpoint;
 import group.gnometrading.shared.RiskModule;
+import group.gnometrading.shared.SessionTag;
 import group.gnometrading.simulation.config.ExchangeProfileConfig;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
 import group.gnometrading.simulation.latency.LatencySeeds;
@@ -547,7 +548,8 @@ public class TradingOrchestrator extends Orchestrator {
                     marketDataBuffer,
                     orderOutboundBuffer,
                     execReportBuffer,
-                    getInstance(EpochNanoClock.class));
+                    getInstance(EpochNanoClock.class),
+                    SessionTag.of(properties));
         }
 
         final Class<? extends DefaultOutboundOrchestrator> orchClass =

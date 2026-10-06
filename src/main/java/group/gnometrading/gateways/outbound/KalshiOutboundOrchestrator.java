@@ -21,6 +21,7 @@ import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.shared.SessionTag;
 import group.gnometrading.sm.Listing;
 import java.io.IOException;
 import java.net.URI;
@@ -113,17 +114,6 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 getInstance(EpochClock.class));
     }
 
-    /**
-     * Kalshi deduplicates on client order ids, and the OMS's counter restarts each session, so each order's id
-     * starts with the session's id; a local run without one uses its start time.
-     */
-    private static String sessionTag(final Properties properties) {
-        if (properties.hasProperty("session.id")) {
-            return properties.getStringProperty("session.id");
-        }
-        return "t" + Long.toString(System.currentTimeMillis(), Character.MAX_RADIX);
-    }
-
     @Override
     public GnomeAgent startGatewayAgents(
             final SequencedRingBuffer<?> orderOutboundBuffer,
@@ -172,7 +162,7 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 writerSigner,
                 nanoClock,
                 listing,
-                sessionTag(properties));
+                SessionTag.of(properties));
 
         return startAgents(reader, writer, config, logger, epochClock, errorHandler);
     }

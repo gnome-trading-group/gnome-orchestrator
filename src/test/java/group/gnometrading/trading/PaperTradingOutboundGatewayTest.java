@@ -55,7 +55,8 @@ class PaperTradingOutboundGatewayTest {
         orderBuffer = new SequencedRingBuffer<>(Order::new, new GlobalSequence());
         marketDataBuffer = new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
         execReportBuffer = new SequencedRingBuffer<>(OrderExecutionReport::new, new GlobalSequence());
-        gateway = new PaperTradingOutboundGateway(exchange, marketDataBuffer, orderBuffer, execReportBuffer, () -> now);
+        gateway = new PaperTradingOutboundGateway(
+                exchange, marketDataBuffer, orderBuffer, execReportBuffer, () -> now, "session-a");
         execReportPoller = execReportBuffer.createPoller((globalSeq, templateId, buf, len) -> {
             OrderExecutionReport report = new OrderExecutionReport();
             report.buffer.putBytes(0, buf, 0, len);
@@ -91,6 +92,17 @@ class PaperTradingOutboundGatewayTest {
         // Event time is when the exchange processed it, after it arrived and its processing time passed.
         assertEquals(sent + NETWORK + PROCESSING, reports.get(0).decoder.timestampEvent());
         assertEquals(sent + 2 * NETWORK + PROCESSING, reports.get(0).decoder.timestampRecv());
+    }
+
+    @Test
+    void everyReportCarriesAnOrderIdUniqueToTheSession() throws Exception {
+        long sent = now;
+        publishLimit(50, 5, Side.Bid, 1L);
+        publishLimit(51, 5, Side.Bid, 12_345L);
+        stepTo(sent + 2 * NETWORK + PROCESSING + TAKER_DELAY);
+
+        assertEquals("session-a-1", reports.get(0).decoder.exchangeOrderId());
+        assertEquals("session-a-12345", reports.get(1).decoder.exchangeOrderId());
     }
 
     @Test

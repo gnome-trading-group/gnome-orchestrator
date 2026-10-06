@@ -20,6 +20,9 @@ import group.gnometrading.schemas.OrderExecutionReportEncoder;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.simulation.exchange.SimulatedExchange;
+import group.gnometrading.utils.ByteBufferUtils;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -61,13 +64,21 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
     private final FixedCapacityQueue<PendingReport> pendingReports =
             new FixedCapacityQueue<>(PendingReport[]::new, PendingReport::new, PENDING_CAPACITY);
 
+    // Each report's venue order id, {sessionTag}-{counter}, as a live venue would give it, so paper records orders
+    // in the ledger exactly as live does.
+    private final byte[] orderIdPrefix;
+    private final byte[] orderIdBytes = new byte[OrderExecutionReportEncoder.exchangeOrderIdLength()];
+    private final ByteBuffer orderIdBuffer = ByteBuffer.wrap(orderIdBytes);
+
     public PaperTradingOutboundGateway(
             SimulatedExchange exchange,
             SequencedRingBuffer<?> marketDataBuffer,
             SequencedRingBuffer<?> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
-            EpochNanoClock clock) {
+            EpochNanoClock clock,
+            String sessionTag) {
         this.exchange = exchange;
+        this.orderIdPrefix = (sessionTag + "-").getBytes(StandardCharsets.US_ASCII);
         this.execReportBuffer = execReportBuffer;
         this.clock = clock;
         this.marketDataPoller = marketDataBuffer.createPoller(this::onMarketData);
@@ -167,10 +178,21 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
             final OrderExecutionReport report = reports.get(i);
             report.encoder.timestampEvent(now);
             report.encoder.timestampRecv(deliveryNano);
+            writeExchangeOrderId(report);
             final PendingReport slot = pendingReports.offer();
             slot.buffer.putBytes(0, report.buffer, 0, EXEC_REPORT_SIZE);
             slot.templateId = report.messageHeaderDecoder.templateId();
             slot.deliveryNano = deliveryNano;
+        }
+    }
+
+    private void writeExchangeOrderId(final OrderExecutionReport report) {
+        orderIdBuffer.clear();
+        orderIdBuffer.put(orderIdPrefix);
+        ByteBufferUtils.putLongAscii(orderIdBuffer, report.getClientOidCounter());
+        final int length = orderIdBuffer.position();
+        for (int i = 0; i < orderIdBytes.length; i++) {
+            report.encoder.exchangeOrderId(i, i < length ? orderIdBytes[i] : 0);
         }
     }
 
