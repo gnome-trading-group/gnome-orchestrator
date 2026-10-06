@@ -8,12 +8,14 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Schema;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedEventHandler;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.RiskModule;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.trading.AgentRuntimeInstaller;
 import java.util.ArrayList;
 import java.util.List;
 import org.agrona.ErrorHandler;
@@ -89,9 +91,13 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     @Provides
     @Singleton
     public final InboundGateway provideInboundGateway() {
+        // A reader on its own isolated core spins rather than sleeping in a blocking read: waking cost ~130us per
+        // message on c7i against single-digit microseconds spinning. Collectors and standard sessions keep blocking.
+        GatewayConfig config = getInstance(GatewayConfig.class)
+                .withSpinReads(AgentRuntimeInstaller.pinsHotAgents(getInstance(Properties.class)));
         return new InboundGateway(
                 getInstance(Logger.class),
-                getInstance(GatewayConfig.class),
+                config,
                 getInstance(InboundSocketReader.class),
                 getInstance(EpochClock.class));
     }

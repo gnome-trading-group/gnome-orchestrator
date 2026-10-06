@@ -40,8 +40,17 @@ public final class AgentRuntimeInstaller {
      *
      * @param listingCount used only to warn when the instance has fewer isolated cores than hot threads
      */
+    /**
+     * Whether hot agents get isolated cores of their own. Inbound socket readers spin exactly when this holds, so a
+     * reader never busy-polls a core it shares.
+     */
+    public static boolean pinsHotAgents(Properties properties) {
+        return LOW_LATENCY.equals(profile(properties))
+                && Boolean.parseBoolean(optional(properties, "cpu.affinity.enabled", "false"));
+    }
+
     public static void install(Properties properties, Logger logger, int listingCount) {
-        String profile = optional(properties, "latency.profile", LOW_LATENCY).toLowerCase(Locale.ROOT);
+        String profile = profile(properties);
         AgentRuntime.Listener listener = new LoggingListener(logger);
 
         if (STANDARD.equals(profile)) {
@@ -52,7 +61,7 @@ public final class AgentRuntimeInstaller {
         if (!LOW_LATENCY.equals(profile)) {
             throw new IllegalArgumentException("Unknown latency.profile: " + profile);
         }
-        if (!Boolean.parseBoolean(optional(properties, "cpu.affinity.enabled", "false"))) {
+        if (!pinsHotAgents(properties)) {
             AgentRuntime.install(ThreadPinner.NONE, CoreAllocator.NONE, IdlePolicy.lowLatency(), listener);
             logger.logf(LogMessage.DEBUG, "Latency profile low_latency without CPU affinity: no pinning, no spinning");
             return;
@@ -95,6 +104,10 @@ public final class AgentRuntimeInstaller {
         int perListing = "live".equals(mode) ? 3 : 2;
         int multiListing = listingCount > 1 ? 2 : 0;
         return perListing * listingCount + 2 + multiListing;
+    }
+
+    private static String profile(Properties properties) {
+        return optional(properties, "latency.profile", LOW_LATENCY).toLowerCase(Locale.ROOT);
     }
 
     private static String optional(Properties properties, String key, String fallback) {

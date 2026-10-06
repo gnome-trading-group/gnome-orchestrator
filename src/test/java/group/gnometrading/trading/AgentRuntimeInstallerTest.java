@@ -42,6 +42,13 @@ class AgentRuntimeInstallerTest {
     }
 
     @Test
+    void testOnlyLowLatencyWithAffinityPinsHotAgents() throws Exception {
+        assertTrue(AgentRuntimeInstaller.pinsHotAgents(new Properties("agent-runtime/affinity.properties")));
+        assertFalse(AgentRuntimeInstaller.pinsHotAgents(new Properties("agent-runtime/no-affinity.properties")));
+        assertFalse(AgentRuntimeInstaller.pinsHotAgents(new Properties("agent-runtime/standard.properties")));
+    }
+
+    @Test
     void testStandardProfileNeverSpins() throws Exception {
         AgentRuntimeInstaller.install(new Properties("agent-runtime/standard.properties"), logger, 1);
 
