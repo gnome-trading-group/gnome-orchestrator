@@ -2,7 +2,6 @@ package group.gnometrading.trading;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
@@ -45,18 +44,15 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
 import group.gnometrading.strategies.StrategyAgent;
+import group.gnometrading.strategies.StrategyFactory;
 import java.io.IOException;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Parameter;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -511,102 +507,8 @@ public class TradingOrchestrator extends Orchestrator {
             strategyArgs = new HashMap<>(properties.getPropertiesByPrefix("strategy.args."));
         }
 
-        try {
-            Class<?> clazz = Class.forName(className);
-            for (Constructor<?> ctor : clazz.getConstructors()) {
-                StrategyAgent result = tryInstantiateConstructor(
-                        ctor, strategyId, mdBuf, erBuf, intentBuf, positionView, securityMaster, strategyArgs);
-                if (result != null) {
-                    return result;
-                }
-            }
-            throw new IllegalArgumentException("No constructor found for " + className + " matching strategy.args: "
-                    + strategyArgs.keySet() + ". Ensure the class is compiled with -parameters.");
-        } catch (IllegalArgumentException e) {
-            throw new RuntimeException(e);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to instantiate strategy class: " + className, e);
-        }
-    }
-
-    private static StrategyAgent tryInstantiateConstructor(
-            Constructor<?> ctor,
-            int strategyId,
-            SequencedRingBuffer<?> mdBuf,
-            SequencedRingBuffer<OrderExecutionReport> erBuf,
-            SequencedRingBuffer<Intent> intentBuf,
-            PositionView positionView,
-            SecurityMaster securityMaster,
-            Map<String, Object> strategyArgs)
-            throws ReflectiveOperationException {
-        Parameter[] params = ctor.getParameters();
-        if (params.length < 6 || !isInfrastructureParams(params)) {
-            return null;
-        }
-        if (params.length == 6 && strategyArgs.isEmpty()) {
-            return (StrategyAgent) ctor.newInstance(strategyId, mdBuf, erBuf, intentBuf, positionView, securityMaster);
-        }
-        if (params.length - 6 != strategyArgs.size()) {
-            return null;
-        }
-        Set<String> userParamNames = new HashSet<>();
-        for (int i = 6; i < params.length; i++) {
-            userParamNames.add(params[i].getName());
-        }
-        if (!userParamNames.equals(strategyArgs.keySet())) {
-            return null;
-        }
-        Object[] args = new Object[params.length];
-        args[0] = strategyId;
-        args[1] = mdBuf;
-        args[2] = erBuf;
-        args[3] = intentBuf;
-        args[4] = positionView;
-        args[5] = securityMaster;
-        for (int i = 6; i < params.length; i++) {
-            args[i] = convertStrategyArg(strategyArgs.get(params[i].getName()), params[i]);
-        }
-        return (StrategyAgent) ctor.newInstance(args);
-    }
-
-    private static boolean isInfrastructureParams(Parameter[] params) {
-        return int.class == params[0].getType()
-                && SequencedRingBuffer.class.isAssignableFrom(params[1].getType())
-                && SequencedRingBuffer.class.isAssignableFrom(params[2].getType())
-                && SequencedRingBuffer.class.isAssignableFrom(params[3].getType())
-                && PositionView.class.isAssignableFrom(params[4].getType())
-                && SecurityMaster.class.isAssignableFrom(params[5].getType());
-    }
-
-    private static Object convertStrategyArg(Object value, Parameter param) {
-        Class<?> type = param.getType();
-        if (type.isInstance(value)) {
-            return value;
-        }
-        if (value instanceof Number num) {
-            return coerceNumber(num, type);
-        }
-        if (type == String.class) {
-            return String.valueOf(value);
-        }
-        JavaType javaType = MAPPER.getTypeFactory().constructType(param.getParameterizedType());
-        return MAPPER.convertValue(value, javaType);
-    }
-
-    private static Object coerceNumber(Number num, Class<?> type) {
-        if (type == int.class || type == Integer.class) {
-            return num.intValue();
-        }
-        if (type == long.class || type == Long.class) {
-            return num.longValue();
-        }
-        if (type == double.class || type == Double.class) {
-            return num.doubleValue();
-        }
-        if (type == float.class || type == Float.class) {
-            return num.floatValue();
-        }
-        throw new IllegalArgumentException("Cannot coerce Number to " + type.getName());
+        return StrategyFactory.create(
+                className, strategyId, mdBuf, erBuf, intentBuf, positionView, securityMaster, strategyArgs);
     }
 
     private List<Listing> resolveListings(Properties properties, SecurityMaster securityMaster) {
