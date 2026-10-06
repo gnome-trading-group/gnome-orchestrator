@@ -1,6 +1,14 @@
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# An instance lives for one session and gets its updates from AMI rebuilds. Ubuntu's automatic upgrades, followed by
+# needrestart restarting every service they touched, would otherwise restart a running session mid-trade.
+# --now also stops one already running at boot, and the purge waits out the apt lock it may still hold.
+systemctl mask --now apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service
+apt-get -o DPkg::Lock::Timeout=300 purge -y unattended-upgrades
+install -d -m 0755 /etc/needrestart/conf.d
+echo "\$nrconf{restart} = 'l';" > /etc/needrestart/conf.d/90-gnome-no-restart.conf
+
 apt-get update
 apt-get install -y software-properties-common ca-certificates curl wget jq git unzip openjdk-17-jdk-headless
 # gnomepy requires exactly Python 3.13; Ubuntu 24.04 ships 3.12.

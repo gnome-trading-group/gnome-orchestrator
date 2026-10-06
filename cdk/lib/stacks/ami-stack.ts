@@ -100,6 +100,11 @@ export class AmiStack extends cdk.Stack {
         'systemctl is-enabled gnome-boot-guard.service',
         // No [Install] section, so systemd reports it "static" (exit 0): it can only be started, by user data.
         'test "$(systemctl is-enabled gnome-strategy.service || true)" != enabled',
+        // Nothing may upgrade packages, or restart services, under a running session.
+        'test "$(systemctl is-enabled apt-daily-upgrade.timer || true)" = masked',
+        'test "$(systemctl is-enabled apt-daily.timer || true)" = masked',
+        '! dpkg -s unattended-upgrades >/dev/null 2>&1',
+        "grep -q \"restart} = 'l'\" /etc/needrestart/conf.d/90-gnome-no-restart.conf",
       ].join('\n')],
     ]);
 

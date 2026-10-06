@@ -6,7 +6,13 @@ set -euo pipefail
 
 SESSION_FILE=/etc/gnome/session.json
 
-# Marks the instance as used so the boot guard shuts it down if it ever reboots: user data only runs once.
+# One session per instance. A second start, whether after a reboot or because something restarted this unit, must
+# not launch the session again: it would trade alongside, or after, the first. Exiting still ends the instance, through
+# the unit's ExecStopPost. The marker also tells the boot guard to shut the instance down if it ever reboots.
+if [ -e /var/lib/gnome/session-ran ]; then
+  echo "run-strategy: this instance has already run its session; not starting it again" >&2
+  exit 1
+fi
 touch /var/lib/gnome/session-ran
 
 # Validated first: a jq failure inside the process substitution below would not trip set -e, and the session
