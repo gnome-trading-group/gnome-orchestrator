@@ -13,6 +13,8 @@ import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.Polymarket
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOrderSigner;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOutboundReader;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOutboundWriter;
+import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlVenueOrderQuery;
+import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -120,6 +122,14 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
                 .withKeepAliveInterval(Duration.ofSeconds(10))
                 .withMaxSilentInterval(Duration.ofSeconds(30))
                 .build();
+    }
+
+    @Override
+    public VenueOrderQuery createVenueOrderQuery() {
+        return new PolymarketIntlVenueOrderQuery(
+                getInstance(HTTPClient.class),
+                getInstance(String.class, "CLOB_HOST"),
+                getInstance(PolymarketIntlAuthHeaders.class));
     }
 
     @Override

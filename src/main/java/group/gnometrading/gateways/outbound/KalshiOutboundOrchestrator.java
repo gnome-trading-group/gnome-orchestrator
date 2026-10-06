@@ -11,6 +11,8 @@ import group.gnometrading.gateways.credentials.KalshiCredentials;
 import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiAuthSigner;
 import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundReader;
 import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundWriter;
+import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiVenueOrderQuery;
+import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -103,6 +105,26 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
     }
 
     @Override
+    public VenueOrderQuery createVenueOrderQuery() {
+        return new KalshiVenueOrderQuery(
+                getInstance(HTTPClient.class),
+                getInstance(String.class, "API_HOST"),
+                getInstance(KalshiAuthSigner.class, "WRITER"),
+                getInstance(EpochClock.class));
+    }
+
+    /**
+     * Kalshi deduplicates on client order ids, and the OMS's counter restarts each session, so each order's id
+     * starts with the session's id; a local run without one uses its start time.
+     */
+    private static String sessionTag(final Properties properties) {
+        if (properties.hasProperty("session.id")) {
+            return properties.getStringProperty("session.id");
+        }
+        return "t" + Long.toString(System.currentTimeMillis(), Character.MAX_RADIX);
+    }
+
+    @Override
     public GnomeAgent startGatewayAgents(
             final SequencedRingBuffer<?> orderOutboundBuffer,
             final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
@@ -149,7 +171,8 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 apiHost,
                 writerSigner,
                 nanoClock,
-                listing);
+                listing,
+                sessionTag(properties));
 
         return startAgents(reader, writer, config, logger, epochClock, errorHandler);
     }

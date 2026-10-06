@@ -55,12 +55,12 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.26.0</version>
+            <version>1.29.1</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-oms</artifactId>
-            <version>1.8.1</version>
+            <version>1.9.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -70,17 +70,17 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-schemas</artifactId>
-            <version>1.8.1</version>
+            <version>1.8.2</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-simulation</artifactId>
-            <version>1.5.1</version>
+            <version>1.5.3</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>1.9.3</version>
+            <version>1.11.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -100,7 +100,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-logging</artifactId>
-            <version>1.1.5</version>
+            <version>1.2.2</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

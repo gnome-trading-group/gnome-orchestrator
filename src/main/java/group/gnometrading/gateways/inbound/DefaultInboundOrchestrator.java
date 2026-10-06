@@ -1,7 +1,6 @@
 package group.gnometrading.gateways.inbound;
 
 import group.gnometrading.concurrent.GnomeAgentRunner;
-import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
@@ -16,8 +15,6 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.RiskModule;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.trading.AgentRuntimeInstaller;
-import java.util.ArrayList;
-import java.util.List;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -104,35 +101,9 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     @Singleton
-    @Named("ERROR_TIMESTAMPS")
-    public final List<Long> provideErrorTimestamps() {
-        return new ArrayList<>();
-    }
-
-    @Provides
     public final ErrorHandler provideInboundErrorHandler() {
-        InboundGateway gateway = getInstance(InboundGateway.class);
-        Logger logger = getInstance(Logger.class);
-        List<Long> errorTimestamps = getInstance(List.class, "ERROR_TIMESTAMPS");
-
-        return (error) -> {
-            logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in market inbound gateway: %s", error.getMessage());
-
-            long currentTime = System.currentTimeMillis();
-            synchronized (errorTimestamps) {
-                errorTimestamps.add(currentTime);
-
-                // Remove errors older than 1 minute
-                errorTimestamps.removeIf(timestamp -> currentTime - timestamp > 60_000);
-
-                if (errorTimestamps.size() >= 10) {
-                    logger.log(LogMessage.FATAL_ERROR_EXITING);
-                    System.exit(1);
-                    return;
-                }
-                gateway.forceReconnect();
-            }
-        };
+        final InboundGateway gateway = getInstance(InboundGateway.class);
+        return new InboundGatewayErrorHandler(getInstance(Logger.class), gateway::forceReconnect, System::exit);
     }
 
     @SuppressWarnings("unchecked")

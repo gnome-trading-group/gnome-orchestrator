@@ -12,12 +12,17 @@ import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
+import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.networking.http.HTTPClient;
+import group.gnometrading.networking.http.RetryableHTTPClient;
 import group.gnometrading.oms.OmsAgent;
 import group.gnometrading.oms.OrderManagementSystem;
-import group.gnometrading.oms.pnl.PnlReportingAgent;
+import group.gnometrading.oms.ledger.LedgerAgent;
+import group.gnometrading.oms.ledger.LedgerRing;
+import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.PriceWriterAgent;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
@@ -45,7 +50,9 @@ import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
 import group.gnometrading.strategies.StrategyAgent;
 import group.gnometrading.strategies.StrategyFactory;
+import group.gnometrading.trading.recovery.StartupRecovery;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -53,6 +60,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -90,7 +98,8 @@ public class TradingOrchestrator extends Orchestrator {
     }
 
     private static final int OUTBOUND_BUFFER_SIZE = 64;
-    private static final Duration DEFAULT_PNL_FLUSH_INTERVAL = Duration.ofSeconds(30);
+    private static final int LEDGER_CONNECT_TIMEOUT_MS = 1_000;
+    private static final int LEDGER_RESPONSE_TIMEOUT_MS = 2_000;
     // Paper sessions are reproducible by default; set simulation.seed to vary the latency draws.
     private static final long PAPER_TRADING_DEFAULT_SEED = 0x9E3779B97F4A7C15L;
 
@@ -145,6 +154,15 @@ public class TradingOrchestrator extends Orchestrator {
         }
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(sharedBuffer);
+        String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
+        // Without a session (a local run) there is no ledger to write to or to recover from.
+        LedgerRing ledgerRing = sessionId == null
+                ? null
+                : new LedgerRing(
+                        properties.getIntProperty("ledger.ring.capacity"),
+                        LedgerAgent.MAX_EVENTS_PER_BATCH,
+                        TimeUnit.MILLISECONDS.toNanos(properties.getLongProperty("ledger.max.lag.ms")),
+                        positionTracker);
         SharedPriceBuffer priceBuffer = new SharedPriceBuffer(listings.size());
         PriceSlotRegistry priceSlotRegistry = new PriceSlotRegistry(listings.size());
         for (Listing listing : listings) {
@@ -158,6 +176,7 @@ public class TradingOrchestrator extends Orchestrator {
                 securityMaster,
                 priceBuffer,
                 priceSlotRegistry,
+                ledgerRing != null ? ledgerRing : LedgerSink.NONE,
                 getInstance(EpochNanoClock.class));
         for (Listing listing : listings) {
             positionTracker.registerSlot(strategyId, listing.listingId());
@@ -185,8 +204,9 @@ public class TradingOrchestrator extends Orchestrator {
         SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer =
                 new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
 
-        OutboundSetup outboundSetup =
-                setupOutbound(listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, globalSequence);
+        Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
+        OutboundSetup outboundSetup = setupOutbound(
+                listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, globalSequence, venueQueries);
         List<GnomeAgent> outboundAgents = outboundSetup.agents();
         ListingRouter routerAgent = outboundSetup.router();
 
@@ -200,24 +220,20 @@ public class TradingOrchestrator extends Orchestrator {
         StrategyAgent strategy = createStrategyAgent(
                 strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
 
-        RegistryConnection registryConnection = getInstance(RegistryConnection.class);
         EpochClock epochClock = SystemEpochClock.INSTANCE;
 
-        String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
-
-        PnlReportingAgent pnlReportingAgent = null;
-        if (sessionId != null) {
-            int pnlFlushSeconds = properties.getIntProperty("pnl.flush.interval.seconds");
-            pnlReportingAgent = new PnlReportingAgent(
-                    positionTracker,
-                    registryConnection,
-                    epochClock,
-                    Duration.ofSeconds(pnlFlushSeconds),
-                    listings.size(),
-                    sessionId,
-                    priceBuffer,
-                    priceSlotRegistry);
-        }
+        LedgerAgent ledgerAgent = ledgerRing == null
+                ? null
+                : recoverAndCreateLedgerAgent(
+                        ledgerRing,
+                        positionTracker,
+                        priceBuffer,
+                        priceSlotRegistry,
+                        sessionId,
+                        strategyId,
+                        listings,
+                        venueQueries,
+                        epochClock);
 
         // Built here rather than injected so the policies that value positions get the session's mark prices.
         RiskSyncAgent riskSyncAgent = new RiskSyncAgent(
@@ -249,7 +265,7 @@ public class TradingOrchestrator extends Orchestrator {
                 muxAgent,
                 routerAgent,
                 strategy,
-                pnlReportingAgent,
+                ledgerAgent,
                 priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
@@ -274,12 +290,73 @@ public class TradingOrchestrator extends Orchestrator {
             closeQuietly(outbound, logger);
         }
         closeQuietly(started.mux(), logger);
-        closeQuietly(started.pnl(), logger);
+        // After the OMS and gateways, so its final write holds everything they recorded while closing.
+        closeQuietly(started.ledger(), logger);
         closeQuietly(started.priceWriter(), logger);
         closeQuietly(started.riskSync(), logger);
         // Last, so the journal holds everything the agents wrote while closing.
         closeQuietly(journalRunner, logger);
         logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
+    }
+
+    /**
+     * Picks up what the strategy's earlier sessions left (positions, and in live, orders on the venue) before any
+     * agent starts, then builds the agent that records this session's orders and fills.
+     */
+    private LedgerAgent recoverAndCreateLedgerAgent(
+            LedgerRing ledgerRing,
+            DefaultPositionTracker positionTracker,
+            SharedPriceBuffer priceBuffer,
+            PriceSlotRegistry priceSlotRegistry,
+            String sessionId,
+            int strategyId,
+            List<Listing> listings,
+            Map<Integer, VenueOrderQuery> venueQueries,
+            EpochClock epochClock) {
+        Properties properties = getInstance(Properties.class);
+        try {
+            new StartupRecovery(
+                            getInstance(RegistryConnection.class),
+                            positionTracker,
+                            logger,
+                            epochClock,
+                            sessionId,
+                            strategyId,
+                            properties.getStringProperty("mode"),
+                            properties.getBooleanProperty("recovery.inherit"),
+                            listings,
+                            venueQueries)
+                    .run();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Startup recovery couldn't reach the venue", e);
+        }
+        return new LedgerAgent(
+                ledgerRing,
+                ledgerRegistryConnection(),
+                epochClock,
+                logger,
+                sessionId,
+                priceBuffer,
+                priceSlotRegistry,
+                properties.getLongProperty("ledger.flush.interval.ms"),
+                properties.getLongProperty("ledger.mark.interval.ms"));
+    }
+
+    /**
+     * The ledger agent's own connection: the registry client isn't thread-safe, and a ledger write must fail fast
+     * and be retried on the agent's schedule rather than block its thread in the client's own retries.
+     */
+    private RegistryConnection ledgerRegistryConnection() {
+        RegistryEndpoint endpoint = getInstance(RegistryEndpoint.class);
+        return new RegistryConnection(
+                endpoint.host(),
+                endpoint.apiKey(),
+                RetryableHTTPClient.builder()
+                        .withMaxRetries(0)
+                        .withHttpClient(HTTPClient.builder()
+                                .withConnectTimeout(LEDGER_CONNECT_TIMEOUT_MS)
+                                .withResponseTimeout(LEDGER_RESPONSE_TIMEOUT_MS))
+                        .build());
     }
 
     private void reportRunning(String sessionId, Logger logger) {
@@ -338,11 +415,16 @@ public class TradingOrchestrator extends Orchestrator {
             List<SequencedRingBuffer<?>> perListingMdBuffers,
             SequencedRingBuffer<Intent> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
-            GlobalSequence globalSequence) {
+            GlobalSequence globalSequence,
+            Map<Integer, VenueOrderQuery> venueQueries) {
         List<GnomeAgent> agents = new ArrayList<>(listings.size());
         if (listings.size() == 1) {
             agents.add(createOutboundGateway(
-                    listings.get(0), perListingMdBuffers.get(0), orderOutboundBuffer, omsExecReportBuffer));
+                    listings.get(0),
+                    perListingMdBuffers.get(0),
+                    orderOutboundBuffer,
+                    omsExecReportBuffer,
+                    venueQueries));
             return new OutboundSetup(agents, null);
         }
         Map<Long, SequencedRingBuffer<?>> perListingOutBufs = new HashMap<>();
@@ -357,8 +439,8 @@ public class TradingOrchestrator extends Orchestrator {
                     new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
             perListingOutBufs.put(routingKey, perExchangeOutBuf);
             perExchangeExecBufs.add(perExchangeExecBuf);
-            agents.add(
-                    createOutboundGateway(listing, perListingMdBuffers.get(i), perExchangeOutBuf, perExchangeExecBuf));
+            agents.add(createOutboundGateway(
+                    listing, perListingMdBuffers.get(i), perExchangeOutBuf, perExchangeExecBuf, venueQueries));
         }
         return new OutboundSetup(
                 agents,
@@ -371,7 +453,7 @@ public class TradingOrchestrator extends Orchestrator {
             List<GnomeAgentRunner> outboundAgents,
             GnomeAgentRunner mux,
             GnomeAgentRunner router,
-            GnomeAgentRunner pnl,
+            GnomeAgentRunner ledger,
             GnomeAgentRunner priceWriter,
             GnomeAgentRunner riskSync) {}
 
@@ -382,7 +464,7 @@ public class TradingOrchestrator extends Orchestrator {
             MarketDataMultiplexer muxAgent,
             ListingRouter routerAgent,
             StrategyAgent strategy,
-            PnlReportingAgent pnlReportingAgent,
+            LedgerAgent ledgerAgent,
             PriceWriterAgent priceWriterAgent,
             RiskSyncAgent riskSyncAgent,
             ErrorHandler errorHandler) {
@@ -411,10 +493,10 @@ public class TradingOrchestrator extends Orchestrator {
         }
         GnomeAgentRunner strategyRunner = new GnomeAgentRunner(strategy, errorHandler);
         GnomeAgentRunner.startOnThread(strategyRunner);
-        GnomeAgentRunner pnlRunner = null;
-        if (pnlReportingAgent != null) {
-            pnlRunner = new GnomeAgentRunner(pnlReportingAgent, errorHandler);
-            GnomeAgentRunner.startOnThread(pnlRunner);
+        GnomeAgentRunner ledgerRunner = null;
+        if (ledgerAgent != null) {
+            ledgerRunner = new GnomeAgentRunner(ledgerAgent, errorHandler);
+            GnomeAgentRunner.startOnThread(ledgerRunner);
         }
         GnomeAgentRunner riskSyncRunner = new GnomeAgentRunner(riskSyncAgent, errorHandler);
         GnomeAgentRunner.startOnThread(riskSyncRunner);
@@ -424,7 +506,7 @@ public class TradingOrchestrator extends Orchestrator {
                 outboundRunners,
                 muxRunner,
                 routerRunner,
-                pnlRunner,
+                ledgerRunner,
                 priceWriterRunner,
                 riskSyncRunner);
     }
@@ -448,7 +530,8 @@ public class TradingOrchestrator extends Orchestrator {
             Listing listing,
             SequencedRingBuffer<?> marketDataBuffer,
             SequencedRingBuffer<?> orderOutboundBuffer,
-            SequencedRingBuffer<OrderExecutionReport> execReportBuffer) {
+            SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
+            Map<Integer, VenueOrderQuery> venueQueries) {
         Properties properties = getInstance(Properties.class);
         String mode = properties.getStringProperty("mode");
 
@@ -470,6 +553,7 @@ public class TradingOrchestrator extends Orchestrator {
         final Class<? extends DefaultOutboundOrchestrator> orchClass =
                 DefaultOutboundOrchestrator.findOutboundOrchestrator(listing);
         final DefaultOutboundOrchestrator outboundOrch = createChildOrchestrator(orchClass);
+        venueQueries.put(listing.listingId(), outboundOrch.createVenueOrderQuery());
         final ErrorHandler errorHandler = getInstance(ErrorHandler.class);
         return outboundOrch.startGatewayAgents(orderOutboundBuffer, execReportBuffer, errorHandler);
     }
