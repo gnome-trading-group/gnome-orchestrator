@@ -2,7 +2,6 @@ package group.gnometrading.gateways.outbound;
 
 import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
-import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
@@ -115,7 +114,7 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
     }
 
     @Override
-    public GnomeAgent startGatewayAgents(
+    public OutboundAgents startGatewayAgents(
             final SequencedRingBuffer<?> orderOutboundBuffer,
             final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             final ErrorHandler errorHandler) {
@@ -149,10 +148,14 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 wsClient,
                 new JsonDecoder(),
                 readerSigner,
+                // Its own client: the reader catches up over REST on the supervisor's thread after a reconnect.
+                OrderEntryHttpClients.create(),
+                apiHost,
                 takerFee,
                 makerFee);
 
         final KalshiOutboundWriter writer = new KalshiOutboundWriter(
+                logger,
                 orderOutboundBuffer,
                 newOrderQueue,
                 writerReportQueue,

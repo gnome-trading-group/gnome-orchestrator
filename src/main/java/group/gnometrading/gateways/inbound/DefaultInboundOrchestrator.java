@@ -5,6 +5,7 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
+import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
@@ -117,11 +118,15 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     }
 
     @SuppressWarnings("unchecked")
-    public final void startGatewayAgents() {
+    public final GatewayRunners startGatewayAgents() {
         ErrorHandler errorHandler = getInstance(ErrorHandler.class);
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(InboundGateway.class), errorHandler));
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(InboundSocketReader.class), errorHandler));
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(getInstance(InboundSocketWriter.class), errorHandler));
+        InboundSocketReader<?> reader = getInstance(InboundSocketReader.class);
+        return GatewayRunners.marketData(
+                        reader.pauseControl,
+                        new GnomeAgentRunner(reader, errorHandler),
+                        new GnomeAgentRunner(getInstance(InboundSocketWriter.class), errorHandler),
+                        new GnomeAgentRunner(getInstance(InboundGateway.class), errorHandler))
+                .start();
     }
 
     @SuppressWarnings("unchecked")

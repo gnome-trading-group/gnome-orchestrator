@@ -2,7 +2,6 @@ package group.gnometrading.gateways.outbound;
 
 import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
-import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
@@ -133,7 +132,7 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
     }
 
     @Override
-    public GnomeAgent startGatewayAgents(
+    public OutboundAgents startGatewayAgents(
             final SequencedRingBuffer<?> orderOutboundBuffer,
             final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             final ErrorHandler errorHandler) {

@@ -10,6 +10,7 @@ import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
+import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
@@ -101,6 +102,8 @@ public class TradingOrchestrator extends Orchestrator {
     private static final int OUTBOUND_BUFFER_SIZE = 64;
     private static final int LEDGER_CONNECT_TIMEOUT_MS = 1_000;
     private static final int LEDGER_RESPONSE_TIMEOUT_MS = 2_000;
+    private static final long HEARTBEAT_SAMPLE_INTERVAL_MS = 1_000;
+    private static final long HEARTBEAT_POST_INTERVAL_MS = 5_000;
     // Paper sessions are reproducible by default; set simulation.seed to vary the latency draws.
     private static final long PAPER_TRADING_DEFAULT_SEED = 0x9E3779B97F4A7C15L;
 
@@ -108,7 +111,11 @@ public class TradingOrchestrator extends Orchestrator {
 
     // Set once configure() has started them; read by onClose(), which may run on a shutdown hook thread.
     private volatile AgentRunners runners;
+    // The live venue gateways' reader and supervisor threads; their order writers are among the runners. Filled before
+    // the runners are published, so onClose sees them all.
+    private final List<GatewayRunners> outboundGateways = new ArrayList<>();
     private volatile GnomeAgentRunner journalRunner;
+    private volatile GnomeAgentRunner heartbeatRunner;
     private volatile Logger logger;
 
     @Provides
@@ -205,6 +212,7 @@ public class TradingOrchestrator extends Orchestrator {
         SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer =
                 new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
 
+        ErrorHandler errorHandler = sessionErrorHandler(logger);
         Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
         OutboundSetup outboundSetup = setupOutbound(
                 listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, globalSequence, venueQueries);
@@ -246,10 +254,6 @@ public class TradingOrchestrator extends Orchestrator {
                 priceBuffer,
                 priceSlotRegistry);
 
-        ErrorHandler errorHandler = error -> {
-            logger.logf(LogMessage.FATAL_ERROR_EXITING, "Agent error: %s", error);
-            System.exit(1);
-        };
         List<SequencedRingBuffer<?>> journaledBuffers = new ArrayList<>();
         journaledBuffers.add(strategyMdBuffer);
         journaledBuffers.add(intentBuffer);
@@ -270,6 +274,8 @@ public class TradingOrchestrator extends Orchestrator {
                 priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
+        this.heartbeatRunner =
+                startHeartbeat(sessionId, ledgerAgent, ledgerRing, priceBuffer, priceSlotRegistry, errorHandler);
         // A fallback for plain Java runs; an embedding process closes first, which makes this a no-op.
         Runtime.getRuntime().addShutdownHook(new Thread(this::close, "orchestrator-shutdown"));
         reportRunning(sessionId, logger);
@@ -290,13 +296,21 @@ public class TradingOrchestrator extends Orchestrator {
         for (GnomeAgentRunner outbound : started.outboundAgents()) {
             closeQuietly(outbound, logger);
         }
+        for (GatewayRunners gateway : outboundGateways) {
+            closeQuietly(gateway, "outbound gateway", logger);
+        }
         closeQuietly(started.mux(), logger);
+        for (GatewayRunners gateway : started.inboundGateways()) {
+            closeQuietly(gateway, "market data gateway", logger);
+        }
         // After the OMS and gateways, so its final write holds everything they recorded while closing.
         closeQuietly(started.ledger(), logger);
         closeQuietly(started.priceWriter(), logger);
         closeQuietly(started.riskSync(), logger);
         // Last, so the journal holds everything the agents wrote while closing.
         closeQuietly(journalRunner, logger);
+        // After everything else, so the session keeps reporting while it shuts down.
+        closeQuietly(heartbeatRunner, logger);
         logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
     }
 
@@ -333,7 +347,7 @@ public class TradingOrchestrator extends Orchestrator {
         }
         return new LedgerAgent(
                 ledgerRing,
-                ledgerRegistryConnection(),
+                registryWriterConnection(),
                 epochClock,
                 logger,
                 sessionId,
@@ -343,11 +357,63 @@ public class TradingOrchestrator extends Orchestrator {
                 properties.getLongProperty("ledger.mark.interval.ms"));
     }
 
+    /** Only a session reports to the registry; a local run has nothing to report to. */
+    private GnomeAgentRunner startHeartbeat(
+            String sessionId,
+            LedgerAgent ledgerAgent,
+            LedgerRing ledgerRing,
+            SharedPriceBuffer priceBuffer,
+            PriceSlotRegistry priceSlotRegistry,
+            ErrorHandler errorHandler) {
+        if (sessionId == null) {
+            return null;
+        }
+        AgentRunners started = this.runners;
+        List<GatewayRunners> gateways = new ArrayList<>(started.inboundGateways());
+        gateways.addAll(outboundGateways);
+        List<GnomeAgentRunner> watched = new ArrayList<>();
+        for (GnomeAgentRunner runner : new GnomeAgentRunner[] {
+            started.strategy(),
+            started.oms(),
+            started.mux(),
+            started.router(),
+            started.ledger(),
+            started.priceWriter(),
+            started.riskSync()
+        }) {
+            if (runner != null) {
+                watched.add(runner);
+            }
+        }
+        watched.addAll(started.outboundAgents());
+        for (GatewayRunners gateway : gateways) {
+            watched.addAll(gateway.runners());
+        }
+        GnomeAgentRunner runner = new GnomeAgentRunner(
+                new SessionHeartbeatAgent(
+                        sessionId,
+                        registryWriterConnection(),
+                        SystemEpochClock.INSTANCE,
+                        logger,
+                        watched,
+                        gateways,
+                        priceBuffer,
+                        priceSlotRegistry,
+                        ledgerAgent,
+                        ledgerRing,
+                        HEARTBEAT_SAMPLE_INTERVAL_MS,
+                        HEARTBEAT_POST_INTERVAL_MS),
+                errorHandler);
+        GnomeAgentRunner.startOnThread(runner);
+        return runner;
+    }
+
     /**
-     * The ledger agent's own connection: the registry client isn't thread-safe, and a ledger write must fail fast
-     * and be retried on the agent's schedule rather than block its thread in the client's own retries.
+     * A background writer's own connection (the ledger's, the heartbeat's): the registry client isn't thread-safe,
+     * and a write must fail fast and be retried on the agent's schedule rather than block its thread in the client's
+     * own retries.
      */
-    private RegistryConnection ledgerRegistryConnection() {
+    private RegistryConnection registryWriterConnection() {
         RegistryEndpoint endpoint = getInstance(RegistryEndpoint.class);
         return new RegistryConnection(
                 endpoint.host(),
@@ -449,6 +515,7 @@ public class TradingOrchestrator extends Orchestrator {
     }
 
     private record AgentRunners(
+            List<GatewayRunners> inboundGateways,
             GnomeAgentRunner strategy,
             GnomeAgentRunner oms,
             List<GnomeAgentRunner> outboundAgents,
@@ -469,8 +536,9 @@ public class TradingOrchestrator extends Orchestrator {
             PriceWriterAgent priceWriterAgent,
             RiskSyncAgent riskSyncAgent,
             ErrorHandler errorHandler) {
+        List<GatewayRunners> inboundGateways = new ArrayList<>(inbounds.size());
         for (DefaultInboundOrchestrator<?> inbound : inbounds) {
-            inbound.startGatewayAgents();
+            inboundGateways.add(inbound.startGatewayAgents());
         }
         GnomeAgentRunner omsRunner = new GnomeAgentRunner(omsAgent, errorHandler);
         GnomeAgentRunner.startOnThread(omsRunner);
@@ -502,6 +570,7 @@ public class TradingOrchestrator extends Orchestrator {
         GnomeAgentRunner riskSyncRunner = new GnomeAgentRunner(riskSyncAgent, errorHandler);
         GnomeAgentRunner.startOnThread(riskSyncRunner);
         return new AgentRunners(
+                inboundGateways,
                 strategyRunner,
                 omsRunner,
                 outboundRunners,
@@ -525,6 +594,22 @@ public class TradingOrchestrator extends Orchestrator {
                     runner.getAgent().roleName(),
                     e);
         }
+    }
+
+    private static void closeQuietly(AutoCloseable closeable, String name, Logger logger) {
+        try {
+            closeable.close();
+        } catch (Exception e) { // best-effort, as for each agent above
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to close %s: %s", name, e);
+        }
+    }
+
+    /** Every agent of a session ends it on an error, the venue gateways' reader and supervisor included. */
+    private static ErrorHandler sessionErrorHandler(final Logger logger) {
+        return error -> {
+            logger.logf(LogMessage.FATAL_ERROR_EXITING, "Agent error: %s", error);
+            System.exit(1);
+        };
     }
 
     private GnomeAgent createOutboundGateway(
@@ -554,10 +639,14 @@ public class TradingOrchestrator extends Orchestrator {
 
         final Class<? extends DefaultOutboundOrchestrator> orchClass =
                 DefaultOutboundOrchestrator.findOutboundOrchestrator(listing);
-        final DefaultOutboundOrchestrator outboundOrch = createChildOrchestrator(orchClass);
+        // Each venue gateway is built for its own listing, as each market data gateway is.
+        final DefaultOutboundOrchestrator outboundOrch =
+                createChildOrchestrator(orchClass, Map.of(Listing.class, listing));
         venueQueries.put(listing.listingId(), outboundOrch.createVenueOrderQuery());
-        final ErrorHandler errorHandler = getInstance(ErrorHandler.class);
-        return outboundOrch.startGatewayAgents(orderOutboundBuffer, execReportBuffer, errorHandler);
+        final DefaultOutboundOrchestrator.OutboundAgents agents = outboundOrch.startGatewayAgents(
+                orderOutboundBuffer, execReportBuffer, sessionErrorHandler(getInstance(Logger.class)));
+        outboundGateways.add(agents.gateway());
+        return agents.writer();
     }
 
     private StrategyAgent createStrategyAgent(

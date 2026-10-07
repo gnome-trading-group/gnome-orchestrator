@@ -5,6 +5,7 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.gateways.GatewayConfig;
+import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.schemas.OrderExecutionReport;
@@ -33,7 +34,7 @@ public abstract class DefaultOutboundOrchestrator extends Orchestrator {
         return new ManyToOneRingBuffer<>(OrderContext[]::new, OrderContext::new, OrderContext.HANDOFF_QUEUE_CAPACITY);
     }
 
-    protected final GnomeAgent startAgents(
+    protected final OutboundAgents startAgents(
             final OutboundSocketReader reader,
             final OutboundSocketWriter writer,
             final GatewayConfig config,
@@ -41,10 +42,19 @@ public abstract class DefaultOutboundOrchestrator extends Orchestrator {
             final EpochClock epochClock,
             final ErrorHandler errorHandler) {
         final OutboundGateway gateway = new OutboundGateway(logger, reader, config, epochClock);
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(gateway, errorHandler));
-        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(reader, errorHandler));
-        return writer;
+        final GatewayRunners runners = GatewayRunners.venue(
+                        reader.pauseControl,
+                        new GnomeAgentRunner(reader, errorHandler),
+                        new GnomeAgentRunner(gateway, errorHandler))
+                .start();
+        return new OutboundAgents(writer, runners);
     }
+
+    /**
+     * The order writer, for the caller to run on its own thread (it polls the order outbound ring buffer), and the
+     * gateway's other threads, already running, for the caller to close once the writer has stopped.
+     */
+    public record OutboundAgents(GnomeAgent writer, GatewayRunners gateway) {}
 
     /**
      * What a starting session asks the venue about orders earlier sessions left. Shares the writer's HTTP client
@@ -52,11 +62,8 @@ public abstract class DefaultOutboundOrchestrator extends Orchestrator {
      */
     public abstract VenueOrderQuery createVenueOrderQuery();
 
-    /**
-     * Starts the reader and supervisor on background threads; returns the writer agent for the
-     * caller to run on its own thread (it polls the order outbound ring buffer).
-     */
-    public abstract GnomeAgent startGatewayAgents(
+    /** Starts the reader and supervisor on background threads, and returns them with the writer agent. */
+    public abstract OutboundAgents startGatewayAgents(
             SequencedRingBuffer<?> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             ErrorHandler errorHandler);
