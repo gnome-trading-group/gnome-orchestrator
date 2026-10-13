@@ -35,7 +35,7 @@ export GNOME_JARS=$APP_JAR
 
 if [ -n "${GNOMEPY_VERSION:-}" ]; then
   echo "start-session: installing gnomepy ${GNOMEPY_VERSION}"
-  "$VENV/bin/pip" install --quiet "gnomepy[strategy]==${GNOMEPY_VERSION}"
+  "$VENV/bin/pip" install --quiet "gnomepy[strategy,live-data]==${GNOMEPY_VERSION}"
 fi
 
 if [ "${STRATEGY_TYPE:-java}" = "python" ]; then

@@ -13,6 +13,12 @@ final class OrderEntryHttpClients {
     // A slower reply is treated as an unknown outcome and reconciled by looking the order up, which beats
     // holding the outbound thread for the client's 30 second default.
     private static final int RESPONSE_TIMEOUT_MS = 5_000;
+    // A connection dropped silently along the way (a NAT, a proxy) is noticed after 10 s idle plus three unanswered
+    // probes 5 s apart, rather than the kernel's two hours, so the writer's keep-warm replaces it before the next
+    // order is written into it. The probes may also keep a NAT's mapping alive in the first place.
+    private static final int KEEP_ALIVE_IDLE_SECONDS = 10;
+    private static final int KEEP_ALIVE_INTERVAL_SECONDS = 5;
+    private static final int KEEP_ALIVE_PROBES = 3;
 
     private OrderEntryHttpClients() {}
 
@@ -25,6 +31,7 @@ final class OrderEntryHttpClients {
                 .withConnectTimeout(CONNECT_TIMEOUT_MS)
                 .withReadTimeout(READ_TIMEOUT_MS)
                 .withResponseTimeout(RESPONSE_TIMEOUT_MS)
+                .withKeepAlive(KEEP_ALIVE_IDLE_SECONDS, KEEP_ALIVE_INTERVAL_SECONDS, KEEP_ALIVE_PROBES)
                 .build();
     }
 }

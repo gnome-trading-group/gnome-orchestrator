@@ -5,6 +5,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
+import { grantResearchTables } from '../constructs/research-tables';
 
 export const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
 
@@ -42,6 +43,12 @@ export class Ec2Stack extends cdk.Stack {
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['s3:PutObject'],
       resources: [`arn:aws:s3:::gnome-journals-${props.stage}/*`],
+    }));
+    // Strategies read research datasets (e.g. prematch predictions) and model artifacts through gnomepy.data.
+    grantResearchTables(this, role, { write: false });
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject'],
+      resources: [`arn:aws:s3:::gnome-research-${props.stage}/artifacts/*`],
     }));
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],

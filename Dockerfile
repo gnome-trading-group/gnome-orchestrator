@@ -24,7 +24,7 @@ RUN bash /tmp/install-runtime.sh && rm -rf /tmp/install-runtime.sh /var/lib/apt/
 
 # Pinned with --build-arg GNOMEPY_VERSION=x.y.z, or a session can install its own via the GNOMEPY_VERSION env var.
 ARG GNOMEPY_VERSION=""
-RUN /opt/gnome/venv/bin/pip install --quiet "gnomepy[strategy]${GNOMEPY_VERSION:+==$GNOMEPY_VERSION}"
+RUN /opt/gnome/venv/bin/pip install --quiet "gnomepy[strategy,live-data]${GNOMEPY_VERSION:+==$GNOMEPY_VERSION}"
 
 COPY --from=builder /app/target/gnome-orchestrator-*.jar /opt/gnome/app.jar
 COPY ami/files/start-session.sh /opt/gnome/start-session.sh

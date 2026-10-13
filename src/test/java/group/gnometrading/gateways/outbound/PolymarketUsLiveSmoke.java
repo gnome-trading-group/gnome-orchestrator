@@ -49,6 +49,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.agrona.concurrent.SystemEpochClock;
@@ -100,6 +101,10 @@ public final class PolymarketUsLiveSmoke {
         }
         if (mode.equals("ratelimit")) {
             rateLimitBurst(credentials, marketInfo);
+            return;
+        }
+        if (mode.equals("idle")) {
+            idleThenOrder(credentials, listing, marketInfo, Integer.getInteger("idle", 300));
             return;
         }
         final int submitsToLose = mode.startsWith("lose") ? (mode.equals("lose-ioc") ? 2 : 1) : 0;
@@ -334,6 +339,53 @@ public final class PolymarketUsLiveSmoke {
     }
 
     private static final Map<String, AtomicInteger> REPORT_COUNTS = new ConcurrentSkipListMap<>();
+    // When each order's acknowledgement arrived, by client oid, to time the order from being published.
+    private static final Map<Long, Long> ACKED_NANOS = new ConcurrentHashMap<>();
+
+    /**
+     * Whether an order after a quiet spell is lost to a connection that died while idle: a post-only bid of one share
+     * at a cent, cancelled, then {@code idleSeconds} with nothing sent, then the same again, each timed from
+     * publishing to the venue's acknowledgement. Through Cloudflare an idle connection was silently dead by five
+     * minutes.
+     */
+    private static void idleThenOrder(
+            final PolymarketUsCredentials credentials,
+            final Listing listing,
+            final PolymarketUsMarketInfo marketInfo,
+            final int idleSeconds)
+            throws Exception {
+        final VenueRateLimiter limiter = new VenueRateLimiters(
+                        new ConsoleLogger(new SystemEpochNanoClock()), SystemNanoClock.INSTANCE, new SystemEpochClock())
+                .forAccount(VenueRateLimits.polymarketUs(), credentials.apiKey());
+        final Stack stack = new Stack(credentials, listing, marketInfo, 0, limiter, "");
+        Thread.sleep(4_000);
+        try {
+            final long warm = timeBid(stack, 1);
+            stack.cancel(1, "cancel 1", 3_000);
+            System.out.println("\n#### idle for " + idleSeconds + " s");
+            Thread.sleep(idleSeconds * 1_000L);
+            final long afterIdle = timeBid(stack, 2);
+            stack.cancel(2, "cancel 2", 5_000);
+            System.out.println("\n#### publish to ack: warm " + warm / 1_000_000 + " ms, after " + idleSeconds
+                    + " s idle " + afterIdle / 1_000_000 + " ms; reports " + REPORT_COUNTS);
+        } finally {
+            stack.close();
+        }
+        final PolymarketUsVenueOrderQuery query = new PolymarketUsVenueOrderQuery(
+                OrderEntryHttpClients.create(limiter), API_HOST, signer(credentials), System::currentTimeMillis);
+        System.out.println("#### still open: " + query.listOpenOrders(listing));
+    }
+
+    private static long timeBid(final Stack stack, final long oid) throws Exception {
+        final long start = System.nanoTime();
+        stack.send(oid, Side.Bid, "0.01", "1", TimeInForce.GOOD_TILL_CANCELED, true, "bid " + oid, 0);
+        final long deadline = start + 20_000_000_000L;
+        while (!ACKED_NANOS.containsKey(oid) && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        final Long acked = ACKED_NANOS.get(oid);
+        return acked == null ? -1 : acked - start;
+    }
 
     /** Orders with a final report: for IOCs, every one sent or refused. */
     private static int finished() {
@@ -624,6 +676,9 @@ public final class PolymarketUsLiveSmoke {
                                         : ""),
                         key -> new AtomicInteger())
                 .incrementAndGet();
+        if (d.execType() == ExecType.NEW) {
+            ACKED_NANOS.putIfAbsent(report.getClientOidCounter(), System.nanoTime());
+        }
         System.out.println("REPORT oid=" + report.getClientOidCounter() + " id=" + id + " exec=" + d.execType()
                 + " status=" + d.orderStatus() + " reject=" + d.rejectReason()
                 + " filled=" + nullable(d.filledQty(), OrderExecutionReportDecoder.filledQtyNullValue(), true)
