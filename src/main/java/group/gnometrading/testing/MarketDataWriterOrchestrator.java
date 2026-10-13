@@ -1,6 +1,8 @@
 package group.gnometrading.testing;
 
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.collectors.MarketDataCollectorAgent;
+import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
@@ -13,11 +15,14 @@ import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSocketFactory;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.sequencer.SchemaEventAdapter;
+import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.trading.AgentRuntimeInstaller;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.List;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -96,12 +101,17 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
     @Override
     public final void configure() {
         install(new SecurityMasterModule(), new AwsModule());
+        AgentRuntimeInstaller.installStandard(getInstance(Logger.class));
         final MarketDataWriter writer = getInstance(MarketDataWriter.class);
         final Listing listing = getInstance(Listing.class);
 
         final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
                 DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-        orchestrator.configureGatewayForListing(new SchemaEventAdapter(writer));
+        final SequencedPoller poller =
+                orchestrator.getSequencedRingBuffer().createPoller(new SchemaEventAdapter(writer));
+        GnomeAgentRunner.startOnThread(
+                new GnomeAgentRunner(new MarketDataCollectorAgent(List.of(poller)), getInstance(ErrorHandler.class)));
+        orchestrator.startGatewayAgents();
     }
 }

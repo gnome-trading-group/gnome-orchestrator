@@ -17,6 +17,9 @@ import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundReade
 import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundWriter;
 import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiVenueOrderQuery;
 import group.gnometrading.gateways.outbound.recovery.VenueOrder;
+import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
+import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
+import group.gnometrading.gateways.ratelimit.VenueRateLimits;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
@@ -27,6 +30,7 @@ import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
+import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.ModifyOrderDecoder;
@@ -60,8 +64,11 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
+import org.agrona.concurrent.SystemNanoClock;
 import org.bouncycastle.asn1.ASN1Primitive;
 import org.bouncycastle.asn1.DERNull;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
@@ -112,6 +119,15 @@ public final class KalshiLiveSmoke {
             } else if (mode.equals("orders")) {
                 final String keyFile = System.getProperty("demo.keyFile");
                 runOrders(
+                        keyFile != null
+                                ? credentialsFromFile(System.getProperty("demo.keyId"), keyFile)
+                                : credentials(
+                                        profile,
+                                        System.getProperty("demo.secret", "gnome/exchange-credentials/kalshi-demo")),
+                        System.getProperty("demo.ticker"));
+            } else if (mode.equals("ratelimit")) {
+                final String keyFile = System.getProperty("demo.keyFile");
+                runRateLimit(
                         keyFile != null
                                 ? credentialsFromFile(System.getProperty("demo.keyId"), keyFile)
                                 : credentials(
@@ -188,8 +204,10 @@ public final class KalshiLiveSmoke {
         final SequencedRingBuffer<Mbp10Schema> books =
                 new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
         final BookPrinter printer = new BookPrinter();
-        books.handleEventsWith((seq, templateId, buffer, length) -> printer.onBook(buffer));
-        books.start();
+        final GnomeAgentRunner booksRunner = new GnomeAgentRunner(
+                books.createPoller((seq, templateId, buffer, length) -> printer.onBook(buffer))::poll,
+                Throwable::printStackTrace);
+        GnomeAgentRunner.startOnThread(booksRunner);
 
         final WebSocketClient ws = new WebSocketClientBuilder()
                 .withURI(new URI(PROD_WS))
@@ -225,7 +243,7 @@ public final class KalshiLiveSmoke {
         printRestOrderbook(creds, PROD_API, ticker);
 
         closeTimed("inbound gateway", runners);
-        books.shutdown();
+        booksRunner.close();
     }
 
     private static final class BookPrinter {
@@ -313,6 +331,107 @@ public final class KalshiLiveSmoke {
         yes.close();
         no.close();
         raw.abort();
+    }
+
+    // ========== Rate limit (demo) ==========
+
+    /**
+     * {@code -Dgateways} gateways on one demo account, each with its own session and each sending {@code -Dcount}
+     * post-only bids of one contract at a cent from its own thread, through one shared rate limiter as a trading session
+     * wires them; then every order is cancelled. {@code -Dungated=true} is the control: the same burst with nothing
+     * holding it back. Counts what the OMS would have heard.
+     */
+    private static void runRateLimit(final KalshiCredentials creds, final String ticker) throws Exception {
+        requireDemo(DEMO_API);
+        requireDemo(DEMO_WS_HOST);
+        if (ticker == null) {
+            listOpenMarkets(creds, DEMO_API);
+            return;
+        }
+        final int gateways = Integer.getInteger("gateways", 4);
+        final int count = Integer.getInteger("count", 10);
+        final VenueRateLimiter limiter = Boolean.getBoolean("ungated")
+                ? null
+                : new VenueRateLimiters(
+                                new ConsoleLogger(new SystemEpochNanoClock()),
+                                SystemNanoClock.INSTANCE,
+                                new SystemEpochClock())
+                        .forAccount(VenueRateLimits.kalshi(), creds.apiKey());
+        final Stack[] stacks = new Stack[gateways];
+        for (int g = 0; g < gateways; g++) {
+            stacks[g] = new Stack(creds, listing(g + 1, ticker + ":yes"), "G" + g, limiter);
+        }
+        Thread.sleep(4_000);
+        try {
+            final long start = System.nanoTime();
+            final Thread[] threads = new Thread[gateways];
+            for (int g = 0; g < gateways; g++) {
+                final int index = g;
+                threads[g] = new Thread(() -> {
+                    try {
+                        for (int i = 0; i < count; i++) {
+                            final long oid = 1_000L * (index + 1) + i;
+                            stacks[index].sendLimit(
+                                    oid,
+                                    Side.Bid,
+                                    "0.01",
+                                    "1.00",
+                                    TimeInForce.GOOD_TILL_CANCELED,
+                                    true,
+                                    "bid " + oid,
+                                    0);
+                        }
+                    } catch (final Exception e) {
+                        e.printStackTrace();
+                    }
+                });
+                threads[g].start();
+            }
+            for (final Thread thread : threads) {
+                thread.join();
+            }
+            final long deadline = System.nanoTime() + 30_000_000_000L;
+            while (answered() < gateways * count && System.nanoTime() < deadline) {
+                Thread.sleep(1);
+            }
+            final long millis = (System.nanoTime() - start) / 1_000_000;
+            System.out.println(
+                    "\n#### " + answered() + " of " + gateways * count + " orders answered in " + millis + " ms, about "
+                            + count(ExecType.NEW.name()) * 1000L / Math.max(1, millis) + " accepted per second");
+            Thread.sleep(3_000);
+            System.out.println("#### after the burst: " + REPORT_COUNTS);
+            for (int g = 0; g < gateways; g++) {
+                for (int i = 0; i < count; i++) {
+                    final long oid = 1_000L * (g + 1) + i;
+                    stacks[g].sendCancel(oid, "cancel " + oid, 0);
+                }
+            }
+            Thread.sleep(15_000);
+            System.out.println("#### after the cancels: " + REPORT_COUNTS);
+        } finally {
+            for (final Stack stack : stacks) {
+                stack.close();
+            }
+        }
+        System.out.println("#### still resting: "
+                + signedGet(
+                        creds, DEMO_API, "/trade-api/v2/portfolio/orders", "?ticker=" + ticker + "&status=resting"));
+    }
+
+    private static final Map<String, AtomicInteger> REPORT_COUNTS = new ConcurrentSkipListMap<>();
+
+    /** Orders the venue or the limiter has answered: acknowledged, or refused. */
+    private static int answered() {
+        return count(ExecType.NEW.name())
+                + REPORT_COUNTS.entrySet().stream()
+                        .filter(e -> e.getKey().startsWith(ExecType.REJECT.name() + "/"))
+                        .mapToInt(e -> e.getValue().get())
+                        .sum();
+    }
+
+    private static int count(final String key) {
+        final AtomicInteger value = REPORT_COUNTS.get(key);
+        return value == null ? 0 : value.get();
     }
 
     // ========== Recovery (demo) ==========
@@ -577,12 +696,24 @@ public final class KalshiLiveSmoke {
         private final SequencedRingBuffer<Order> orders = new SequencedRingBuffer<>(Order::new, new GlobalSequence());
         private final SequencedRingBuffer<OrderExecutionReport> reports =
                 new SequencedRingBuffer<>(OrderExecutionReport::new, new GlobalSequence());
+        // Printed from a thread of its own, as reports arrive, while the main thread drives the orders.
+        private GnomeAgentRunner reportsRunner;
         private GnomeAgentRunner writerRunner;
         private KalshiOutboundReader reader;
         private final String sessionTag;
         private GatewayRunners gatewayRunners;
 
         Stack(final KalshiCredentials creds, final Listing listing, final String name) throws Exception {
+            this(creds, listing, name, null);
+        }
+
+        /** @param rateLimiter gates the writer's and the reader's clients as a trading session does; null for none */
+        Stack(
+                final KalshiCredentials creds,
+                final Listing listing,
+                final String name,
+                final VenueRateLimiter rateLimiter)
+                throws Exception {
             this.name = name;
             this.sessionTag =
                     "smoke" + Long.toString(System.currentTimeMillis(), Character.MAX_RADIX) + name.toLowerCase();
@@ -592,8 +723,11 @@ public final class KalshiLiveSmoke {
             final ManyToOneRingBuffer<OrderContext> writerReportQueue = queue();
             final ManyToOneRingBuffer<OrderContext> releasedOrderQueue = queue();
 
-            this.reports.handleEventsWith((seq, templateId, buffer, length) -> printReport(this.name, buffer));
-            this.reports.start();
+            this.reportsRunner = new GnomeAgentRunner(
+                    this.reports.createPoller((seq, templateId, buffer, length) -> printReport(this.name, buffer))
+                            ::poll,
+                    Throwable::printStackTrace);
+            GnomeAgentRunner.startOnThread(this.reportsRunner);
 
             final WebSocketClient ws = new WebSocketClientBuilder()
                     .withURI(new URI(DEMO_WS_HOST + MARKET_WS_PATH))
@@ -611,7 +745,9 @@ public final class KalshiLiveSmoke {
                     ws,
                     new JsonDecoder(),
                     new KalshiAuthSigner(creds.apiKey(), creds.privateKey()),
-                    new LoggingHttpClient(name + "-catchup"),
+                    rateLimiter == null
+                            ? new LoggingHttpClient(name + "-catchup")
+                            : OrderEntryHttpClients.create(rateLimiter),
                     requireDemo(new URI(DEMO_API).getHost()),
                     0.07,
                     0.0175);
@@ -622,7 +758,7 @@ public final class KalshiLiveSmoke {
                     newOrderQueue,
                     writerReportQueue,
                     releasedOrderQueue,
-                    new LoggingHttpClient(name),
+                    rateLimiter == null ? new LoggingHttpClient(name) : OrderEntryHttpClients.create(rateLimiter),
                     requireDemo(new URI(DEMO_API).getHost()),
                     new KalshiAuthSigner(creds.apiKey(), creds.privateKey()),
                     nanoClock,
@@ -644,7 +780,7 @@ public final class KalshiLiveSmoke {
         void close() throws Exception {
             this.writerRunner.close();
             closeTimed(this.name + " outbound gateway", this.gatewayRunners);
-            this.reports.shutdown();
+            this.reportsRunner.close();
         }
 
         void send(final long counter, final Side side, final String price, final String label) throws Exception {
@@ -664,8 +800,21 @@ public final class KalshiLiveSmoke {
                 final TimeInForce tif,
                 final String label)
                 throws Exception {
+            sendLimit(counter, side, price, size, tif, false, label, 6_000);
+        }
+
+        void sendLimit(
+                final long counter,
+                final Side side,
+                final String price,
+                final String size,
+                final TimeInForce tif,
+                final boolean postOnly,
+                final String label,
+                final long waitMillis)
+                throws Exception {
             System.out.println("\n==== " + label + ": " + side + " " + size + " @ " + price + " " + tif
-                    + " (client oid " + counter + ")");
+                    + (postOnly ? " post-only" : "") + " (client oid " + counter + ")");
             final Order order = this.orders.claim();
             order.encoder.exchangeId(2);
             order.encoder.securityId(3);
@@ -675,9 +824,10 @@ public final class KalshiLiveSmoke {
             order.encoder.orderType(OrderType.LIMIT);
             order.encoder.timeInForce(tif);
             order.encoder.flags().clear();
+            order.encoder.flags().postOnly(postOnly);
             order.encodeClientOid(counter, 1);
             this.orders.publish();
-            Thread.sleep(6_000);
+            Thread.sleep(waitMillis);
         }
 
         void sendModify(final long counter, final String price, final String size, final String label)
@@ -697,13 +847,17 @@ public final class KalshiLiveSmoke {
         }
 
         void sendCancel(final long counter, final String label) throws Exception {
+            sendCancel(counter, label, 6_000);
+        }
+
+        void sendCancel(final long counter, final String label, final long waitMillis) throws Exception {
             System.out.println("\n==== " + label + " (client oid " + counter + ")");
             final CancelOrder cancel = new CancelOrder();
             cancel.encoder.exchangeId(2);
             cancel.encoder.securityId(3);
             cancel.encodeClientOid(counter, 1);
             this.orders.publishRaw(cancel.buffer, CancelOrderDecoder.TEMPLATE_ID, cancel.totalMessageSize());
-            Thread.sleep(6_000);
+            Thread.sleep(waitMillis);
         }
 
         private static ManyToOneRingBuffer<OrderContext> queue() {
@@ -846,6 +1000,14 @@ public final class KalshiLiveSmoke {
             }
             id.append((char) b);
         }
+        REPORT_COUNTS
+                .computeIfAbsent(
+                        d.execType()
+                                + (d.execType() == ExecType.REJECT || d.execType() == ExecType.CANCEL_REJECT
+                                        ? "/" + d.rejectReason()
+                                        : ""),
+                        key -> new AtomicInteger())
+                .incrementAndGet();
         System.out.println("REPORT " + stack + " oid=" + report.getClientOidCounter()
                 + " exec=" + d.execType() + " status=" + d.orderStatus() + " reject=" + d.rejectReason()
                 + " filled=" + nullableQty(d.filledQty(), OrderExecutionReportDecoder.filledQtyNullValue())

@@ -1,9 +1,8 @@
-package group.gnometrading.gateways.inbound;
+package group.gnometrading.gateways;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-import group.gnometrading.gateways.GatewayConnectFailedException;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import java.io.IOException;
@@ -11,13 +10,13 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-class InboundGatewayErrorHandlerTest {
+class GatewayErrorHandlerTest {
 
     private final Logger logger = mock(Logger.class);
     private final List<Integer> exits = new ArrayList<>();
     private int reconnects;
-    private final InboundGatewayErrorHandler handler =
-            new InboundGatewayErrorHandler(logger, () -> reconnects++, exits::add);
+    private final GatewayErrorHandler handler =
+            new GatewayErrorHandler(logger, "test gateway", () -> reconnects++, exits::add);
 
     @Test
     void ordinaryError_Reconnects() {

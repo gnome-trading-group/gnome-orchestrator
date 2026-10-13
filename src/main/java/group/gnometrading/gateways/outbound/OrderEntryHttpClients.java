@@ -1,5 +1,6 @@
 package group.gnometrading.gateways.outbound;
 
+import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.networking.http.HTTPClient;
 
 /** HTTP clients for exchanges' REST order entry. */
@@ -15,8 +16,11 @@ final class OrderEntryHttpClients {
 
     private OrderEntryHttpClients() {}
 
-    static HTTPClient create() {
+    /** Every request waits its turn on {@code rateLimiter}, which the account's other clients share. */
+    static HTTPClient create(final VenueRateLimiter rateLimiter) {
         return HTTPClient.builder()
+                .withRequestGate(rateLimiter)
+                .captureHeaders(rateLimiter.capturedHeaders())
                 .withReadBufferSize(READ_BUFFER_BYTES)
                 .withConnectTimeout(CONNECT_TIMEOUT_MS)
                 .withReadTimeout(READ_TIMEOUT_MS)

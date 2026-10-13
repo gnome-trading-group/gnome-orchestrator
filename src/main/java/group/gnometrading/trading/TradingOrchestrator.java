@@ -14,6 +14,7 @@ import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
+import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -39,6 +40,7 @@ import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.JournalWriter;
+import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.RegistryEndpoint;
@@ -60,6 +62,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -68,6 +71,7 @@ import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
+import org.agrona.concurrent.SystemNanoClock;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
@@ -145,19 +149,15 @@ public class TradingOrchestrator extends Orchestrator {
         List<Listing> listings = resolveListings(properties, securityMaster);
         AgentRuntimeInstaller.install(properties, logger, listings.size());
 
-        GlobalSequence globalSequence = new GlobalSequence();
+        // One total order over everything the strategy saw and did, so a journal replays the session exactly. Every
+        // buffer on it is journaled. With several listings, each listing's own market data buffer stays on a sequence
+        // of its own: the multiplexer copies it into the strategy's buffer, and that copy is the one journaled.
+        GlobalSequence sessionSequence = new GlobalSequence();
+        Map<SequencedRingBuffer<?>, JournalSource> journalSources = new IdentityHashMap<>();
 
-        List<DefaultInboundOrchestrator<?>> inbounds = new ArrayList<>(listings.size());
+        List<DefaultInboundOrchestrator<?>> inbounds = createInbounds(listings, sessionSequence);
         List<SequencedRingBuffer<?>> perListingMdBuffers = new ArrayList<>(listings.size());
-        for (Listing listing : listings) {
-            Map<Class<?>, Object> inboundOverrides = new HashMap<>();
-            inboundOverrides.put(Listing.class, listing);
-            if (listings.size() == 1) {
-                inboundOverrides.put(GlobalSequence.class, globalSequence);
-            }
-            DefaultInboundOrchestrator<?> inbound = createChildOrchestrator(
-                    DefaultInboundOrchestrator.findInboundOrchestrator(listing), inboundOverrides);
-            inbounds.add(inbound);
+        for (DefaultInboundOrchestrator<?> inbound : inbounds) {
             perListingMdBuffers.add(inbound.getSequencedRingBuffer());
         }
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
@@ -191,31 +191,43 @@ public class TradingOrchestrator extends Orchestrator {
         }
         PositionView positionView = positionTracker.createPositionView(strategyId);
 
-        SequencedRingBuffer<Intent> intentBuffer = new SequencedRingBuffer<>(Intent::new, globalSequence);
+        SequencedRingBuffer<Intent> intentBuffer = new SequencedRingBuffer<>(Intent::new, sessionSequence);
         SequencedRingBuffer<OrderExecutionReport> stratExecReportBuffer =
-                new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
+                new SequencedRingBuffer<>(OrderExecutionReport::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
+        journalSources.put(intentBuffer, JournalSource.STRATEGY_INTENT);
+        journalSources.put(stratExecReportBuffer, JournalSource.STRATEGY_EXEC_REPORT);
 
         SequencedRingBuffer<?> strategyMdBuffer;
         MarketDataMultiplexer muxAgent = null;
         if (listings.size() == 1) {
             strategyMdBuffer = perListingMdBuffers.get(0);
         } else {
-            strategyMdBuffer = new SequencedRingBuffer<>(Intent::new, globalSequence);
+            strategyMdBuffer = new SequencedRingBuffer<>(Intent::new, sessionSequence);
             muxAgent = new MarketDataMultiplexer(perListingMdBuffers, strategyMdBuffer);
         }
+        journalSources.put(strategyMdBuffer, JournalSource.STRATEGY_MARKET_DATA);
 
         PriceWriterAgent priceWriterAgent =
                 new PriceWriterAgent(priceBuffer, priceSlotRegistry, securityMaster, strategyMdBuffer);
 
         SequencedRingBuffer<Intent> orderOutboundBuffer =
-                new SequencedRingBuffer<>(Intent::new, globalSequence, OUTBOUND_BUFFER_SIZE);
+                new SequencedRingBuffer<>(Intent::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
         SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer =
-                new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
+                new SequencedRingBuffer<>(OrderExecutionReport::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
+        journalSources.put(orderOutboundBuffer, JournalSource.OMS_ORDER);
+        journalSources.put(omsExecReportBuffer, JournalSource.OMS_EXEC_REPORT);
+        RoutedBuffers routedBuffers = createRoutedBuffers(listings.size(), sessionSequence, journalSources);
 
+        EpochClock epochClock = SystemEpochClock.INSTANCE;
         ErrorHandler errorHandler = sessionErrorHandler(logger);
+        // Before the outbound gateways start, which can publish execution reports as soon as they connect: a journal
+        // poller only sees what is published after it exists, and a missed number stalls the journal.
+        this.journalRunner =
+                wireJournal(strategyId, sessionId, sessionSequence, journalSources, errorHandler, logger, properties);
+
         Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
         OutboundSetup outboundSetup = setupOutbound(
-                listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, globalSequence, venueQueries);
+                listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, routedBuffers, venueQueries);
         List<GnomeAgent> outboundAgents = outboundSetup.agents();
         ListingRouter routerAgent = outboundSetup.router();
 
@@ -228,8 +240,6 @@ public class TradingOrchestrator extends Orchestrator {
                 getInstance(EpochNanoClock.class));
         StrategyAgent strategy = createStrategyAgent(
                 strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
-
-        EpochClock epochClock = SystemEpochClock.INSTANCE;
 
         LedgerAgent ledgerAgent = ledgerRing == null
                 ? null
@@ -253,15 +263,6 @@ public class TradingOrchestrator extends Orchestrator {
                 logger,
                 priceBuffer,
                 priceSlotRegistry);
-
-        List<SequencedRingBuffer<?>> journaledBuffers = new ArrayList<>();
-        journaledBuffers.add(strategyMdBuffer);
-        journaledBuffers.add(intentBuffer);
-        journaledBuffers.add(stratExecReportBuffer);
-        journaledBuffers.add(orderOutboundBuffer);
-        journaledBuffers.add(omsExecReportBuffer);
-        this.journalRunner =
-                wireJournal(strategyId, sessionId, journaledBuffers, epochClock, errorHandler, logger, properties);
 
         this.runners = startAgentRunners(
                 inbounds,
@@ -438,11 +439,14 @@ public class TradingOrchestrator extends Orchestrator {
     private GnomeAgentRunner wireJournal(
             int strategyId,
             String sessionId,
-            List<SequencedRingBuffer<?>> journaledBuffers,
-            EpochClock epochClock,
+            GlobalSequence sessionSequence,
+            Map<SequencedRingBuffer<?>, JournalSource> journalSources,
             ErrorHandler errorHandler,
             Logger logger,
             Properties properties) {
+        // Checked with the journal off too, so a buffer added without a source fails in every run, not only when
+        // someone turns the journal on.
+        verifyJournalCoverage(sessionSequence, journalSources);
         if (!properties.getBooleanProperty("journal.enabled")) {
             return null;
         }
@@ -450,9 +454,10 @@ public class TradingOrchestrator extends Orchestrator {
         long fileSizeBytes = (long) properties.getIntProperty("journal.file.size.mb") * 1024L * 1024L;
         try {
             JournalWriter journalWriter = new JournalWriter(journalPath, fileSizeBytes);
-            for (SequencedRingBuffer<?> buf : journaledBuffers) {
-                buf.addHandler(journalWriter);
-                buf.start();
+            List<SequencedPoller> pollers = new ArrayList<>(journalSources.size());
+            for (SequencedRingBuffer<?> buffer : sessionSequence.buffers()) {
+                pollers.add(buffer.createPoller(
+                        journalWriter.source(journalSources.get(buffer).id())));
             }
             S3Client s3Client = getInstance(S3Client.class);
             String journalBucket = properties.getStringProperty("journal.bucket");
@@ -460,11 +465,11 @@ public class TradingOrchestrator extends Orchestrator {
             int flushIntervalSeconds = properties.getIntProperty("journal.flush.interval.seconds");
             JournalManagerAgent journalManagerAgent = new JournalManagerAgent(
                     journalWriter,
+                    pollers,
                     journalPath,
                     s3Client,
                     journalBucket,
                     s3Key,
-                    epochClock,
                     Duration.ofSeconds(flushIntervalSeconds),
                     logger);
             GnomeAgentRunner journalRunner = new GnomeAgentRunner(journalManagerAgent, errorHandler);
@@ -475,6 +480,61 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
+    /** A lone listing's market data is what the strategy reads, so it goes straight onto the session sequence. */
+    private List<DefaultInboundOrchestrator<?>> createInbounds(List<Listing> listings, GlobalSequence sessionSequence) {
+        List<DefaultInboundOrchestrator<?>> inbounds = new ArrayList<>(listings.size());
+        for (Listing listing : listings) {
+            Map<Class<?>, Object> inboundOverrides = new HashMap<>();
+            inboundOverrides.put(Listing.class, listing);
+            if (listings.size() == 1) {
+                inboundOverrides.put(GlobalSequence.class, sessionSequence);
+            }
+            inbounds.add(createChildOrchestrator(
+                    DefaultInboundOrchestrator.findInboundOrchestrator(listing), inboundOverrides));
+        }
+        return inbounds;
+    }
+
+    /**
+     * Fails when a buffer takes numbers from the session sequence without a journal source. The journal writes in
+     * strict sequence order, so the first number it never sees would stop it for the rest of the session.
+     */
+    static void verifyJournalCoverage(
+            GlobalSequence sessionSequence, Map<SequencedRingBuffer<?>, JournalSource> journalSources) {
+        for (SequencedRingBuffer<?> buffer : sessionSequence.buffers()) {
+            if (!journalSources.containsKey(buffer)) {
+                throw new IllegalStateException(
+                        "A buffer on the session sequence has no journal source; every buffer on it is journaled");
+            }
+        }
+    }
+
+    /** The router's copy of each order and execution report, one pair of buffers per listing. */
+    private record RoutedBuffers(
+            List<SequencedRingBuffer<Intent>> orders, List<SequencedRingBuffer<OrderExecutionReport>> execReports) {}
+
+    private static RoutedBuffers createRoutedBuffers(
+            int listingCount,
+            GlobalSequence sessionSequence,
+            Map<SequencedRingBuffer<?>, JournalSource> journalSources) {
+        if (listingCount == 1) {
+            return null;
+        }
+        List<SequencedRingBuffer<Intent>> orders = new ArrayList<>(listingCount);
+        List<SequencedRingBuffer<OrderExecutionReport>> execReports = new ArrayList<>(listingCount);
+        for (int i = 0; i < listingCount; i++) {
+            SequencedRingBuffer<Intent> order =
+                    new SequencedRingBuffer<>(Intent::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
+            SequencedRingBuffer<OrderExecutionReport> execReport =
+                    new SequencedRingBuffer<>(OrderExecutionReport::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
+            journalSources.put(order, JournalSource.ROUTED_ORDER);
+            journalSources.put(execReport, JournalSource.ROUTED_EXEC_REPORT);
+            orders.add(order);
+            execReports.add(execReport);
+        }
+        return new RoutedBuffers(orders, execReports);
+    }
+
     private record OutboundSetup(List<GnomeAgent> agents, ListingRouter router) {}
 
     private OutboundSetup setupOutbound(
@@ -482,32 +542,40 @@ public class TradingOrchestrator extends Orchestrator {
             List<SequencedRingBuffer<?>> perListingMdBuffers,
             SequencedRingBuffer<Intent> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
-            GlobalSequence globalSequence,
+            RoutedBuffers routedBuffers,
             Map<Integer, VenueOrderQuery> venueQueries) {
+        // One for the session's gateways, so that every listing trading on the same venue account draws on one
+        // request budget.
+        VenueRateLimiters rateLimiters =
+                new VenueRateLimiters(logger, SystemNanoClock.INSTANCE, SystemEpochClock.INSTANCE);
         List<GnomeAgent> agents = new ArrayList<>(listings.size());
-        if (listings.size() == 1) {
+        if (routedBuffers == null) {
             agents.add(createOutboundGateway(
                     listings.get(0),
                     perListingMdBuffers.get(0),
                     orderOutboundBuffer,
                     omsExecReportBuffer,
-                    venueQueries));
+                    venueQueries,
+                    rateLimiters));
             return new OutboundSetup(agents, null);
         }
         Map<Long, SequencedRingBuffer<?>> perListingOutBufs = new HashMap<>();
-        List<SequencedRingBuffer<OrderExecutionReport>> perExchangeExecBufs = new ArrayList<>(listings.size());
+        List<SequencedRingBuffer<OrderExecutionReport>> perExchangeExecBufs = routedBuffers.execReports();
         for (int i = 0; i < listings.size(); i++) {
             Listing listing = listings.get(i);
             long routingKey = ListingRouter.routingKey(
                     listing.exchange().exchangeId(), listing.security().securityId());
             SequencedRingBuffer<Intent> perExchangeOutBuf =
-                    new SequencedRingBuffer<>(Intent::new, globalSequence, OUTBOUND_BUFFER_SIZE);
-            SequencedRingBuffer<OrderExecutionReport> perExchangeExecBuf =
-                    new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, OUTBOUND_BUFFER_SIZE);
+                    routedBuffers.orders().get(i);
+            SequencedRingBuffer<OrderExecutionReport> perExchangeExecBuf = perExchangeExecBufs.get(i);
             perListingOutBufs.put(routingKey, perExchangeOutBuf);
-            perExchangeExecBufs.add(perExchangeExecBuf);
             agents.add(createOutboundGateway(
-                    listing, perListingMdBuffers.get(i), perExchangeOutBuf, perExchangeExecBuf, venueQueries));
+                    listing,
+                    perListingMdBuffers.get(i),
+                    perExchangeOutBuf,
+                    perExchangeExecBuf,
+                    venueQueries,
+                    rateLimiters));
         }
         return new OutboundSetup(
                 agents,
@@ -604,7 +672,10 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
-    /** Every agent of a session ends it on an error, the venue gateways' reader and supervisor included. */
+    /**
+     * The session's own agents end it on an error. The venue gateways' reader and supervisor have their own handler,
+     * which reconnects first: a dropped socket is routine there.
+     */
     private static ErrorHandler sessionErrorHandler(final Logger logger) {
         return error -> {
             logger.logf(LogMessage.FATAL_ERROR_EXITING, "Agent error: %s", error);
@@ -617,7 +688,8 @@ public class TradingOrchestrator extends Orchestrator {
             SequencedRingBuffer<?> marketDataBuffer,
             SequencedRingBuffer<?> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
-            Map<Integer, VenueOrderQuery> venueQueries) {
+            Map<Integer, VenueOrderQuery> venueQueries,
+            VenueRateLimiters rateLimiters) {
         Properties properties = getInstance(Properties.class);
         String mode = properties.getStringProperty("mode");
 
@@ -640,11 +712,11 @@ public class TradingOrchestrator extends Orchestrator {
         final Class<? extends DefaultOutboundOrchestrator> orchClass =
                 DefaultOutboundOrchestrator.findOutboundOrchestrator(listing);
         // Each venue gateway is built for its own listing, as each market data gateway is.
-        final DefaultOutboundOrchestrator outboundOrch =
-                createChildOrchestrator(orchClass, Map.of(Listing.class, listing));
+        final DefaultOutboundOrchestrator outboundOrch = createChildOrchestrator(
+                orchClass, Map.of(Listing.class, listing, VenueRateLimiters.class, rateLimiters));
         venueQueries.put(listing.listingId(), outboundOrch.createVenueOrderQuery());
-        final DefaultOutboundOrchestrator.OutboundAgents agents = outboundOrch.startGatewayAgents(
-                orderOutboundBuffer, execReportBuffer, sessionErrorHandler(getInstance(Logger.class)));
+        final DefaultOutboundOrchestrator.OutboundAgents agents =
+                outboundOrch.startGatewayAgents(orderOutboundBuffer, execReportBuffer);
         outboundGateways.add(agents.gateway());
         return agents.writer();
     }

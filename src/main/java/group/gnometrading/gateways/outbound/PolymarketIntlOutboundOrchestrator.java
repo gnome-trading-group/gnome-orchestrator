@@ -14,6 +14,8 @@ import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.Polymarket
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlOutboundWriter;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.intl.PolymarketIntlVenueOrderQuery;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
+import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
+import group.gnometrading.gateways.ratelimit.VenueRateLimits;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -27,7 +29,6 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Duration;
-import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
@@ -76,10 +77,18 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
                 credentials.apiKey(), credentials.secret(), credentials.passphrase(), credentials.signerAddress());
     }
 
+    /** Shared by every HTTP client on this account, in every listing's gateway: the venue limits the account. */
     @Provides
     @Singleton
-    public HTTPClient provideHttpClient() {
-        return OrderEntryHttpClients.create();
+    public VenueRateLimiter provideRateLimiter(final PolymarketIntlCredentials credentials) {
+        return venueRateLimiter(
+                VenueRateLimits.polymarketIntl(), "polymarket.intl.ratelimit.", credentials.signerAddress());
+    }
+
+    @Provides
+    @Singleton
+    public HTTPClient provideHttpClient(final VenueRateLimiter rateLimiter) {
+        return OrderEntryHttpClients.create(rateLimiter);
     }
 
     /** The listing's market parameters, fetched once at startup; refuses to start on an unsupported venue version. */
@@ -134,8 +143,7 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
     @Override
     public OutboundAgents startGatewayAgents(
             final SequencedRingBuffer<?> orderOutboundBuffer,
-            final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
-            final ErrorHandler errorHandler) {
+            final SequencedRingBuffer<OrderExecutionReport> execReportBuffer) {
         final PolymarketIntlCredentials credentials = getInstance(PolymarketIntlCredentials.class);
         final Logger logger = getInstance(Logger.class);
         final EpochNanoClock nanoClock = getInstance(EpochNanoClock.class);
@@ -167,9 +175,20 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
                 credentials.apiKey(),
                 credentials.secret(),
                 credentials.passphrase(),
-                marketInfo);
+                marketInfo,
+                // The reconnect catch-up runs on the supervisor's thread, so it can't share the writer's client or
+                // auth headers.
+                new PolymarketIntlVenueOrderQuery(
+                        OrderEntryHttpClients.create(getInstance(VenueRateLimiter.class)),
+                        clobHost,
+                        new PolymarketIntlAuthHeaders(
+                                credentials.apiKey(),
+                                credentials.secret(),
+                                credentials.passphrase(),
+                                credentials.signerAddress())));
 
         final PolymarketIntlOutboundWriter writer = new PolymarketIntlOutboundWriter(
+                logger,
                 orderOutboundBuffer,
                 newOrderQueue,
                 writerReportQueue,
@@ -182,6 +201,6 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
                 nanoClock,
                 listing);
 
-        return startAgents(reader, writer, config, logger, epochClock, errorHandler);
+        return startAgents(reader, writer, config, logger, epochClock);
     }
 }

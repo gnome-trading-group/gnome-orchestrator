@@ -12,6 +12,8 @@ import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundReade
 import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiOutboundWriter;
 import group.gnometrading.gateways.outbound.exchanges.kalshi.KalshiVenueOrderQuery;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
+import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
+import group.gnometrading.gateways.ratelimit.VenueRateLimits;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
@@ -26,7 +28,6 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Duration;
-import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
@@ -69,10 +70,17 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
         return new KalshiAuthSigner(credentials.apiKey(), credentials.privateKey());
     }
 
+    /** Shared by every HTTP client on this account, in every listing's gateway: the venue limits the account. */
     @Provides
     @Singleton
-    public HTTPClient provideHttpClient() {
-        return OrderEntryHttpClients.create();
+    public VenueRateLimiter provideRateLimiter(final KalshiCredentials credentials) {
+        return venueRateLimiter(VenueRateLimits.kalshi(), "kalshi.ratelimit.", credentials.apiKey());
+    }
+
+    @Provides
+    @Singleton
+    public HTTPClient provideHttpClient(final VenueRateLimiter rateLimiter) {
+        return OrderEntryHttpClients.create(rateLimiter);
     }
 
     @Provides
@@ -116,8 +124,7 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
     @Override
     public OutboundAgents startGatewayAgents(
             final SequencedRingBuffer<?> orderOutboundBuffer,
-            final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
-            final ErrorHandler errorHandler) {
+            final SequencedRingBuffer<OrderExecutionReport> execReportBuffer) {
         final Logger logger = getInstance(Logger.class);
         final EpochNanoClock nanoClock = getInstance(EpochNanoClock.class);
         final EpochClock epochClock = getInstance(EpochClock.class);
@@ -149,7 +156,7 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 new JsonDecoder(),
                 readerSigner,
                 // Its own client: the reader catches up over REST on the supervisor's thread after a reconnect.
-                OrderEntryHttpClients.create(),
+                OrderEntryHttpClients.create(getInstance(VenueRateLimiter.class)),
                 apiHost,
                 takerFee,
                 makerFee);
@@ -167,6 +174,6 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 listing,
                 SessionTag.of(properties));
 
-        return startAgents(reader, writer, config, logger, epochClock, errorHandler);
+        return startAgents(reader, writer, config, logger, epochClock);
     }
 }

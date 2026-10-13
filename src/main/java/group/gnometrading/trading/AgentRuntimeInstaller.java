@@ -54,8 +54,7 @@ public final class AgentRuntimeInstaller {
         AgentRuntime.Listener listener = new LoggingListener(logger);
 
         if (STANDARD.equals(profile)) {
-            AgentRuntime.install(ThreadPinner.NONE, CoreAllocator.NONE, IdlePolicy.standard(), listener);
-            logger.logf(LogMessage.DEBUG, "Latency profile standard: no pinning, idle agents back off");
+            installStandard(logger);
             return;
         }
         if (!LOW_LATENCY.equals(profile)) {
@@ -93,6 +92,16 @@ public final class AgentRuntimeInstaller {
                     listingCount,
                     isolated.length);
         }
+    }
+
+    /**
+     * Installs the standard runtime regardless of properties: nothing pinned, nothing busy-spins. For processes that
+     * must never spin, such as collectors on a fractional Fargate CPU, where a spinning thread exhausts the CPU quota
+     * and the throttled task stalls every thread for tens of milliseconds.
+     */
+    public static void installStandard(Logger logger) {
+        AgentRuntime.install(ThreadPinner.NONE, CoreAllocator.NONE, IdlePolicy.standard(), new LoggingListener(logger));
+        logger.logf(LogMessage.DEBUG, "Latency profile standard: no pinning, idle agents back off");
     }
 
     /**

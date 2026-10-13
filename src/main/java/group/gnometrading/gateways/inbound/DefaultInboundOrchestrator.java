@@ -5,13 +5,12 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
+import group.gnometrading.gateways.GatewayErrorHandler;
 import group.gnometrading.gateways.GatewayRunners;
-import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Schema;
 import group.gnometrading.sequencer.GlobalSequence;
-import group.gnometrading.sequencer.SequencedEventHandler;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.RiskModule;
 import group.gnometrading.sm.Listing;
@@ -104,7 +103,8 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     @Singleton
     public final ErrorHandler provideInboundErrorHandler() {
         final InboundGateway gateway = getInstance(InboundGateway.class);
-        return new InboundGatewayErrorHandler(getInstance(Logger.class), gateway::forceReconnect, System::exit);
+        return new GatewayErrorHandler(
+                getInstance(Logger.class), "market inbound gateway", gateway::forceReconnect, System::exit);
     }
 
     @SuppressWarnings("unchecked")
@@ -127,28 +127,5 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
                         new GnomeAgentRunner(getInstance(InboundSocketWriter.class), errorHandler),
                         new GnomeAgentRunner(getInstance(InboundGateway.class), errorHandler))
                 .start();
-    }
-
-    @SuppressWarnings("unchecked")
-    public final void configureGatewayForListing(SequencedEventHandler consumer) {
-        Logger logger = getInstance(Logger.class);
-        Listing listing = getInstance(Listing.class);
-        logger.logf(LogMessage.DEBUG, "Configuring listing gateway for: %d", listing.listingId());
-
-        SequencedRingBuffer<T> sequencedRingBuffer = getInstance(SequencedRingBuffer.class);
-        InboundSocketWriter socketWriter = getInstance(InboundSocketWriter.class);
-        InboundSocketReader<T> socketReader = getInstance(InboundSocketReader.class);
-        InboundGateway marketInboundGateway = getInstance(InboundGateway.class);
-
-        ErrorHandler errorHandler = getInstance(ErrorHandler.class);
-        GnomeAgentRunner marketInboundRunner = new GnomeAgentRunner(marketInboundGateway, errorHandler);
-        GnomeAgentRunner socketReaderRunner = new GnomeAgentRunner(socketReader, errorHandler);
-        GnomeAgentRunner socketWriterRunner = new GnomeAgentRunner(socketWriter, errorHandler);
-
-        sequencedRingBuffer.handleEventsWith(consumer);
-        GnomeAgentRunner.startOnThread(marketInboundRunner);
-        GnomeAgentRunner.startOnThread(socketReaderRunner);
-        GnomeAgentRunner.startOnThread(socketWriterRunner);
-        sequencedRingBuffer.start();
     }
 }

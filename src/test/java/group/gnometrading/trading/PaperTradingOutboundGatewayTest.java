@@ -22,7 +22,6 @@ import group.gnometrading.simulation.latency.StaticLatency;
 import group.gnometrading.simulation.queues.RiskAverseQueueModel;
 import java.util.ArrayList;
 import java.util.List;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -63,19 +62,9 @@ class PaperTradingOutboundGatewayTest {
             report.wrap(report.buffer);
             reports.add(report);
         });
-        orderBuffer.start();
-        marketDataBuffer.start();
-        execReportBuffer.start();
 
         publishBook(49, 10, 51, 10);
         gateway.doWork();
-    }
-
-    @AfterEach
-    void tearDown() {
-        orderBuffer.shutdown();
-        marketDataBuffer.shutdown();
-        execReportBuffer.shutdown();
     }
 
     @Test
