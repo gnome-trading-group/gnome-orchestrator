@@ -56,7 +56,8 @@ import org.agrona.concurrent.SystemEpochNanoClock;
  * {@code -Dpm.signatureType} describe the account; {@code -Dpm.condition} and {@code -Dpm.token} the listing.
  *
  * <p>Modes ({@code -Dmode}): {@code rest} rests a BUY far below the market and cancels it; {@code ioc} buys at
- * {@code -Dbuy.price} and sells back at {@code -Dsell.price}; {@code short} sells shares it doesn't hold;
+ * {@code -Dbuy.price} and sells back at {@code -Dsell.price}; {@code short} sells shares it doesn't hold; {@code one}
+ * sends a single order ({@code -Dorder.side=bid|ask}, {@code -Dprice}, {@code -Dsize}, {@code -Dtif=gtc|ioc});
  * {@code reconnect} rests an order, drops the reader's socket, cancels and reconnects. {@code -Dlose.submits}
  * throws away that many submit answers after the CLOB took them.
  */
@@ -161,6 +162,23 @@ public final class PolymarketLiveSmoke {
                             "rest a post-only BUY at the touch");
                     Thread.sleep(Long.getLong("wait.seconds", 300) * 1_000L);
                     stack.cancel(51, "cancel what's left");
+                }
+                case "one" -> {
+                    // One order on its own, to see what the CLOB makes of it; one that rests is cancelled.
+                    final Side side = required("order.side").equals("ask") ? Side.Ask : Side.Bid;
+                    final boolean ioc = System.getProperty("tif", "gtc").equals("ioc");
+                    stack.send(
+                            61,
+                            side,
+                            required("price"),
+                            System.getProperty("size", "5"),
+                            ioc ? TimeInForce.IMMEDIATE_OR_CANCELED : TimeInForce.GOOD_TILL_CANCELED,
+                            "one " + (ioc ? "IOC " : "GTC ") + side);
+                    Thread.sleep(3_000);
+                    if (!ioc) {
+                        Thread.sleep(Math.max(0, marketInfo.minOrderAgeSeconds()) * 1_000L);
+                        stack.cancel(61, "cancel it, in case it rested");
+                    }
                 }
                 case "short" -> stack.send(
                         21, Side.Ask, "0.95", "5", TimeInForce.GOOD_TILL_CANCELED, "sell shares we don't hold");

@@ -69,7 +69,7 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
     @Provides
     @Singleton
     public final KalshiCredentials provideKalshiCredentials(SecretsManagerClient secretsManager, Listing listing) {
-        String secretName = "gnome/exchange-credentials/kalshi";
+        String secretName = "gnome/market-data/kalshi";
         String secretJson = secretsManager
                 .getSecretValue(
                         GetSecretValueRequest.builder().secretId(secretName).build())

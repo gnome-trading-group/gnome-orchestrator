@@ -36,9 +36,6 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
             case "LIGHTER" -> {
                 return LighterInboundOrchestrator.class;
             }
-            case "BINANCE" -> {
-                return BinanceInboundOrchestrator.class;
-            }
             case "POLYMARKET_INTL" -> {
                 return PolymarketIntlInboundOrchestrator.class;
             }

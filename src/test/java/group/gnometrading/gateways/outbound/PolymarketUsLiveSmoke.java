@@ -69,7 +69,8 @@ import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueReques
  * {@code -Dbuy.price} and sells back at {@code -Dsell.price}; {@code reconnect} rests an order, drops the reader's
  * socket, cancels and reconnects; {@code lose} rests one whose submit answer is thrown away, then cancels it;
  * {@code lose-ioc} buys and sells back as {@code ioc} does, throwing away both answers; {@code maker} rests a
- * post-only BUY at {@code -Dmaker.price} for {@code -Dwait.seconds}; {@code status} prints the market's open orders.
+ * post-only BUY at {@code -Dmaker.price} for {@code -Dwait.seconds}; {@code one} sends a single IOC
+ * ({@code -Dorder.side=bid|ask}, {@code -Dprice}, {@code -Dsize}); {@code status} prints the market's open orders.
  */
 public final class PolymarketUsLiveSmoke {
 
@@ -231,6 +232,18 @@ public final class PolymarketUsLiveSmoke {
                     System.out.println("\n==== the reader reconnects and catches up");
                     stack.reader.connect();
                     Thread.sleep(6_000);
+                }
+                case "one" -> {
+                    // One IOC on its own, to see what the venue makes of an order with nothing behind it.
+                    final Side side = required("order.side").equals("ask") ? Side.Ask : Side.Bid;
+                    stack.send(
+                            61,
+                            side,
+                            required("price"),
+                            System.getProperty("size", "1"),
+                            TimeInForce.IMMEDIATE_OR_CANCELED,
+                            "one IOC " + side);
+                    Thread.sleep(3_000);
                 }
                 case "lose" -> {
                     stack.send(41, Side.Bid, "0.010", "1", TimeInForce.GOOD_TILL_CANCELED, "rest, answer lost");
@@ -703,13 +716,13 @@ public final class PolymarketUsLiveSmoke {
         return new PolymarketUsAuthSigner(credentials.apiKey(), credentials.privateKey());
     }
 
-    private static PolymarketUsCredentials credentials() {
+    static PolymarketUsCredentials credentials() {
         try (SecretsManagerClient client = SecretsManagerClient.builder()
                 .region(Region.US_EAST_1)
                 .credentialsProvider(ProfileCredentialsProvider.create("dev"))
                 .build()) {
             return PolymarketUsCredentials.fromJson(client.getSecretValue(GetSecretValueRequest.builder()
-                            .secretId("gnome/exchange-credentials/polymarket-us")
+                            .secretId(tradingSecret())
                             .build())
                     .secretString());
         }
@@ -730,5 +743,15 @@ public final class PolymarketUsLiveSmoke {
             throw new IllegalArgumentException("-D" + property + " is required");
         }
         return value;
+    }
+
+    // Trading keys belong to venue accounts now, so the probe is pointed at one with
+    // -Dsecret=gnome/accounts/<label>/trading.
+    private static String tradingSecret() {
+        final String secret = System.getProperty("secret");
+        if (secret == null) {
+            throw new IllegalArgumentException("-Dsecret=gnome/accounts/<label>/trading is required");
+        }
+        return secret;
     }
 }

@@ -72,7 +72,7 @@ public class PolymarketUsInboundOrchestrator extends DefaultInboundOrchestrator<
     @Singleton
     public final PolymarketUsCredentials providePolymarketUsCredentials(
             SecretsManagerClient secretsManager, Listing listing) {
-        String secretName = "gnome/exchange-credentials/polymarket-us";
+        String secretName = "gnome/market-data/polymarket-us";
         String secretJson = secretsManager
                 .getSecretValue(
                         GetSecretValueRequest.builder().secretId(secretName).build())

@@ -57,12 +57,14 @@ export class Ec2Stack extends cdk.Stack {
         iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchAgentServerPolicy'),
       ],
     });
-    // Any region: instances fall back to us-east-1 for secrets that are not replicated to their own region.
+    // Any region: instances fall back to us-east-1 for secrets that are not replicated to their own region. Every
+    // session reads the market-data keys and the gnomepy token; only a live one reads its account's trading key.
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
       resources: [
-        `arn:aws:secretsmanager:*:${this.account}:secret:gnome/*`,
+        `arn:aws:secretsmanager:*:${this.account}:secret:gnome/market-data/*`,
         `arn:aws:secretsmanager:*:${this.account}:secret:gnomepy/*`,
+        ...(live ? [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*/trading-*`] : []),
       ],
     }));
     if (!live) {

@@ -114,7 +114,7 @@ public final class KalshiLiveSmoke {
         try {
             if (mode.equals("inbound")) {
                 runInbound(
-                        credentials(profile, System.getProperty("prod.secret", "gnome/exchange-credentials/kalshi")),
+                        credentials(profile, System.getProperty("prod.secret", "gnome/market-data/kalshi")),
                         System.getProperty("prod.ticker"),
                         Integer.getInteger("seconds", 60));
             } else if (mode.equals("orders")) {
@@ -1146,8 +1146,7 @@ public final class KalshiLiveSmoke {
         System.out.println(body.length() > 3000 ? body.substring(0, 3000) + " ...(truncated)" : body);
     }
 
-    private static String signedGet(
-            final KalshiCredentials creds, final String apiBase, final String path, final String query)
+    static String signedGet(final KalshiCredentials creds, final String apiBase, final String path, final String query)
             throws Exception {
         final KalshiAuthSigner signer = new KalshiAuthSigner(creds.apiKey(), creds.privateKey());
         signer.sign(System.currentTimeMillis(), "GET", path);
@@ -1204,7 +1203,7 @@ public final class KalshiLiveSmoke {
 
     // ========== Shared ==========
 
-    private static KalshiCredentials credentials(final String profile, final String secretId) {
+    static KalshiCredentials credentials(final String profile, final String secretId) {
         try (SecretsManagerClient secrets = SecretsManagerClient.builder()
                 .region(Region.of(System.getenv().getOrDefault("AWS_REGION", "us-east-1")))
                 .credentialsProvider(ProfileCredentialsProvider.create(profile))
@@ -1243,13 +1242,13 @@ public final class KalshiLiveSmoke {
     }
 
     /** Shutdown used to hang here; prints how long it took so a regression is obvious. */
-    private static void closeTimed(final String what, final GatewayRunners runners) throws Exception {
+    static void closeTimed(final String what, final GatewayRunners runners) throws Exception {
         final long start = System.nanoTime();
         runners.close();
         System.out.println("== Closed " + what + " in " + (System.nanoTime() - start) / 1_000_000 + " ms");
     }
 
-    private static Listing listing(final int listingId, final String exchangeSecurityId) {
+    static Listing listing(final int listingId, final String exchangeSecurityId) {
         return new Listing(
                 listingId,
                 new Exchange(2, "KALSHI", "Kalshi", "global", SchemaType.MBP_10),

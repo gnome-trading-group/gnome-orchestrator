@@ -3,7 +3,6 @@ package group.gnometrading.gateways;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import group.gnometrading.gateways.inbound.BinanceInboundOrchestrator;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.inbound.HyperliquidInboundOrchestrator;
 import group.gnometrading.gateways.inbound.KalshiInboundOrchestrator;
@@ -32,9 +31,6 @@ class GatewaySelectionTest {
         assertEquals(
                 LighterInboundOrchestrator.class,
                 DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("LIGHTER", "Lighter")));
-        assertEquals(
-                BinanceInboundOrchestrator.class,
-                DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("BINANCE", "Binance")));
         assertEquals(
                 KalshiInboundOrchestrator.class,
                 DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("KALSHI", "Kalshi")));
@@ -76,6 +72,6 @@ class GatewaySelectionTest {
                 () -> DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("UNKNOWN_VENUE", "Unknown")));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> DefaultOutboundOrchestrator.findOutboundOrchestrator(listingOn("BINANCE", "Binance")));
+                () -> DefaultOutboundOrchestrator.findOutboundOrchestrator(listingOn("UNKNOWN_VENUE", "Unknown")));
     }
 }

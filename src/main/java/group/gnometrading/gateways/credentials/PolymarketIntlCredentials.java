@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 
 /**
- * Secret {@code gnome/exchange-credentials/polymarket-intl}.
+ * A venue account's trading secret, {@code gnome/accounts/<label>/trading}.
  *
  * @param signerAddress the EOA that holds {@code ethereumPrivateKey}; the API key belongs to it
  * @param funderAddress the wallet the orders trade from: the EOA itself, or the polymarket.com proxy or Safe

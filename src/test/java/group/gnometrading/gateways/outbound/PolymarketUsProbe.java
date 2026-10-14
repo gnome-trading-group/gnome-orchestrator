@@ -127,9 +127,19 @@ public final class PolymarketUsProbe {
                 .credentialsProvider(ProfileCredentialsProvider.create("dev"))
                 .build()) {
             return PolymarketUsCredentials.fromJson(client.getSecretValue(GetSecretValueRequest.builder()
-                            .secretId("gnome/exchange-credentials/polymarket-us")
+                            .secretId(tradingSecret())
                             .build())
                     .secretString());
         }
+    }
+
+    // Trading keys belong to venue accounts now, so the probe is pointed at one with
+    // -Dsecret=gnome/accounts/<label>/trading.
+    private static String tradingSecret() {
+        final String secret = System.getProperty("secret");
+        if (secret == null) {
+            throw new IllegalArgumentException("-Dsecret=gnome/accounts/<label>/trading is required");
+        }
+        return secret;
     }
 }
