@@ -7,6 +7,7 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.GatewayErrorHandler;
 import group.gnometrading.gateways.GatewayRunners;
+import group.gnometrading.gateways.ProcessExit;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Schema;
@@ -101,7 +102,17 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
     public final ErrorHandler provideInboundErrorHandler() {
         final InboundGateway gateway = getInstance(InboundGateway.class);
         return new GatewayErrorHandler(
-                getInstance(Logger.class), "market inbound gateway", gateway::forceReconnect, System::exit);
+                getInstance(Logger.class),
+                "market inbound gateway",
+                gateway::forceReconnect,
+                getInstance(ProcessExit.class));
+    }
+
+    /** A trading session puts its own in the child's bindings, which take precedence over this. */
+    @Provides
+    @Singleton
+    public ProcessExit provideProcessExit() {
+        return ProcessExit.SYSTEM;
     }
 
     @SuppressWarnings("unchecked")

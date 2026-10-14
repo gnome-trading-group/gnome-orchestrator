@@ -6,16 +6,19 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.GatewayRunners;
+import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.ledger.LedgerAgent;
 import group.gnometrading.oms.ledger.LedgerRing;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
+import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import org.agrona.concurrent.EpochClock;
@@ -30,7 +33,11 @@ import org.agrona.concurrent.EpochClock;
  *   <li>each agent's time since its work loop last advanced (a stuck agent stops advancing; an idle one doesn't);
  *   <li>each listing's time since its price last changed (a quiet market, or a dead feed);
  *   <li>the ledger's last stored write, failures since, and whether it was fenced;
- *   <li>each gateway's reader, and whether it is held off its socket while reconnecting.
+ *   <li>each gateway's reader, whether it is held off its socket while reconnecting, and how often its book was found
+ *       wrong and resynced in the last five minutes;
+ *   <li>whether risk can be trusted: stale (the registry unreachable), unguarded (a required policy missing), policies
+ *       that couldn't be built, and halts the OMS couldn't record;
+ *   <li>each venue account's rate limiter, and whether it is refusing requests.
  * </ul>
  *
  * <p>Reads only what the agents already publish for other threads, so it costs their threads nothing. Nothing here
@@ -45,6 +52,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private static final int HTTP_OK = 200;
     private static final int HTTP_NOT_FOUND = 404;
     private static final int HTTP_CONFLICT = 409;
+    private static final long RESYNC_WINDOW_MS = 5 * 60_000;
 
     private final String sessionId;
     private final RegistryConnection registry;
@@ -66,6 +74,13 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
 
     private final GatewayRunners[] gateways;
     private final String[] gatewayNames;
+    // Each gateway's resync count at each of the last five minutes' posts, oldest at resyncSlot.
+    private final long[][] resyncHistory;
+    private int resyncSlot;
+
+    private final RiskEngine riskEngine;
+    private final String[] limiterNames;
+    private final VenueRateLimiter[] limiters;
 
     private final LedgerAgent ledger;
     private final LedgerRing ledgerRing;
@@ -90,6 +105,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final PriceSlotRegistry priceSlots,
             final LedgerAgent ledger,
             final LedgerRing ledgerRing,
+            final RiskEngine riskEngine,
+            final Map<String, VenueRateLimiter> rateLimiters,
             final long sampleIntervalMs,
             final long postIntervalMs) {
         this.sessionId = sessionId;
@@ -116,8 +133,12 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         for (int i = 0; i < this.gateways.length; i++) {
             this.gatewayNames[i] = this.gateways[i].name();
         }
+        this.resyncHistory = new long[this.gateways.length][(int) Math.max(1, RESYNC_WINDOW_MS / postIntervalMs)];
         this.ledger = ledger;
         this.ledgerRing = ledgerRing;
+        this.riskEngine = riskEngine;
+        this.limiterNames = rateLimiters.keySet().toArray(new String[0]);
+        this.limiters = rateLimiters.values().toArray(new VenueRateLimiter[0]);
     }
 
     @Override
@@ -216,6 +237,10 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         writeLedger(now);
         json.writeComma();
         writeGateways();
+        json.writeComma();
+        writeRisk(now);
+        json.writeComma();
+        writeRateLimits();
         json.writeObjectEnd();
     }
 
@@ -283,6 +308,46 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                     .writeObjectEntry("name", gatewayNames[i])
                     .writeComma()
                     .writeObjectEntry("reconnecting", gateways[i].isReconnecting())
+                    .writeComma()
+                    .writeObjectEntry("resyncsLast5m", resyncsInWindow(i))
+                    .writeObjectEnd();
+        }
+        json.writeArrayEnd();
+        resyncSlot = (resyncSlot + 1) % (gateways.length == 0 ? 1 : resyncHistory[0].length);
+    }
+
+    // Resyncs since the post five minutes ago; this post's count then takes that oldest slot.
+    private long resyncsInWindow(final int gateway) {
+        final long current = gateways[gateway].bookResyncs();
+        final long oldest = resyncHistory[gateway][resyncSlot];
+        resyncHistory[gateway][resyncSlot] = current;
+        return current - oldest;
+    }
+
+    private void writeRisk(final long now) {
+        json.writeString("risk")
+                .writeColon()
+                .writeObjectStart()
+                .writeObjectEntry("stale", riskEngine.isStale(now))
+                .writeComma()
+                .writeObjectEntry("unguarded", riskEngine.isUnguarded())
+                .writeComma()
+                .writeObjectEntry("unbuildablePolicies", riskEngine.unbuildablePolicies())
+                .writeComma()
+                .writeObjectEntry("droppedLatches", riskEngine.droppedLatches())
+                .writeObjectEnd();
+    }
+
+    private void writeRateLimits() {
+        json.writeString("rateLimit").writeColon().writeArrayStart();
+        for (int i = 0; i < limiters.length; i++) {
+            if (i > 0) {
+                json.writeComma();
+            }
+            json.writeObjectStart()
+                    .writeObjectEntry("account", limiterNames[i])
+                    .writeComma()
+                    .writeObjectEntry("throttling", limiters[i].isThrottling())
                     .writeObjectEnd();
         }
         json.writeArrayEnd();

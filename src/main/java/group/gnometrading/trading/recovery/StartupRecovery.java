@@ -116,7 +116,7 @@ public final class StartupRecovery {
         final String status =
                 sessions.isEmpty() ? "" : sessions.get(0).path("status").asText();
         if (!RUNNABLE_STATUSES.contains(status)) {
-            throw new IllegalStateException("Session " + sessionId + " is " + status + "; refusing to start");
+            throw new SessionNotRunnableException("Session " + sessionId + " is " + status + "; refusing to start");
         }
     }
 

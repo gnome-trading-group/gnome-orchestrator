@@ -15,6 +15,8 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.ReaderPauseControl;
+import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
+import group.gnometrading.gateways.ratelimit.VenueRateLimits;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.ledger.LedgerAgent;
 import group.gnometrading.oms.ledger.LedgerRing;
@@ -22,8 +24,11 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
+import group.gnometrading.oms.risk.RiskEngine;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -47,6 +52,8 @@ class SessionHeartbeatAgentTest {
     private PriceSlotRegistry slots;
     private LedgerRing ledgerRing;
     private LedgerAgent ledger;
+    private RiskEngine riskEngine;
+    private VenueRateLimiters rateLimiters;
 
     private static final class Named implements GnomeAgent {
         private final String name;
@@ -92,6 +99,9 @@ class SessionHeartbeatAgentTest {
                 slots,
                 250,
                 1_000);
+        riskEngine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), ListingDirectory.EMPTY);
+        rateLimiters = new VenueRateLimiters(new NullLogger(), System::nanoTime, () -> now[0]);
+        rateLimiters.forAccount(VenueRateLimits.kalshi(), "key-1");
     }
 
     @AfterEach
@@ -120,6 +130,8 @@ class SessionHeartbeatAgentTest {
                 slots,
                 ledger,
                 ledgerRing,
+                riskEngine,
+                rateLimiters.all(),
                 SAMPLE_MS,
                 POST_MS);
     }
@@ -168,6 +180,15 @@ class SessionHeartbeatAgentTest {
         final JsonNode gatewayHealth = beat.get("gateways").get(0);
         assertEquals("KalshiReader", gatewayHealth.get("name").asText());
         assertTrue(gatewayHealth.get("reconnecting").asBoolean(), "a reader starts held until its socket connects");
+        assertEquals(0, gatewayHealth.get("resyncsLast5m").asLong(), "a venue gateway has no book to resync");
+        final JsonNode risk = beat.get("risk");
+        assertTrue(risk.get("stale").asBoolean(), "never refreshed from the registry");
+        assertFalse(risk.get("unguarded").asBoolean());
+        assertEquals(0, risk.get("unbuildablePolicies").asInt());
+        assertEquals(0, risk.get("droppedLatches").asLong());
+        final JsonNode limiter = beat.get("rateLimit").get(0);
+        assertEquals("Kalshi/key-1", limiter.get("account").asText());
+        assertFalse(limiter.get("throttling").asBoolean());
     }
 
     @Test
@@ -206,6 +227,8 @@ class SessionHeartbeatAgentTest {
                 slots,
                 ledger,
                 ledgerRing,
+                riskEngine,
+                rateLimiters.all(),
                 SAMPLE_MS,
                 Long.MAX_VALUE / 2);
         agent.onStart();

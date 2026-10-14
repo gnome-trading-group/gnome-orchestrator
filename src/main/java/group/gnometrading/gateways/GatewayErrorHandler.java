@@ -4,7 +4,6 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.IntConsumer;
 import org.agrona.ErrorHandler;
 
 /**
@@ -19,11 +18,11 @@ public final class GatewayErrorHandler implements ErrorHandler {
     private final Logger logger;
     private final String gatewayName;
     private final Runnable forceReconnect;
-    private final IntConsumer exit;
+    private final ProcessExit exit;
     private final List<Long> errorTimestamps = new ArrayList<>();
 
     public GatewayErrorHandler(
-            final Logger logger, final String gatewayName, final Runnable forceReconnect, final IntConsumer exit) {
+            final Logger logger, final String gatewayName, final Runnable forceReconnect, final ProcessExit exit) {
         this.logger = logger;
         this.gatewayName = gatewayName;
         this.forceReconnect = forceReconnect;
@@ -37,7 +36,7 @@ public final class GatewayErrorHandler implements ErrorHandler {
         // The gateway already retried for several connect cycles; another reconnect would only repeat them.
         if (error instanceof GatewayConnectFailedException) {
             this.logger.log(LogMessage.FATAL_ERROR_EXITING);
-            this.exit.accept(1);
+            this.exit.exit(1, error);
             return;
         }
 
@@ -48,7 +47,12 @@ public final class GatewayErrorHandler implements ErrorHandler {
 
             if (this.errorTimestamps.size() >= MAX_ERRORS_PER_WINDOW) {
                 this.logger.log(LogMessage.FATAL_ERROR_EXITING);
-                this.exit.accept(1);
+                this.exit.exit(
+                        1,
+                        new IllegalStateException(
+                                MAX_ERRORS_PER_WINDOW + " errors in a minute from " + this.gatewayName + ", the last: "
+                                        + error,
+                                error));
                 return;
             }
             this.forceReconnect.run();

@@ -63,6 +63,25 @@ class SessionStatusReporterTest {
     }
 
     @Test
+    void testAlreadyRunningIsSuccess() throws Exception {
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/strategy-sessions", exchange -> {
+            byte[] body = "{\"message\":\"Session abc-123 is RUNNING\",\"status\":\"RUNNING\"}"
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(409, body.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+        });
+        server.start();
+        URI base = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+
+        assertTrue(
+                new SessionStatusReporter(base, "secret-key", mock(Logger.class)).reportRunning("abc-123"),
+                "its first heartbeat already moved it");
+    }
+
+    @Test
     void testConflictMeansStoppedAndIsNotRetried() throws Exception {
         assertFalse(reporterRespondingWith(409).reportRunning("abc-123"));
 

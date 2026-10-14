@@ -9,6 +9,7 @@ import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.GatewayErrorHandler;
 import group.gnometrading.gateways.GatewayRunners;
+import group.gnometrading.gateways.ProcessExit;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
@@ -40,6 +41,13 @@ public abstract class DefaultOutboundOrchestrator extends Orchestrator {
                     + listing.exchange().exchangeCode() + " ("
                     + listing.exchange().exchangeName() + ")");
         }
+    }
+
+    /** A trading session puts its own in the child's bindings, which take precedence over this. */
+    @Provides
+    @Singleton
+    public ProcessExit provideProcessExit() {
+        return ProcessExit.SYSTEM;
     }
 
     /**
@@ -75,8 +83,8 @@ public abstract class DefaultOutboundOrchestrator extends Orchestrator {
             final EpochClock epochClock) {
         final OutboundGateway gateway = new OutboundGateway(logger, reader, config, epochClock);
         // A dropped socket surfaces as a reader error; reconnecting (and catching up) is the answer, not an exit.
-        final ErrorHandler errorHandler =
-                new GatewayErrorHandler(logger, "order gateway", gateway::forceReconnect, System::exit);
+        final ErrorHandler errorHandler = new GatewayErrorHandler(
+                logger, "order gateway", gateway::forceReconnect, getInstance(ProcessExit.class));
         final GatewayRunners runners = GatewayRunners.venue(
                         reader.pauseControl,
                         new GnomeAgentRunner(reader, errorHandler),

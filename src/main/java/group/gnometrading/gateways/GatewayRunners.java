@@ -1,6 +1,7 @@
 package group.gnometrading.gateways;
 
 import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.gateways.inbound.InboundSocketReader;
 import java.util.List;
 
 /**
@@ -66,6 +67,11 @@ public final class GatewayRunners implements AutoCloseable {
     /** Whether the reader is held off its socket while the supervisor connects or reconnects it. */
     public boolean isReconnecting() {
         return readerPause.isPauseRequested();
+    }
+
+    /** How many times a market data gateway has found its book wrong and resynced; a venue gateway has no book. */
+    public long bookResyncs() {
+        return reader.getAgent() instanceof InboundSocketReader<?> inbound ? inbound.bookResyncs() : 0;
     }
 
     /** Every thread the gateway runs, for watching whether each is still making progress. */

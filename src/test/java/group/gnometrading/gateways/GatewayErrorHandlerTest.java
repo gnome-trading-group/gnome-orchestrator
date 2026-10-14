@@ -14,9 +14,13 @@ class GatewayErrorHandlerTest {
 
     private final Logger logger = mock(Logger.class);
     private final List<Integer> exits = new ArrayList<>();
+    private final List<Throwable> causes = new ArrayList<>();
     private int reconnects;
     private final GatewayErrorHandler handler =
-            new GatewayErrorHandler(logger, "test gateway", () -> reconnects++, exits::add);
+            new GatewayErrorHandler(logger, "test gateway", () -> reconnects++, (status, cause) -> {
+                exits.add(status);
+                causes.add(cause);
+            });
 
     @Test
     void ordinaryError_Reconnects() {
@@ -43,5 +47,6 @@ class GatewayErrorHandlerTest {
 
         assertEquals(List.of(1), exits);
         assertEquals(9, reconnects);
+        assertTrue(causes.get(0).getMessage().startsWith("10 errors in a minute from test gateway"), "says why");
     }
 }

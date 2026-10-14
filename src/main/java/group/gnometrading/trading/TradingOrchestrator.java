@@ -13,6 +13,7 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.GatewayRunners;
+import group.gnometrading.gateways.ProcessExit;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
@@ -56,6 +57,7 @@ import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
 import group.gnometrading.strategies.StrategyAgent;
 import group.gnometrading.strategies.StrategyFactory;
+import group.gnometrading.trading.recovery.SessionNotRunnableException;
 import group.gnometrading.trading.recovery.StartupRecovery;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -124,6 +126,10 @@ public class TradingOrchestrator extends Orchestrator {
     private volatile GnomeAgentRunner journalRunner;
     private volatile GnomeAgentRunner heartbeatRunner;
     private volatile Logger logger;
+    // A session's way out on an error; null for a local run, which throws instead.
+    private volatile SessionFatalHandler fatalHandler;
+    // One per session, so every listing trading on the same venue account draws on one request budget.
+    private VenueRateLimiters rateLimiters;
 
     @Provides
     @Singleton
@@ -137,6 +143,11 @@ public class TradingOrchestrator extends Orchestrator {
         return new ConsoleLogger(clock);
     }
 
+    /**
+     * A session that can't start exits rather than throwing: by then its venue gateways may already be connected, on
+     * threads that would keep the process alive with nothing trading and nothing reporting. It says why first
+     * ({@link SessionFatalHandler}). A session already stopped or ended exits quietly: it was never meant to run.
+     */
     @Override
     public final void configure() {
         install(new RiskModule());
@@ -144,8 +155,40 @@ public class TradingOrchestrator extends Orchestrator {
 
         Logger logger = getInstance(Logger.class);
         this.logger = logger;
-        SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         Properties properties = getInstance(Properties.class);
+        if (!properties.hasProperty("session.id")) {
+            configureSession(logger, properties);
+            return;
+        }
+        SessionFatalHandler fatal = createFatalHandler(logger, properties);
+        this.fatalHandler = fatal;
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> fatal.exit(1, error));
+        try {
+            configureSession(logger, properties);
+        } catch (SessionNotRunnableException e) {
+            fatal.exitWithoutReport(0, e.getMessage());
+        } catch (RuntimeException | Error e) {
+            fatal.exit(1, e);
+        }
+    }
+
+    private SessionFatalHandler createFatalHandler(Logger logger, Properties properties) {
+        RegistryEndpoint registry = getInstance(RegistryEndpoint.class);
+        String alertsUrl =
+                properties.hasProperty("alerts.api.url") ? properties.getStringProperty("alerts.api.url") : null;
+        return new SessionFatalHandler(
+                logger,
+                properties.getStringProperty("session.id"),
+                properties.getIntProperty("strategy.id"),
+                properties.getStringProperty("mode"),
+                alertsUrl == null ? null : URI.create(alertsUrl.endsWith("/") ? alertsUrl : alertsUrl + "/"),
+                URI.create("https://" + registry.host()),
+                registry.apiKey(),
+                System::exit);
+    }
+
+    private void configureSession(Logger logger, Properties properties) {
+        SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         int strategyId = properties.getIntProperty("strategy.id");
         List<Listing> listings = resolveListings(properties, securityMaster);
         ListingDirectory listingDirectory = RiskModule.directory(listings);
@@ -222,7 +265,7 @@ public class TradingOrchestrator extends Orchestrator {
         RoutedBuffers routedBuffers = createRoutedBuffers(listings.size(), sessionSequence, journalSources);
 
         EpochClock epochClock = SystemEpochClock.INSTANCE;
-        ErrorHandler errorHandler = sessionErrorHandler(logger);
+        ErrorHandler errorHandler = fatalHandler != null ? fatalHandler.errorHandler() : sessionErrorHandler(logger);
         // Before the outbound gateways start, which can publish execution reports as soon as they connect: a journal
         // poller only sees what is published after it exists, and a missed number stalls the journal.
         this.journalRunner =
@@ -280,8 +323,8 @@ public class TradingOrchestrator extends Orchestrator {
                 priceWriterAgent,
                 riskSyncAgent,
                 errorHandler);
-        this.heartbeatRunner =
-                startHeartbeat(sessionId, ledgerAgent, ledgerRing, priceBuffer, priceSlotRegistry, errorHandler);
+        this.heartbeatRunner = startHeartbeat(
+                sessionId, ledgerAgent, ledgerRing, priceBuffer, priceSlotRegistry, riskEngine, errorHandler);
         // A fallback for plain Java runs; an embedding process closes first, which makes this a no-op.
         Runtime.getRuntime().addShutdownHook(new Thread(this::close, "orchestrator-shutdown"));
         reportRunning(sessionId, logger);
@@ -290,6 +333,10 @@ public class TradingOrchestrator extends Orchestrator {
     // Both lines are the only evidence an operator stop shut down cleanly rather than being cut off at the timeout.
     @Override
     protected final void onClose() {
+        SessionFatalHandler fatal = this.fatalHandler;
+        if (fatal != null) {
+            fatal.markShuttingDown();
+        }
         AgentRunners started = this.runners;
         if (started == null) {
             return;
@@ -388,6 +435,7 @@ public class TradingOrchestrator extends Orchestrator {
             LedgerRing ledgerRing,
             SharedPriceBuffer priceBuffer,
             PriceSlotRegistry priceSlotRegistry,
+            RiskEngine riskEngine,
             ErrorHandler errorHandler) {
         if (sessionId == null) {
             return null;
@@ -425,6 +473,8 @@ public class TradingOrchestrator extends Orchestrator {
                         priceSlotRegistry,
                         ledgerAgent,
                         ledgerRing,
+                        riskEngine,
+                        rateLimiters.all(),
                         HEARTBEAT_SAMPLE_INTERVAL_MS,
                         HEARTBEAT_POST_INTERVAL_MS),
                 errorHandler);
@@ -509,6 +559,9 @@ public class TradingOrchestrator extends Orchestrator {
         for (Listing listing : listings) {
             Map<Class<?>, Object> inboundOverrides = new HashMap<>();
             inboundOverrides.put(Listing.class, listing);
+            if (fatalHandler != null) {
+                inboundOverrides.put(ProcessExit.class, fatalHandler);
+            }
             if (listings.size() == 1) {
                 inboundOverrides.put(GlobalSequence.class, sessionSequence);
             }
@@ -567,10 +620,7 @@ public class TradingOrchestrator extends Orchestrator {
             SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
             RoutedBuffers routedBuffers,
             Map<Integer, VenueOrderQuery> venueQueries) {
-        // One for the session's gateways, so that every listing trading on the same venue account draws on one
-        // request budget.
-        VenueRateLimiters rateLimiters =
-                new VenueRateLimiters(logger, SystemNanoClock.INSTANCE, SystemEpochClock.INSTANCE);
+        this.rateLimiters = new VenueRateLimiters(logger, SystemNanoClock.INSTANCE, SystemEpochClock.INSTANCE);
         List<GnomeAgent> agents = new ArrayList<>(listings.size());
         if (routedBuffers == null) {
             agents.add(createOutboundGateway(
@@ -744,7 +794,10 @@ public class TradingOrchestrator extends Orchestrator {
                         rateLimiters,
                         VenueAccount.class,
                         sessionAccounts(properties)
-                                .forExchange(listing.exchange().exchangeId())));
+                                .forExchange(listing.exchange().exchangeId()),
+                        // Live trading needs a session, so it always has a fatal handler.
+                        ProcessExit.class,
+                        fatalHandler));
         venueQueries.put(listing.listingId(), outboundOrch.createVenueOrderQuery());
         final DefaultOutboundOrchestrator.OutboundAgents agents =
                 outboundOrch.startGatewayAgents(orderOutboundBuffer, execReportBuffer);

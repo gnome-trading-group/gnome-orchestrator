@@ -1,5 +1,6 @@
 package group.gnometrading.trading;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import java.net.URI;
@@ -25,6 +26,7 @@ public final class SessionStatusReporter {
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
     private static final int ATTEMPTS = 3;
     private static final int CONFLICT = 409;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final URI baseUri;
     private final String apiKey;
@@ -59,6 +61,12 @@ public final class SessionStatusReporter {
                 HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
                 if (response.statusCode() / 100 == 2) {
                     logger.logf(LogMessage.DEBUG, "Session %s reported RUNNING", sessionId);
+                    return true;
+                }
+                if (response.statusCode() == CONFLICT && isAlreadyRunning(response.body())) {
+                    // The session's first heartbeat got there first: the registry takes a heartbeat as proof of
+                    // RUNNING.
+                    logger.logf(LogMessage.DEBUG, "Session %s was already RUNNING", sessionId);
                     return true;
                 }
                 if (response.statusCode() == CONFLICT) {
@@ -97,5 +105,14 @@ public final class SessionStatusReporter {
             }
         }
         return false;
+    }
+
+    // A 409 names the session's current status.
+    private static boolean isAlreadyRunning(String body) {
+        try {
+            return "RUNNING".equals(MAPPER.readTree(body).path("status").asText());
+        } catch (Exception e) {
+            return false;
+        }
     }
 }
