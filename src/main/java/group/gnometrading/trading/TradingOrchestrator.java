@@ -296,6 +296,29 @@ public class TradingOrchestrator extends Orchestrator {
         }
         logger.logf(LogMessage.DEBUG, "Shutting down: closing agents");
         final long start = System.nanoTime();
+        closeAgents(started, outboundGateways, journalRunner, heartbeatRunner, logger);
+        logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
+    }
+
+    /**
+     * Closes the session's agents in an order that lets each finish. A producer waits while the buffer it writes to is
+     * full, and a closed consumer never makes room again, so nothing may still be producing into a buffer whose reader
+     * has gone: the producer, and every close after it, would wait forever.
+     */
+    static void closeAgents(
+            final AgentRunners started,
+            final List<GatewayRunners> outboundGateways,
+            final GnomeAgentRunner journalRunner,
+            final GnomeAgentRunner heartbeatRunner,
+            final Logger logger) {
+        // Market data first, its gateways before the multiplexer that copies them, so none of it is still arriving
+        // once the strategy stops reading. Closed after the strategy, a busy feed filled the strategy's buffer while
+        // the
+        // OMS and the gateways closed, and the multiplexer then waited on it for good.
+        for (GatewayRunners gateway : started.inboundGateways()) {
+            closeQuietly(gateway, "market data gateway", logger);
+        }
+        closeQuietly(started.mux(), logger);
         closeQuietly(started.strategy(), logger);
         closeQuietly(started.oms(), logger);
         closeQuietly(started.router(), logger);
@@ -305,10 +328,6 @@ public class TradingOrchestrator extends Orchestrator {
         for (GatewayRunners gateway : outboundGateways) {
             closeQuietly(gateway, "outbound gateway", logger);
         }
-        closeQuietly(started.mux(), logger);
-        for (GatewayRunners gateway : started.inboundGateways()) {
-            closeQuietly(gateway, "market data gateway", logger);
-        }
         // After the OMS and gateways, so its final write holds everything they recorded while closing.
         closeQuietly(started.ledger(), logger);
         closeQuietly(started.priceWriter(), logger);
@@ -317,7 +336,6 @@ public class TradingOrchestrator extends Orchestrator {
         closeQuietly(journalRunner, logger);
         // After everything else, so the session keeps reporting while it shuts down.
         closeQuietly(heartbeatRunner, logger);
-        logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
     }
 
     /**
@@ -587,7 +605,7 @@ public class TradingOrchestrator extends Orchestrator {
                 new ListingRouter(orderOutboundBuffer, perListingOutBufs, perExchangeExecBufs, omsExecReportBuffer));
     }
 
-    private record AgentRunners(
+    record AgentRunners(
             List<GatewayRunners> inboundGateways,
             GnomeAgentRunner strategy,
             GnomeAgentRunner oms,
