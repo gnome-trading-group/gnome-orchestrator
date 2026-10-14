@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,6 +24,7 @@ import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
+import group.gnometrading.strings.GnomeString;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -32,6 +35,7 @@ import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class StartupRecoveryTest {
 
@@ -180,6 +184,44 @@ class StartupRecoveryTest {
 
         assertTrue(venue.cancelled.isEmpty(), "not ours to cancel");
         assertEquals(List.of("/api/risk/halts"), postPaths);
+    }
+
+    @Test
+    void anOrderAPoolMateJustPlacedIsLookedUpAgainBeforeItHaltsTheListing() throws Exception {
+        venue.resting.add(venueOrder("mate-3", 0, 0, 0, false));
+        final String mates = "[" + ledgerOrder("mate", 3, "mate-3", 501, 9, true, 0, 0, 0) + "]";
+        final int[] lookups = {0};
+        doAnswer(call -> {
+                    final String path = call.getArgument(0).toString();
+                    String body = path.startsWith("/api/strategy-sessions?sessionId=")
+                            ? "[{\"status\":\"STARTING\",\"strategy_id\":7}]"
+                            : "[]";
+                    if (path.startsWith(BY_ID) && lookups[0]++ > 0) {
+                        body = mates;
+                    }
+                    return ByteBuffer.wrap(body.getBytes(StandardCharsets.UTF_8));
+                })
+                .when(registry)
+                .get(any());
+
+        recovery("live", true).run();
+
+        assertTrue(postPaths.isEmpty(), "the second look found it");
+        assertTrue(venue.cancelled.isEmpty());
+    }
+
+    @Test
+    void scopesTheLedgerToTheSessionsOwnAccounts() throws Exception {
+        venue.resting.add(venueOrder("manual-order", 0, 0, 0, false));
+
+        recovery("live", true).run();
+
+        final ArgumentCaptor<GnomeString> paths = ArgumentCaptor.forClass(GnomeString.class);
+        verify(registry, atLeastOnce()).get(paths.capture());
+        assertTrue(paths.getAllValues().stream()
+                .map(Object::toString)
+                .filter(path -> path.startsWith("/api/ledger/"))
+                .allMatch(path -> path.endsWith("&sessionId=session-new")));
     }
 
     @Test

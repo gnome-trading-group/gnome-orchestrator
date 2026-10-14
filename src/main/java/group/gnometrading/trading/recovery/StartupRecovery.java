@@ -52,6 +52,7 @@ public final class StartupRecovery {
     private static final Set<String> RUNNABLE_STATUSES = Set.of("SUBMITTED", "STARTING", "RUNNING");
     private static final long TERMINAL_POLL_MS = 500;
     private static final long TERMINAL_TIMEOUT_MS = 10_000;
+    private static final long UNRECORDED_RECHECK_MS = 2_000;
     private static final int BUY = 0;
     // Venue ids per ledger lookup, keeping the request's URL short.
     private static final int LOOKUP_BATCH = 25;
@@ -123,7 +124,8 @@ public final class StartupRecovery {
 
     private void restorePositions() {
         final JsonNode rows = get("/api/ledger/positions?strategyId=" + strategyId + "&mode=" + mode + "&listingIds="
-                + listings.stream().map(l -> String.valueOf(l.listingId())).collect(Collectors.joining(",")));
+                + listings.stream().map(l -> String.valueOf(l.listingId())).collect(Collectors.joining(","))
+                + accountScope());
         if (inherit) {
             for (final JsonNode row : rows) {
                 final int listingId = row.path("listing_id").asInt();
@@ -184,6 +186,7 @@ public final class StartupRecovery {
     private void reconcileWithVenue(final Listing listing, final VenueOrderQuery venue) throws IOException {
         final List<VenueOrder> resting = venue.listOpenOrders(listing);
         final Map<String, JsonNode> recorded = ledgerOrdersById(resting);
+        recheckUnrecorded(resting, recorded);
         final Set<String> settled = new HashSet<>();
         for (final VenueOrder order : resting) {
             final JsonNode row = recorded.get(order.exchangeOrderId());
@@ -297,6 +300,26 @@ public final class StartupRecovery {
         return current;
     }
 
+    /**
+     * Another session sharing the account may have just placed an order whose acknowledgement hasn't reached the
+     * ledger yet; it gets one more look before it counts as nobody's.
+     */
+    private void recheckUnrecorded(final List<VenueOrder> resting, final Map<String, JsonNode> recorded) {
+        final List<VenueOrder> unrecorded = resting.stream()
+                .filter(order -> !recorded.containsKey(order.exchangeOrderId()))
+                .toList();
+        if (unrecorded.isEmpty()) {
+            return;
+        }
+        try {
+            Thread.sleep(UNRECORDED_RECHECK_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        recorded.putAll(ledgerOrdersById(unrecorded));
+    }
+
     /** The ledger's record of each resting order, by venue id, whichever listing or strategy it belongs to. */
     private Map<String, JsonNode> ledgerOrdersById(final List<VenueOrder> resting) {
         final Map<String, JsonNode> byId = new HashMap<>();
@@ -304,10 +327,18 @@ public final class StartupRecovery {
             final String ids = resting.subList(from, Math.min(from + LOOKUP_BATCH, resting.size())).stream()
                     .map(order -> URLEncoder.encode(order.exchangeOrderId(), StandardCharsets.UTF_8))
                     .collect(Collectors.joining(","));
-            get("/api/ledger/orders?mode=" + mode + "&status=ANY&exchangeOrderIds=" + ids)
+            get("/api/ledger/orders?mode=" + mode + "&status=ANY&exchangeOrderIds=" + ids + accountScope())
                     .forEach(row -> byId.put(row.path("exchange_order_id").asText(), row));
         }
         return byId;
+    }
+
+    /**
+     * Narrows the ledger to the venue accounts this session was bound to: positions and orders on another account
+     * (a wallet the strategy moved off) belong to that account, and this session's credentials can't see them.
+     */
+    private String accountScope() {
+        return sessionId == null ? "" : "&sessionId=" + sessionId;
     }
 
     private boolean isOursAndEnded(final JsonNode row) {
@@ -317,7 +348,7 @@ public final class StartupRecovery {
 
     private List<JsonNode> openLedgerOrders(final Listing listing) {
         final List<JsonNode> rows = new ArrayList<>();
-        get("/api/ledger/orders?mode=" + mode + "&listingIds=" + listing.listingId() + "&status=OPEN")
+        get("/api/ledger/orders?mode=" + mode + "&listingIds=" + listing.listingId() + "&status=OPEN" + accountScope())
                 .forEach(rows::add);
         return rows;
     }

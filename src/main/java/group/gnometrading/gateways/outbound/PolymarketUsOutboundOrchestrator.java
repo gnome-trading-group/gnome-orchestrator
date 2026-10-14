@@ -1,5 +1,6 @@
 package group.gnometrading.gateways.outbound;
 
+import group.gnometrading.account.VenueAccount;
 import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.di.Named;
@@ -51,10 +52,11 @@ public final class PolymarketUsOutboundOrchestrator extends DefaultOutboundOrche
 
     @Provides
     @Singleton
-    public PolymarketUsCredentials provideCredentials(final SecretsManagerClient secretsManager) {
+    public PolymarketUsCredentials provideCredentials(
+            final SecretsManagerClient secretsManager, final VenueAccount account) {
         final String secretJson = secretsManager
                 .getSecretValue(GetSecretValueRequest.builder()
-                        .secretId("gnome/exchange-credentials/polymarket-us")
+                        .secretId(account.tradingSecretName())
                         .build())
                 .secretString();
         return PolymarketUsCredentials.fromJson(secretJson);

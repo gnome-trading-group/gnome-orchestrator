@@ -1,5 +1,6 @@
 package group.gnometrading.gateways.outbound;
 
+import group.gnometrading.account.VenueAccount;
 import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.di.Named;
@@ -50,13 +51,21 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
 
     @Provides
     @Singleton
-    public PolymarketIntlCredentials provideCredentials(SecretsManagerClient secretsManager) {
+    public PolymarketIntlCredentials provideCredentials(
+            final SecretsManagerClient secretsManager, final VenueAccount account) {
         final String secretJson = secretsManager
                 .getSecretValue(GetSecretValueRequest.builder()
-                        .secretId("gnome/exchange-credentials/polymarket-intl")
+                        .secretId(account.tradingSecretName())
                         .build())
                 .secretString();
-        return PolymarketIntlCredentials.fromJson(secretJson);
+        final PolymarketIntlCredentials credentials = PolymarketIntlCredentials.fromJson(secretJson);
+        // The registry reconciles the wallet it has on record; signing for a different one would trade a wallet
+        // nothing watches.
+        if (!credentials.funderAddress().equalsIgnoreCase(String.valueOf(account.funderAddress()))) {
+            throw new IllegalStateException("Account " + account.label() + " is recorded with funder "
+                    + account.funderAddress() + " but its credentials sign for " + credentials.funderAddress());
+        }
+        return credentials;
     }
 
     @Provides

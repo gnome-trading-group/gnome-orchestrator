@@ -5,6 +5,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.account.SessionAccounts;
+import group.gnometrading.account.VenueAccount;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Orchestrator;
@@ -31,11 +33,11 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.PositionView;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.GlobalSequence;
@@ -118,6 +120,7 @@ public class TradingOrchestrator extends Orchestrator {
     // The live venue gateways' reader and supervisor threads; their order writers are among the runners. Filled before
     // the runners are published, so onClose sees them all.
     private final List<GatewayRunners> outboundGateways = new ArrayList<>();
+    private SessionAccounts sessionAccounts;
     private volatile GnomeAgentRunner journalRunner;
     private volatile GnomeAgentRunner heartbeatRunner;
     private volatile Logger logger;
@@ -143,10 +146,10 @@ public class TradingOrchestrator extends Orchestrator {
         this.logger = logger;
         SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         Properties properties = getInstance(Properties.class);
-        RiskEngine riskEngine = getInstance(RiskEngine.class);
-
         int strategyId = properties.getIntProperty("strategy.id");
         List<Listing> listings = resolveListings(properties, securityMaster);
+        ListingDirectory listingDirectory = RiskModule.directory(listings);
+        RiskEngine riskEngine = RiskModule.riskEngine(properties, listingDirectory);
         AgentRuntimeInstaller.install(properties, logger, listings.size());
 
         // One total order over everything the strategy saw and did, so a journal replays the session exactly. Every
@@ -256,13 +259,15 @@ public class TradingOrchestrator extends Orchestrator {
 
         // Built here rather than injected so the policies that value positions get the session's mark prices.
         RiskSyncAgent riskSyncAgent = new RiskSyncAgent(
-                getInstance(RiskMaster.class),
+                RiskModule.riskMaster(getInstance(RegistryConnection.class), properties, listingDirectory),
                 riskEngine,
                 epochClock,
                 Duration.ofMillis(properties.getIntProperty("risk.refresh.interval.ms")),
                 logger,
                 priceBuffer,
-                priceSlotRegistry);
+                priceSlotRegistry,
+                strategyId,
+                "live".equals(properties.getStringProperty("mode")));
 
         this.runners = startAgentRunners(
                 inbounds,
@@ -713,12 +718,35 @@ public class TradingOrchestrator extends Orchestrator {
                 DefaultOutboundOrchestrator.findOutboundOrchestrator(listing);
         // Each venue gateway is built for its own listing, as each market data gateway is.
         final DefaultOutboundOrchestrator outboundOrch = createChildOrchestrator(
-                orchClass, Map.of(Listing.class, listing, VenueRateLimiters.class, rateLimiters));
+                orchClass,
+                Map.of(
+                        Listing.class,
+                        listing,
+                        VenueRateLimiters.class,
+                        rateLimiters,
+                        VenueAccount.class,
+                        sessionAccounts(properties)
+                                .forExchange(listing.exchange().exchangeId())));
         venueQueries.put(listing.listingId(), outboundOrch.createVenueOrderQuery());
         final DefaultOutboundOrchestrator.OutboundAgents agents =
                 outboundOrch.startGatewayAgents(orderOutboundBuffer, execReportBuffer);
         outboundGateways.add(agents.gateway());
         return agents.writer();
+    }
+
+    /**
+     * The venue accounts the registry bound to this session when it was created, read once. A live session trades
+     * only through them, so one without a session (a local run) can't trade live.
+     */
+    private SessionAccounts sessionAccounts(Properties properties) {
+        if (this.sessionAccounts == null) {
+            if (!properties.hasProperty("session.id")) {
+                throw new IllegalStateException("Live trading needs a registry session to bind its venue accounts");
+            }
+            this.sessionAccounts = SessionAccounts.fetch(
+                    getInstance(RegistryConnection.class), properties.getStringProperty("session.id"));
+        }
+        return this.sessionAccounts;
     }
 
     private StrategyAgent createStrategyAgent(

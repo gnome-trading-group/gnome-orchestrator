@@ -8,6 +8,7 @@ import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { grantResearchTables } from '../constructs/research-tables';
 
 export const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
+export const LIVE_LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator-live';
 
 interface Props extends cdk.StackProps {
   stage: Stage;
@@ -23,9 +24,33 @@ export class Ec2Stack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
 
+    // Paper and live sessions run under different roles: only a live session may read a venue account's
+    // credentials (gnome/accounts/*), which for a Polymarket wallet include the key that can move its funds.
+    this.launchTemplate(props, LAUNCH_TEMPLATE_NAME, `gnome-orchestrator-instance-${this.region}`, false);
+    this.launchTemplate(props, LIVE_LAUNCH_TEMPLATE_NAME, `gnome-orchestrator-live-instance-${this.region}`, true);
+
+    if (this.region !== 'us-east-1') {
+      // The session monitor only exists in us-east-1. EventBridge cannot filter on instance tags, so every
+      // instance's events are forwarded and the ones without a session are ignored there.
+      const forward = new events.Rule(this, 'ForwardEc2StateEvents', {
+        eventPattern: {
+          source: ['aws.ec2'],
+          detailType: ['EC2 Instance State-change Notification'],
+          detail: { state: ['running', 'shutting-down', 'terminated'] },
+        },
+      });
+      forward.addTarget(new targets.EventBus(events.EventBus.fromEventBusArn(
+        this,
+        'UsEast1DefaultBus',
+        `arn:aws:events:us-east-1:${this.account}:event-bus/default`,
+      )));
+    }
+  }
+
+  private launchTemplate(props: Props, name: string, roleName: string, live: boolean): ec2.LaunchTemplate {
     // Named inside the launcher's gnome-orchestrator-* PassRole grant.
-    const role = new iam.Role(this, 'InstanceRole', {
-      roleName: `gnome-orchestrator-instance-${this.region}`,
+    const role = new iam.Role(this, live ? 'LiveInstanceRole' : 'InstanceRole', {
+      roleName,
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
@@ -40,6 +65,13 @@ export class Ec2Stack extends cdk.Stack {
         `arn:aws:secretsmanager:*:${this.account}:secret:gnomepy/*`,
       ],
     }));
+    if (!live) {
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`],
+      }));
+    }
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['s3:PutObject'],
       resources: [`arn:aws:s3:::gnome-journals-${props.stage}/*`],
@@ -55,8 +87,8 @@ export class Ec2Stack extends cdk.Stack {
       resources: [`arn:aws:apigateway:us-east-1::/apikeys/${props.registryApiKeyId}`],
     }));
 
-    const template = new ec2.LaunchTemplate(this, 'LaunchTemplate', {
-      launchTemplateName: LAUNCH_TEMPLATE_NAME,
+    const template = new ec2.LaunchTemplate(this, live ? 'LiveLaunchTemplate' : 'LaunchTemplate', {
+      launchTemplateName: name,
       role,
       securityGroup: props.securityGroup,
       requireImdsv2: true,
@@ -81,22 +113,6 @@ export class Ec2Stack extends cdk.Stack {
       'LaunchTemplateData.MaintenanceOptions.AutoRecovery',
       'disabled',
     );
-
-    if (this.region !== 'us-east-1') {
-      // The session monitor only exists in us-east-1. EventBridge cannot filter on instance tags, so every
-      // instance's events are forwarded and the ones without a session are ignored there.
-      const forward = new events.Rule(this, 'ForwardEc2StateEvents', {
-        eventPattern: {
-          source: ['aws.ec2'],
-          detailType: ['EC2 Instance State-change Notification'],
-          detail: { state: ['running', 'shutting-down', 'terminated'] },
-        },
-      });
-      forward.addTarget(new targets.EventBus(events.EventBus.fromEventBusArn(
-        this,
-        'UsEast1DefaultBus',
-        `arn:aws:events:us-east-1:${this.account}:event-bus/default`,
-      )));
-    }
+    return template;
   }
 }

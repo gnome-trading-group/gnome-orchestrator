@@ -65,7 +65,8 @@ public final class PolymarketLiveSmoke {
     private static final String CLOB_HOST = "clob.polymarket.com";
     private static final String USER_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
     // No single order in these tests may spend more than this.
-    private static final double MAX_BUY_DOLLARS = 3.0;
+    // -Dmax.buy raises it, e.g. for a BUY priced too low to match whose size the balance can't cover.
+    private static final double MAX_BUY_DOLLARS = Double.parseDouble(System.getProperty("max.buy", "3.0"));
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private PolymarketLiveSmoke() {}

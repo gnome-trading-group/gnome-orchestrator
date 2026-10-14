@@ -1,5 +1,6 @@
 package group.gnometrading.gateways.outbound;
 
+import group.gnometrading.account.VenueAccount;
 import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.di.Named;
@@ -49,10 +50,10 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
 
     @Provides
     @Singleton
-    public KalshiCredentials provideCredentials(final SecretsManagerClient secretsManager) {
+    public KalshiCredentials provideCredentials(final SecretsManagerClient secretsManager, final VenueAccount account) {
         final String secretJson = secretsManager
                 .getSecretValue(GetSecretValueRequest.builder()
-                        .secretId("gnome/exchange-credentials/kalshi")
+                        .secretId(account.tradingSecretName())
                         .build())
                 .secretString();
         return KalshiCredentials.fromJson(secretJson);
