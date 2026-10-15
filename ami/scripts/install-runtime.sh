@@ -19,6 +19,8 @@ apt-get install -y python3.13 python3.13-venv
 install -d -m 0755 /opt/gnome /etc/gnome /var/log/gnome /var/lib/gnome
 python3.13 -m venv /opt/gnome/venv
 /opt/gnome/venv/bin/pip install --quiet --upgrade pip
+# start-session.sh installs a Python session's research dependencies with uv: seconds instead of minutes.
+/opt/gnome/venv/bin/pip install --quiet uv
 
 # JPype finds libjvm.so through JAVA_HOME.
 ln -sfn "$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")" /usr/lib/jvm/current

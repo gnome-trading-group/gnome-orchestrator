@@ -45,8 +45,14 @@ if [ "${STRATEGY_TYPE:-java}" = "python" ]; then
     "https://x-access-token:${GH_TOKEN}@github.com/gnome-trading-group/gnomepy-research.git" "$RESEARCH_DIR"
   git -C "$RESEARCH_DIR" checkout --quiet "${RESEARCH_COMMIT:-main}"
   git -C "$RESEARCH_DIR" --no-pager log -1 --oneline
-  "$VENV/bin/pip" install --quiet --no-deps "$RESEARCH_DIR"
   unset GH_TOKEN
+  # The strategy's package declares the dependency extras its code needs (gnomepy-research's
+  # gnomepy_research/dependencies.py); constraints.txt pins them to the versions research's tests ran on.
+  EXTRAS=$("$VENV/bin/python" "$RESEARCH_DIR/gnomepy_research/dependencies.py" extras "$STRATEGY_CLASS")
+  echo "start-session: installing gnomepy-research${EXTRAS:+[$EXTRAS]}"
+  "$VENV/bin/uv" pip install --quiet --python "$VENV/bin/python" \
+    ${GNOMEPY_VERSION:+"gnomepy[strategy,live-data]==${GNOMEPY_VERSION}"} \
+    "${RESEARCH_DIR}${EXTRAS:+[$EXTRAS]}" --constraint "$RESEARCH_DIR/constraints.txt"
   echo "start-session: starting python strategy ${STRATEGY_CLASS}"
   exec "$VENV/bin/python" -m gnomepy.java.strategy.runner
 fi
