@@ -83,6 +83,15 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
         return new int[] {properties.getIntProperty("listing")};
     }
 
+    @Provides
+    @Named("LATENCY_PROBE_INTERVAL_NANOS")
+    public final Long provideLatencyProbeIntervalNanos(Properties properties) {
+        if (properties.hasProperty("latency.probe.interval.micros")) {
+            return TimeUnit.MICROSECONDS.toNanos(properties.getIntProperty("latency.probe.interval.micros"));
+        }
+        return TimeUnit.MILLISECONDS.toNanos(1);
+    }
+
     @Override
     public final void configure() {
         install(new SecurityMasterModule(), new AwsModule());
@@ -90,6 +99,7 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
         // Before any agent thread starts. Collectors run on fractional Fargate CPUs, where anything spinning burns
         // the quota and the throttled task delays every socket read, inflating receive timestamps.
         AgentRuntimeInstaller.installStandard(logger);
+        SchedulingLatencyProbe.start(logger, getInstance(Long.class, "LATENCY_PROBE_INTERVAL_NANOS"));
 
         final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         final String outputBucket = getInstance(String.class, "OUTPUT_BUCKET");
