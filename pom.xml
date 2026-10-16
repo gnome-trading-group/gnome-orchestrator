@@ -55,7 +55,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.40.0</version>
+            <version>1.41.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -75,7 +75,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-simulation</artifactId>
-            <version>1.6.0</version>
+            <version>1.7.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>

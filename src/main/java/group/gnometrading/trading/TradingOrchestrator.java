@@ -49,7 +49,9 @@ import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.RegistryEndpoint;
 import group.gnometrading.shared.RiskModule;
 import group.gnometrading.shared.SessionTag;
-import group.gnometrading.simulation.config.ExchangeProfileConfig;
+import group.gnometrading.simulation.config.ExchangeSimulationConfig;
+import group.gnometrading.simulation.config.SessionSimulationConfig;
+import group.gnometrading.simulation.config.SimulationResolver;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
 import group.gnometrading.simulation.latency.LatencySeeds;
 import group.gnometrading.sm.Listing;
@@ -768,15 +770,20 @@ public class TradingOrchestrator extends Orchestrator {
         String mode = properties.getStringProperty("mode");
 
         if ("paper".equals(mode)) {
-            ExchangeProfileConfig profile = ExchangeProfileConfig.resolveForListing(properties, listing.listingId());
-            long baseSeed = properties.hasProperty("simulation.seed")
-                    ? properties.getLongProperty("simulation.seed")
-                    : PAPER_TRADING_DEFAULT_SEED;
-            SecurityMaster securityMaster = getInstance(SecurityMaster.class);
-            MbpSimulatedExchange exchange = (MbpSimulatedExchange) profile.toSimulatedExchange(
+            // The session's config carries its simulation as one JSON value, in the shape a backtest config takes.
+            SessionSimulationConfig simulation =
+                    SessionSimulationConfig.fromJson(properties.getStringProperty("simulation.json"));
+            SimulationResolver resolver = new SimulationResolver(getInstance(SecurityMaster.class), simulation.asOf);
+            ExchangeSimulationConfig config = resolver.resolve(listing, false, simulation.layersFor(listing));
+            logger.logf(
+                    LogMessage.DEBUG,
+                    "Listing %d simulates as of %s with %s",
                     listing.listingId(),
-                    LatencySeeds.derive(baseSeed, listing.listingId()),
-                    securityMaster::getFeeTimeline);
+                    simulation.asOf,
+                    config.toJson());
+            long baseSeed = simulation.seed != null ? simulation.seed : PAPER_TRADING_DEFAULT_SEED;
+            MbpSimulatedExchange exchange = (MbpSimulatedExchange) config.toSimulatedExchange(
+                    listing.listingId(), LatencySeeds.derive(baseSeed, listing.listingId()), resolver.registryFees());
             return new PaperTradingOutboundGateway(
                     exchange,
                     marketDataBuffer,

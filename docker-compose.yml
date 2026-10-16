@@ -64,15 +64,8 @@ services:
       STRATEGY_ARGS_JSON: '{"interval_seconds": 3, "size": 10, "max_position": 3}'
       RESEARCH_COMMIT: test/random-trader
       LATENCY_PROFILE: standard
-      SIMULATION_LISTING_6_PROFILE: default
-      SIMULATION_PROFILES_DEFAULT_FEE_MODEL: static
-      SIMULATION_PROFILES_DEFAULT_FEE_TAKER: 0
-      SIMULATION_PROFILES_DEFAULT_FEE_MAKER: 0
-      SIMULATION_PROFILES_DEFAULT_NETWORK_LATENCY_MODEL: static
-      SIMULATION_PROFILES_DEFAULT_NETWORK_LATENCY_NANOS: 0
-      SIMULATION_PROFILES_DEFAULT_ORDER_LATENCY_MODEL: static
-      SIMULATION_PROFILES_DEFAULT_ORDER_LATENCY_NANOS: 0
-      SIMULATION_PROFILES_DEFAULT_QUEUE_MODEL: risk_averse
+      # The listing simulates with its exchange's registry parameters as recorded by then, with fees zeroed.
+      SIMULATION_JSON: '{"as_of": "2026-10-16T00:00:00Z", "listings": {"6": {"fee_model": {"type": "static", "taker_fee": 0, "maker_fee": 0}}}}'
     volumes:
       - ~/.aws/:/root/.aws:ro
 
