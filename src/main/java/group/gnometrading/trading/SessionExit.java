@@ -178,10 +178,19 @@ public final class SessionExit implements ExitListener {
         } else {
             lines.add("Still held:");
             for (ExitResult.HeldPosition held : result.held()) {
-                lines.add("  " + label(held.listingId()) + ": " + quantity(held.netQuantity()));
+                lines.add("  " + label(held.listingId()) + ": " + quantity(held.netQuantity()) + why(held.why()));
             }
         }
         return String.join("\n", lines);
+    }
+
+    private static String why(final ExitResult.Why why) {
+        return switch (why) {
+            case KEPT -> "";
+            case TOO_SMALL -> " (below the venue's minimum order, so no single order can close it)";
+            case REJECTED -> " (the close was refused every time it was sent)";
+            case TIMED_OUT -> " (still closing when the time ran out)";
+        };
     }
 
     private String label(final int listingId) {

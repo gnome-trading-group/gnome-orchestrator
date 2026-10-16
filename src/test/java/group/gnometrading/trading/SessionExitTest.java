@@ -109,24 +109,44 @@ class SessionExitTest {
 
     @Test
     void warnsWhenItCouldNotCloseEverythingItWasAskedTo() throws Exception {
-        sessionExit(reports()).exit(new ExitResult("done", true, true, List.of(new HeldPosition(12, 2_500_000L))));
+        sessionExit(reports())
+                .exit(new ExitResult(
+                        "done", true, true, List.of(new HeldPosition(12, 2_500_000L, ExitResult.Why.TIMED_OUT))));
 
         JsonNode alert = body("POST");
         assertEquals("WARNING", alert.get("severity").asText());
         assertTrue(alert.get("title").asText().contains("still holding positions"));
         String text = alert.get("body").asText();
-        assertTrue(text.contains("POLYMARKET_INTL will-vitality-win (listing 12): 2.5"), text);
+        assertTrue(
+                text.contains(
+                        "POLYMARKET_INTL will-vitality-win (listing 12): 2.5 (still closing when the time ran out)"),
+                text);
         assertTrue(text.contains("Ran out of time"), text);
     }
 
     @Test
     void keepingPositionsByChoiceIsNotAWarning() throws Exception {
-        sessionExit(reports()).exit(new ExitResult("done", false, false, List.of(new HeldPosition(12, -3_000_000L))));
+        sessionExit(reports())
+                .exit(new ExitResult(
+                        "done", false, false, List.of(new HeldPosition(12, -3_000_000L, ExitResult.Why.KEPT))));
 
         JsonNode alert = body("POST");
         assertEquals("INFO", alert.get("severity").asText());
         assertTrue(alert.get("body").asText().contains("Kept its positions"));
         assertTrue(alert.get("body").asText().contains("(listing 12): -3"));
+    }
+
+    @Test
+    void saysWhenAPositionWasTooSmallToClose() throws Exception {
+        sessionExit(reports())
+                .exit(new ExitResult(
+                        "done", true, false, List.of(new HeldPosition(12, 220_000L, ExitResult.Why.TOO_SMALL))));
+
+        JsonNode alert = body("POST");
+        assertEquals("WARNING", alert.get("severity").asText());
+        assertTrue(
+                alert.get("body").asText().contains("0.22 (below the venue's minimum order"),
+                alert.get("body").asText());
     }
 
     @Test
