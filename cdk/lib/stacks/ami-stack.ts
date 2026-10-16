@@ -6,12 +6,17 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as triggers from 'aws-cdk-lib/triggers';
 import { Construct } from 'constructs';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
 export const AMI_PARAMETER_PREFIX = '/gnome/orchestrator/ami';
+// On the Image Builder image whose AMIs new sessions launch from, so retention never deletes it however old it gets.
+export const LIVE_IMAGE_TAG = 'gnome:ami-live';
+// How long an image that sessions no longer launch from is kept: the window to roll back by repointing its parameter.
+const RETAIN_DAYS = 14;
 // Canonical's pointer to the current Ubuntu 24.04 image. Ubuntu rather than Amazon Linux because the native
 // socket library needs GLIBC_2.38.
 const PARENT_IMAGE = 'ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id';
@@ -50,6 +55,10 @@ interface Props extends cdk.StackProps {
  * Builds the strategy AMIs and publishes each one's id per region to SSM. A build starts on deploy whenever the
  * image's content changed, and only then; the image tests gate publishing, so a failed build never replaces the
  * AMI new sessions launch from. Pipelines can still be started by hand, e.g. to pick up a newer Ubuntu base.
+ *
+ * Images are deleted, with their AMIs in every region and their snapshots, once they are older than
+ * {@link RETAIN_DAYS} and no longer live. Retention by count can't work here: Image Builder counts per recipe
+ * version, and every content change is a new version built once.
  */
 export class AmiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
@@ -184,18 +193,61 @@ export class AmiStack extends cdk.Stack {
 
     // CDK 2.176's Image Builder L1 cannot write SSM parameters per distribution region, so a build-completion
     // hook does it: the launcher looks each AMI up in the region it launches into.
+    // It also moves the live tag onto the image it just published, from the parameters themselves.
     const publisher = new lambda.Function(this, 'AmiPublisher', {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
-      timeout: cdk.Duration.minutes(1),
-      environment: { PARAMETER_PREFIX: AMI_PARAMETER_PREFIX },
+      timeout: cdk.Duration.minutes(2),
+      environment: {
+        PARAMETER_PREFIX: AMI_PARAMETER_PREFIX,
+        LIVE_IMAGE_TAG,
+        VARIANTS: JSON.stringify(VARIANTS.map(v => v.name)),
+      },
       code: lambda.Code.fromInline(AMI_PUBLISHER_SOURCE),
     });
     publisher.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ssm:PutParameter'],
+      actions: ['ssm:PutParameter', 'ssm:GetParameter'],
       resources: [`arn:aws:ssm:*:${this.account}:parameter${AMI_PARAMETER_PREFIX}/*`],
     }));
+    publisher.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['imagebuilder:ListImages', 'imagebuilder:ListImageBuildVersions'],
+      resources: ['*'],
+    }));
+    publisher.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['imagebuilder:TagResource', 'imagebuilder:UntagResource'],
+      resources: [`arn:aws:imagebuilder:${this.region}:${this.account}:image/gnome-orchestrator-*`],
+    }));
     completions.addSubscription(new subscriptions.LambdaSubscription(publisher));
+
+    const retention = new imagebuilder.CfnLifecyclePolicy(this, 'Retention', {
+      name: 'gnome-orchestrator-ami-retention',
+      description: `Deletes images older than ${RETAIN_DAYS} days, with their AMIs and snapshots, unless live`,
+      executionRole: new iam.Role(this, 'RetentionRole', {
+        assumedBy: new iam.ServicePrincipal('imagebuilder.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/EC2ImageBuilderLifecycleExecutionPolicy'),
+        ],
+      }).roleArn,
+      resourceType: 'AMI_IMAGE',
+      resourceSelection: {
+        recipes: VARIANTS.map(v => ({ name: `gnome-orchestrator-${v.name}`, semanticVersion: 'x.x.x' })),
+      },
+      policyDetails: [{
+        action: { type: 'DELETE', includeResources: { amis: true, snapshots: true } },
+        filter: { type: 'AGE', value: RETAIN_DAYS, unit: 'DAYS' },
+        // On the Image Builder image, so the image and its AMIs in every region are skipped together.
+        exclusionRules: { tagMap: { [LIVE_IMAGE_TAG]: 'true' } },
+      }],
+      status: 'ENABLED',
+    });
+
+    // The live images must be tagged before the policy first runs, or any older than the window would go with the
+    // rest; until a build next completes, only this run tags them.
+    new triggers.Trigger(this, 'TagLiveImages', {
+      handler: publisher,
+      executeBefore: [retention],
+      executeOnHandlerChange: true,
+    });
   }
 
   private component(
@@ -282,23 +334,91 @@ function contentVersion(content: string): string {
 }
 
 const AMI_PUBLISHER_SOURCE = `
-const { SSMClient, PutParameterCommand } = require('@aws-sdk/client-ssm');
+const { SSMClient, PutParameterCommand, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const {
+  ImagebuilderClient, ListImagesCommand, ListImageBuildVersionsCommand, TagResourceCommand, UntagResourceCommand,
+} = require('@aws-sdk/client-imagebuilder');
 
-exports.handler = async (event) => {
-  for (const record of event.Records) {
-    const image = JSON.parse(record.Sns.Message);
-    if (image.state?.status !== 'AVAILABLE') continue;
-    const variant = (image.name || '').replace(/^gnome-orchestrator-/, '');
-    for (const ami of image.outputResources?.amis ?? []) {
-      const name = process.env.PARAMETER_PREFIX + '/' + variant;
-      await new SSMClient({ region: ami.region }).send(new PutParameterCommand({
-        Name: name,
-        Value: ami.image,
-        Type: 'String',
-        Overwrite: true,
-      }));
-      console.log('Published', name, '=', ami.image, 'in', ami.region);
+const PREFIX = process.env.PARAMETER_PREFIX;
+const LIVE_TAG = process.env.LIVE_IMAGE_TAG;
+const imagebuilder = new ImagebuilderClient({});
+
+async function publish(image) {
+  if (image.state?.status !== 'AVAILABLE') return;
+  const variant = (image.name || '').replace(/^gnome-orchestrator-/, '');
+  for (const ami of image.outputResources?.amis ?? []) {
+    const name = PREFIX + '/' + variant;
+    await new SSMClient({ region: ami.region }).send(new PutParameterCommand({
+      Name: name,
+      Value: ami.image,
+      Type: 'String',
+      Overwrite: true,
+    }));
+    console.log('Published', name, '=', ami.image, 'in', ami.region);
+  }
+}
+
+async function builds(recipeName) {
+  const out = [];
+  let versionsToken;
+  do {
+    const versions = await imagebuilder.send(new ListImagesCommand({
+      owner: 'Self', filters: [{ name: 'name', values: [recipeName] }], nextToken: versionsToken,
+    }));
+    for (const version of versions.imageVersionList ?? []) {
+      let buildsToken;
+      do {
+        const page = await imagebuilder.send(new ListImageBuildVersionsCommand({
+          imageVersionArn: version.arn, nextToken: buildsToken,
+        }));
+        out.push(...(page.imageSummaryList ?? []));
+        buildsToken = page.nextToken;
+      } while (buildsToken);
+    }
+    versionsToken = versions.nextToken;
+  } while (versionsToken);
+  return out;
+}
+
+// The parameters decide what's live, so a parameter repointed by hand to roll back is honoured too. Tags before
+// untagging, so no moment leaves a variant with nothing protected.
+async function tagLiveImages() {
+  const ssm = new SSMClient({});
+  for (const variant of JSON.parse(process.env.VARIANTS)) {
+    let live;
+    try {
+      live = (await ssm.send(new GetParameterCommand({ Name: PREFIX + '/' + variant }))).Parameter.Value;
+    } catch (e) {
+      if (e.name === 'ParameterNotFound') continue;
+      throw e;
+    }
+    const images = await builds('gnome-orchestrator-' + variant);
+    const isLive = i => (i.outputResources?.amis ?? []).some(a => a.region === process.env.AWS_REGION && a.image === live);
+    const liveImages = images.filter(isLive);
+    if (liveImages.length === 0) {
+      // Untagging the others now could let retention delete the AMI sessions launch from.
+      throw new Error('No image found for ' + variant + "'s live AMI " + live);
+    }
+    for (const image of liveImages) {
+      if (image.tags?.[LIVE_TAG] !== 'true') {
+        await imagebuilder.send(new TagResourceCommand({ resourceArn: image.arn, tags: { [LIVE_TAG]: 'true' } }));
+        console.log('Tagged live', image.arn);
+      }
+    }
+    for (const image of images) {
+      if (!isLive(image) && image.tags?.[LIVE_TAG] !== undefined) {
+        await imagebuilder.send(new UntagResourceCommand({ resourceArn: image.arn, tagKeys: [LIVE_TAG] }));
+        console.log('Untagged', image.arn);
+      }
     }
   }
+}
+
+// Called with build completions from SNS, and with no records by the deploy-time trigger.
+exports.handler = async (event) => {
+  for (const record of event?.Records ?? []) {
+    await publish(JSON.parse(record.Sns.Message));
+  }
+  await tagLiveImages();
 };
 `;

@@ -55,12 +55,9 @@ class SessionFatalHandlerTest {
     private SessionFatalHandler handler(final boolean withAlerts) {
         return new SessionFatalHandler(
                 new NullLogger(),
-                "s1",
+                new SessionReports("s1", withAlerts ? base.resolve("/alerts-api/") : null, base, "secret-key"),
                 7,
                 "live",
-                withAlerts ? base.resolve("/alerts-api/") : null,
-                base,
-                "secret-key",
                 exits::add);
     }
 

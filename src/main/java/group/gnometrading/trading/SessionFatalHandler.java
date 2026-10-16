@@ -5,12 +5,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import group.gnometrading.gateways.ProcessExit;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
-import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,45 +25,31 @@ import org.agrona.ErrorHandler;
  */
 public final class SessionFatalHandler implements ProcessExit {
 
-    static final Duration REPORT_BUDGET = Duration.ofSeconds(3);
+    static final Duration REPORT_BUDGET = SessionReports.TIMEOUT;
     private static final int MAX_FRAMES = 8;
     private static final int MAX_REASON = 500;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final Logger logger;
-    private final String sessionId;
+    private final SessionReports reports;
     private final int strategyId;
     private final String mode;
-    private final URI alertsApi;
-    private final URI registry;
-    private final String apiKey;
-    private final HttpClient http;
     private final IntConsumer halt;
     private final AtomicBoolean exiting = new AtomicBoolean();
     private volatile boolean shuttingDown;
 
-    /**
-     * @param alertsApi the alerts API's base URL, or null when it isn't known (an alert is then skipped)
-     * @param halt ends the process; {@code System::exit} outside tests
-     */
+    /** @param halt ends the process; {@code System::exit} outside tests */
     public SessionFatalHandler(
             final Logger logger,
-            final String sessionId,
+            final SessionReports reports,
             final int strategyId,
             final String mode,
-            final URI alertsApi,
-            final URI registry,
-            final String apiKey,
             final IntConsumer halt) {
         this.logger = logger;
-        this.sessionId = sessionId;
+        this.reports = reports;
         this.strategyId = strategyId;
         this.mode = mode;
-        this.alertsApi = alertsApi;
-        this.registry = registry;
-        this.apiKey = apiKey;
         this.halt = halt;
-        this.http = HttpClient.newBuilder().connectTimeout(REPORT_BUDGET).build();
     }
 
     /** From here on an error is part of the stop. */
@@ -107,15 +87,12 @@ public final class SessionFatalHandler implements ProcessExit {
     private void report(final Throwable cause) {
         final List<CompletableFuture<?>> sent = new ArrayList<>(2);
         try {
-            if (alertsApi != null) {
-                sent.add(send(alertsApi.resolve("alerts"), "POST", alertBody(cause)));
+            final CompletableFuture<?> alert = reports.alert(alertBody(cause));
+            if (alert != null) {
+                sent.add(alert);
             }
             final ObjectNode failure = MAPPER.createObjectNode().put("failureReason", reason(cause));
-            sent.add(send(
-                    registry.resolve(
-                            "/api/strategy-sessions?sessionId=" + URLEncoder.encode(sessionId, StandardCharsets.UTF_8)),
-                    "PATCH",
-                    failure.toString()));
+            sent.add(reports.updateSession(failure.toString()));
             CompletableFuture.allOf(sent.toArray(new CompletableFuture<?>[0]))
                     .get(REPORT_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
@@ -123,17 +100,6 @@ public final class SessionFatalHandler implements ProcessExit {
         } catch (Exception e) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Couldn't report the session's failure: %s", e.toString());
         }
-    }
-
-    private CompletableFuture<HttpResponse<Void>> send(final URI uri, final String method, final String body) {
-        return http.sendAsync(
-                HttpRequest.newBuilder(uri)
-                        .timeout(REPORT_BUDGET)
-                        .header("x-api-key", apiKey)
-                        .header("Content-Type", "application/json")
-                        .method(method, HttpRequest.BodyPublishers.ofString(body))
-                        .build(),
-                HttpResponse.BodyHandlers.discarding());
     }
 
     String alertBody(final Throwable cause) {
@@ -144,10 +110,10 @@ public final class SessionFatalHandler implements ProcessExit {
         }
         return MAPPER.createObjectNode()
                 .put("type", "FATAL_ERROR")
-                .put("key", "FATAL_ERROR:" + sessionId)
-                .put("title", "Session " + sessionId + " hit a fatal error")
+                .put("key", "FATAL_ERROR:" + reports.sessionId())
+                .put("title", "Session " + reports.sessionId() + " hit a fatal error")
                 .put("body", trace.toString())
-                .put("sessionId", sessionId)
+                .put("sessionId", reports.sessionId())
                 .put("strategyId", strategyId)
                 .put("mode", mode)
                 .toString();

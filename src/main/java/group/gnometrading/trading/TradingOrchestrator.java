@@ -131,6 +131,8 @@ public class TradingOrchestrator extends Orchestrator {
     private volatile Logger logger;
     // A session's way out on an error; null for a local run, which throws instead.
     private volatile SessionFatalHandler fatalHandler;
+    // Null outside a registry session (a local run), which then exits without reporting anything.
+    private SessionReports sessionReports;
     // One per session, so every listing trading on the same venue account draws on one request budget.
     private VenueRateLimiters rateLimiters;
 
@@ -179,14 +181,16 @@ public class TradingOrchestrator extends Orchestrator {
         RegistryEndpoint registry = getInstance(RegistryEndpoint.class);
         String alertsUrl =
                 properties.hasProperty("alerts.api.url") ? properties.getStringProperty("alerts.api.url") : null;
-        return new SessionFatalHandler(
-                logger,
+        this.sessionReports = new SessionReports(
                 properties.getStringProperty("session.id"),
-                properties.getIntProperty("strategy.id"),
-                properties.getStringProperty("mode"),
                 alertsUrl == null ? null : URI.create(alertsUrl.endsWith("/") ? alertsUrl : alertsUrl + "/"),
                 URI.create("https://" + registry.host()),
-                registry.apiKey(),
+                registry.apiKey());
+        return new SessionFatalHandler(
+                logger,
+                sessionReports,
+                properties.getIntProperty("strategy.id"),
+                properties.getStringProperty("mode"),
                 System::exit);
     }
 
@@ -289,6 +293,7 @@ public class TradingOrchestrator extends Orchestrator {
                 getInstance(EpochNanoClock.class));
         StrategyAgent strategy = createStrategyAgent(
                 strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
+        strategy.configureExit(listings, sessionExit(logger, properties, strategyId, listings));
 
         LedgerAgent ledgerAgent = ledgerRing == null
                 ? null
@@ -832,6 +837,18 @@ public class TradingOrchestrator extends Orchestrator {
                     getInstance(RegistryConnection.class), properties.getStringProperty("session.id"));
         }
         return this.sessionAccounts;
+    }
+
+    /** What ends the session when its strategy asks to exit. */
+    private SessionExit sessionExit(Logger logger, Properties properties, int strategyId, List<Listing> listings) {
+        return new SessionExit(
+                logger,
+                sessionReports,
+                strategyId,
+                properties.getStringProperty("mode"),
+                listings,
+                this::close,
+                System::exit);
     }
 
     private StrategyAgent createStrategyAgent(
