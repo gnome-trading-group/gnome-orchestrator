@@ -36,6 +36,7 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
+import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.strings.GnomeString;
 import java.io.IOException;
 import java.net.URI;
@@ -263,7 +264,8 @@ public final class PolymarketLiveSmoke {
                     account.apiKey(),
                     account.secret(),
                     account.passphrase(),
-                    marketInfo,
+                    // No registry here, so fills report no fee.
+                    FeeTimeline.EMPTY,
                     new PolymarketIntlVenueOrderQuery(
                             new LoggingHttpClient("catchup"), CLOB_HOST, authHeaders(account)));
             final PolymarketIntlOutboundWriter writer = new PolymarketIntlOutboundWriter(

@@ -55,12 +55,12 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.34.0</version>
+            <version>1.40.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-oms</artifactId>
-            <version>1.12.2</version>
+            <version>1.12.3</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -75,12 +75,12 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-simulation</artifactId>
-            <version>1.5.3</version>
+            <version>1.6.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>1.13.7</version>
+            <version>1.14.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>

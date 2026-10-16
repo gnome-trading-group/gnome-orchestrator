@@ -25,6 +25,7 @@ import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.SessionTag;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.fee.FeeTimeline;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -142,8 +143,6 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
         final ManyToOneRingBuffer<OrderContext> releasedOrderQueue = createOrderContextQueue();
 
         final Properties properties = getInstance(Properties.class);
-        final double takerFee = properties.getDoubleProperty("kalshi.taker.fee");
-        final double makerFee = properties.getDoubleProperty("kalshi.maker.fee");
 
         final KalshiOutboundReader reader = new KalshiOutboundReader(
                 logger,
@@ -159,8 +158,7 @@ public final class KalshiOutboundOrchestrator extends DefaultOutboundOrchestrato
                 // Its own client: the reader catches up over REST on the supervisor's thread after a reconnect.
                 OrderEntryHttpClients.create(getInstance(VenueRateLimiter.class)),
                 apiHost,
-                takerFee,
-                makerFee);
+                getInstance(FeeTimeline.class));
 
         final KalshiOutboundWriter writer = new KalshiOutboundWriter(
                 logger,

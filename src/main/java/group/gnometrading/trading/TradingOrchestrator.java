@@ -53,6 +53,7 @@ import group.gnometrading.simulation.config.ExchangeProfileConfig;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
 import group.gnometrading.simulation.latency.LatencySeeds;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.strategies.PythonStrategyAgent;
 import group.gnometrading.strategies.PythonStrategyAgent.PythonStrategyCallback;
 import group.gnometrading.strategies.StrategyAgent;
@@ -771,8 +772,11 @@ public class TradingOrchestrator extends Orchestrator {
             long baseSeed = properties.hasProperty("simulation.seed")
                     ? properties.getLongProperty("simulation.seed")
                     : PAPER_TRADING_DEFAULT_SEED;
-            MbpSimulatedExchange exchange = (MbpSimulatedExchange)
-                    profile.toSimulatedExchange(LatencySeeds.derive(baseSeed, listing.listingId()));
+            SecurityMaster securityMaster = getInstance(SecurityMaster.class);
+            MbpSimulatedExchange exchange = (MbpSimulatedExchange) profile.toSimulatedExchange(
+                    listing.listingId(),
+                    LatencySeeds.derive(baseSeed, listing.listingId()),
+                    securityMaster::getFeeTimeline);
             return new PaperTradingOutboundGateway(
                     exchange,
                     marketDataBuffer,
@@ -792,6 +796,9 @@ public class TradingOrchestrator extends Orchestrator {
                         listing,
                         VenueRateLimiters.class,
                         rateLimiters,
+                        // The fees the venue charges on this listing, for fills it doesn't report a fee for.
+                        FeeTimeline.class,
+                        getInstance(SecurityMaster.class).getFeeTimeline(listing.listingId()),
                         VenueAccount.class,
                         sessionAccounts(properties)
                                 .forExchange(listing.exchange().exchangeId()),

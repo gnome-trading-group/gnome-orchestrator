@@ -48,6 +48,7 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
+import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.strings.GnomeString;
 import java.io.IOException;
 import java.net.URI;
@@ -801,8 +802,8 @@ public final class KalshiLiveSmoke {
                             ? new LoggingHttpClient(name + "-catchup")
                             : OrderEntryHttpClients.create(rateLimiter),
                     requireDemo(new URI(DEMO_API).getHost()),
-                    0.07,
-                    0.0175);
+                    // No registry here; Kalshi reports the fees it charged on every fill.
+                    FeeTimeline.EMPTY);
             this.reader = reader;
             final KalshiOutboundWriter writer = new KalshiOutboundWriter(
                     logger,

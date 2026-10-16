@@ -177,6 +177,21 @@ class StartupRecoveryTest {
     }
 
     @Test
+    void aMakerRebateTheLedgerMissedIsBookedAsANegativeFee() throws Exception {
+        // Polymarket US credits makers: the ledger saw 2 fill with a 1c rebate, the venue 6 with a 3c rebate.
+        final String row = ledgerOrder("old", 3, "old-3", 501, STRATEGY, false, 2, 80, -1);
+        responses.put(BY_LISTING, "[" + row + "]");
+        responses.put(BY_ID, "[" + row + "]");
+        venue.resting.add(venueOrder("old-3", 6 * UNIT, 236 * CENT, -3 * CENT, false));
+        venue.afterCancel = venueOrder("old-3", 6 * UNIT, 236 * CENT, -3 * CENT, true);
+
+        recovery("live", true).run();
+
+        final JsonNode fill = posts.get(posts.size() - 1).get("fills").get(0);
+        assertEquals(-2 * CENT, fill.get("fee").asLong());
+    }
+
+    @Test
     void anOrderNobodyRecordedHaltsTheListing() throws Exception {
         venue.resting.add(venueOrder("manual-order", 0, 0, 0, false));
 

@@ -264,7 +264,8 @@ public final class StartupRecovery {
             final long notional =
                     order.filledNotional() - row.path("ledger_filled_notional").asLong();
             final long price = ScaledMath.multiplyDivide(notional, Statics.SIZE_SCALING_FACTOR, delta);
-            final long fee = Math.max(0, order.fees() - row.path("ledger_fees").asLong());
+            // Negative when the venue paid a maker rebate.
+            final long fee = order.fees() - row.path("ledger_fees").asLong();
             final Side side = row.path("side").asInt() == BUY ? Side.Bid : Side.Ask;
             if (inherit) {
                 positions.applyStrategyFill(strategyId, listing.listingId(), side, delta, price, fee);

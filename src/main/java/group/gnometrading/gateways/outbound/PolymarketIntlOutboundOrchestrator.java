@@ -26,6 +26,7 @@ import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.fee.FeeTimeline;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -184,7 +185,7 @@ public final class PolymarketIntlOutboundOrchestrator extends DefaultOutboundOrc
                 credentials.apiKey(),
                 credentials.secret(),
                 credentials.passphrase(),
-                marketInfo,
+                getInstance(FeeTimeline.class),
                 // The reconnect catch-up runs on the supervisor's thread, so it can't share the writer's client or
                 // auth headers.
                 new PolymarketIntlVenueOrderQuery(

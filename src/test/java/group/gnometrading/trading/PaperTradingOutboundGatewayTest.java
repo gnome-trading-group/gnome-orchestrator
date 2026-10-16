@@ -46,7 +46,7 @@ class PaperTradingOutboundGatewayTest {
     @BeforeEach
     void setUp() throws Exception {
         MbpSimulatedExchange exchange = new MbpSimulatedExchange(
-                (price, quantity, isMaker) -> 0,
+                (now, buy, price, quantity, maker, state) -> 0,
                 new StaticLatency(NETWORK),
                 new MakerTakerLatencyModel(PROCESSING, TAKER_DELAY, 0),
                 new RiskAverseQueueModel(),
