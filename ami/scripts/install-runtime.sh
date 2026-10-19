@@ -21,6 +21,9 @@ python3.13 -m venv /opt/gnome/venv
 /opt/gnome/venv/bin/pip install --quiet --upgrade pip
 # start-session.sh installs a Python session's research dependencies with uv: seconds instead of minutes.
 /opt/gnome/venv/bin/pip install --quiet uv
+# The journal shipper starts at boot, before a session installs anything, and must not change when one does.
+python3.13 -m venv /opt/gnome/shipper-venv
+/opt/gnome/shipper-venv/bin/pip install --quiet "boto3>=1.36.18,<2.0.0" "zstandard>=0.23.0,<0.24.0"
 
 # JPype finds libjvm.so through JAVA_HOME.
 ln -sfn "$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")" /usr/lib/jvm/current

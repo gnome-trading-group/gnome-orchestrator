@@ -11,7 +11,8 @@ public enum JournalSource {
     OMS_EXEC_REPORT(4),
     ROUTED_ORDER(5),
     ROUTED_EXEC_REPORT(6),
-    STRATEGY_MARKET_DATA(7);
+    STRATEGY_MARKET_DATA(7),
+    STRATEGY_METRIC(8);
 
     private final int id;
 

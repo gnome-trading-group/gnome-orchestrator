@@ -40,11 +40,13 @@ import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Intent;
+import group.gnometrading.schemas.MetricRow;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.JournalWriter;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.sequencer.metrics.JournaledMetricRecorder;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.RegistryEndpoint;
 import group.gnometrading.shared.RiskModule;
@@ -79,7 +81,6 @@ import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import org.agrona.concurrent.SystemNanoClock;
-import software.amazon.awssdk.services.s3.S3Client;
 
 /**
  * Concrete orchestrator for all live and paper trading sessions.
@@ -115,6 +116,10 @@ public class TradingOrchestrator extends Orchestrator {
     private static final int LEDGER_RESPONSE_TIMEOUT_MS = 2_000;
     private static final long HEARTBEAT_SAMPLE_INTERVAL_MS = 1_000;
     private static final long HEARTBEAT_POST_INTERVAL_MS = 5_000;
+    // Sealing is a local unmap, trim and rename; well inside the time systemd gives the process to stop.
+    private static final Duration JOURNAL_SEAL_TIMEOUT = Duration.ofSeconds(5);
+    // Read by the journal shipper (gnome-orchestrator ami/files/journal-shipper.py) to learn where segments go.
+    private static final String JOURNAL_MANIFEST = "journal.json";
     // Paper sessions are reproducible by default; set simulation.seed to vary the latency draws.
     private static final long PAPER_TRADING_DEFAULT_SEED = 0x9E3779B97F4A7C15L;
 
@@ -249,6 +254,10 @@ public class TradingOrchestrator extends Orchestrator {
                 new SequencedRingBuffer<>(OrderExecutionReport::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
         journalSources.put(intentBuffer, JournalSource.STRATEGY_INTENT);
         journalSources.put(stratExecReportBuffer, JournalSource.STRATEGY_EXEC_REPORT);
+        // The strategy's metric rows, on the session sequence so each is ordered against what it explains.
+        SequencedRingBuffer<MetricRow> strategyMetricBuffer =
+                new SequencedRingBuffer<>(MetricRow::new, sessionSequence);
+        journalSources.put(strategyMetricBuffer, JournalSource.STRATEGY_METRIC);
 
         SequencedRingBuffer<?> strategyMdBuffer;
         MarketDataMultiplexer muxAgent = null;
@@ -275,8 +284,7 @@ public class TradingOrchestrator extends Orchestrator {
         ErrorHandler errorHandler = fatalHandler != null ? fatalHandler.errorHandler() : sessionErrorHandler(logger);
         // Before the outbound gateways start, which can publish execution reports as soon as they connect: a journal
         // poller only sees what is published after it exists, and a missed number stalls the journal.
-        this.journalRunner =
-                wireJournal(strategyId, sessionId, sessionSequence, journalSources, errorHandler, logger, properties);
+        this.journalRunner = wireJournal(sessionId, sessionSequence, journalSources, errorHandler, logger, properties);
 
         Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
         OutboundSetup outboundSetup = setupOutbound(
@@ -294,6 +302,8 @@ public class TradingOrchestrator extends Orchestrator {
         StrategyAgent strategy = createStrategyAgent(
                 strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
         strategy.configureExit(listings, sessionExit(logger, properties, strategyId, listings));
+        // The journal is already draining this buffer, so declaring streams here can't wait on a full ring.
+        strategy.configureMetrics(new JournaledMetricRecorder(strategyMetricBuffer));
 
         LedgerAgent ledgerAgent = ledgerRing == null
                 ? null
@@ -459,7 +469,9 @@ public class TradingOrchestrator extends Orchestrator {
             started.router(),
             started.ledger(),
             started.priceWriter(),
-            started.riskSync()
+            started.riskSync(),
+            // A stuck journal holds up market data and every trading buffer once their rings fill.
+            journalRunner
         }) {
             if (runner != null) {
                 watched.add(runner);
@@ -518,7 +530,6 @@ public class TradingOrchestrator extends Orchestrator {
     }
 
     private GnomeAgentRunner wireJournal(
-            int strategyId,
             String sessionId,
             GlobalSequence sessionSequence,
             Map<SequencedRingBuffer<?>, JournalSource> journalSources,
@@ -531,27 +542,29 @@ public class TradingOrchestrator extends Orchestrator {
         if (!properties.getBooleanProperty("journal.enabled")) {
             return null;
         }
-        Path journalPath = Path.of("/tmp/journal-" + sessionId + ".bin");
-        long fileSizeBytes = (long) properties.getIntProperty("journal.file.size.mb") * 1024L * 1024L;
+        Path journalDirectory = Path.of(properties.getStringProperty("journal.directory"), sessionId);
+        long segmentSizeBytes = (long) properties.getIntProperty("journal.segment.size.mb") * 1024L * 1024L;
         try {
-            JournalWriter journalWriter = new JournalWriter(journalPath, fileSizeBytes);
+            JournalSegmentSealer sealer = new JournalSegmentSealer(logger);
+            JournalWriter journalWriter = new JournalWriter(journalDirectory, segmentSizeBytes, sealer::submit);
+            MAPPER.writeValue(
+                    journalDirectory.resolve(JOURNAL_MANIFEST).toFile(),
+                    Map.of(
+                            "bucket", properties.getStringProperty("journal.bucket"),
+                            "keyPrefix", sessionId,
+                            "region", properties.getStringProperty("journal.bucket.region")));
             List<SequencedPoller> pollers = new ArrayList<>(journalSources.size());
             for (SequencedRingBuffer<?> buffer : sessionSequence.buffers()) {
                 pollers.add(buffer.createPoller(
                         journalWriter.source(journalSources.get(buffer).id())));
             }
-            S3Client s3Client = getInstance(S3Client.class);
-            String journalBucket = properties.getStringProperty("journal.bucket");
-            String s3Key = strategyId + "/" + sessionId + "/journal.zst";
-            int flushIntervalSeconds = properties.getIntProperty("journal.flush.interval.seconds");
             JournalManagerAgent journalManagerAgent = new JournalManagerAgent(
                     journalWriter,
                     pollers,
-                    journalPath,
-                    s3Client,
-                    journalBucket,
-                    s3Key,
-                    Duration.ofSeconds(flushIntervalSeconds),
+                    sealer,
+                    Duration.ofSeconds(properties.getIntProperty("journal.segment.interval.seconds")),
+                    JOURNAL_SEAL_TIMEOUT,
+                    SystemEpochClock.INSTANCE,
                     logger);
             GnomeAgentRunner journalRunner = new GnomeAgentRunner(journalManagerAgent, errorHandler);
             GnomeAgentRunner.startOnThread(journalRunner);

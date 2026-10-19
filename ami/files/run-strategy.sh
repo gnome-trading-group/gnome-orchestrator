@@ -40,6 +40,11 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CWA
             "file_path": "/var/log/gnome/orchestrator.log",
             "log_group_name": "/gnome/orchestrator/${AWS_REGION}",
             "log_stream_name": "ec2/${INSTANCE_ID}"
+          },
+          {
+            "file_path": "/var/log/gnome/journal-shipper.log",
+            "log_group_name": "/gnome/orchestrator/${AWS_REGION}",
+            "log_stream_name": "ec2/${INSTANCE_ID}/journal-shipper"
           }
         ]
       }

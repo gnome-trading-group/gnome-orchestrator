@@ -74,8 +74,9 @@ export class Ec2Stack extends cdk.Stack {
         resources: [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`],
       }));
     }
+    // The journal shipper uploads large segments in parts, and abandons a failed multipart upload.
     role.addToPolicy(new iam.PolicyStatement({
-      actions: ['s3:PutObject'],
+      actions: ['s3:PutObject', 's3:AbortMultipartUpload'],
       resources: [`arn:aws:s3:::gnome-journals-${props.stage}/*`],
     }));
     // Strategies read research datasets (e.g. prematch predictions) and model artifacts through gnomepy.data.

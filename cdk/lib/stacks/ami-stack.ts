@@ -94,9 +94,12 @@ export class AmiStack extends cdk.Stack {
         installFile('files/start-session.sh', '/opt/gnome/start-session.sh', '0755'),
         installFile('files/gnome-strategy.service', '/etc/systemd/system/gnome-strategy.service', '0644'),
         installFile('files/gnome-boot-guard.service', '/etc/systemd/system/gnome-boot-guard.service', '0644'),
+        installFile('files/journal-shipper.py', '/opt/gnome/journal-shipper.py', '0644'),
+        installFile('files/gnome-journal-shipper.service', '/etc/systemd/system/gnome-journal-shipper.service', '0644'),
         'systemctl daemon-reload',
-        // Only the guard starts at boot; the session unit is started by user data on the first boot alone.
+        // The guard and the shipper start at boot; the session unit is started by user data on the first boot alone.
         'systemctl enable gnome-boot-guard.service',
+        'systemctl enable gnome-journal-shipper.service',
       ].join('\n')],
     ], [
       ['CheckRuntime', [
@@ -107,6 +110,12 @@ export class AmiStack extends cdk.Stack {
         // LibraryLoader extracts native libraries to /tmp and loads them from there.
         "! findmnt -no OPTIONS /tmp | grep -q noexec",
         'systemctl is-enabled gnome-boot-guard.service',
+        'systemctl is-enabled gnome-journal-shipper.service',
+        // The shipper's tests, on the image's own Python and libraries; nothing else in CI runs Python.
+        'install -d /tmp/shipper-test && cp /opt/gnome/journal-shipper.py /tmp/shipper-test/',
+        installFile('files/test_journal_shipper.py', '/tmp/shipper-test/test_journal_shipper.py', '0644'),
+        '/opt/gnome/shipper-venv/bin/python -m unittest discover -s /tmp/shipper-test -p "test_*.py"',
+        'rm -rf /tmp/shipper-test',
         // No [Install] section, so systemd reports it "static" (exit 0): it can only be started, by user data.
         'test "$(systemctl is-enabled gnome-strategy.service || true)" != enabled',
         // Nothing may upgrade packages, or restart services, under a running session.

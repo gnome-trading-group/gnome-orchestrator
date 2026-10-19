@@ -38,11 +38,13 @@ export class StorageStack extends cdk.Stack {
       bucketName: `gnome-journals-${props.stage}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
+      // Instant Retrieval, not Glacier: a session's metrics live only in its journal, and a review reads them back
+      // straight away however old the session is.
       lifecycleRules: [
         {
           transitions: [
             {
-              storageClass: s3.StorageClass.GLACIER,
+              storageClass: s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
               transitionAfter: cdk.Duration.days(90),
             },
           ],

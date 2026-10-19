@@ -1,0 +1,25 @@
+[Unit]
+Description=gnome journal shipper
+Wants=network-online.target
+After=network-online.target amazon-cloudwatch-agent.service
+# Units stop in the reverse of their start order: this one stops after the strategy has exited, so it can ship the
+# segments the strategy left open, and before the network and the CloudWatch agent carrying its log go down.
+Before=gnome-strategy.service
+
+[Service]
+Type=simple
+ExecStart=/opt/gnome/shipper-venv/bin/python /opt/gnome/journal-shipper.py
+KillSignal=SIGTERM
+# Shipping the last segments after the session can take a while on a slow upload; the instance waits for it.
+TimeoutStopSec=300
+StandardOutput=append:/var/log/gnome/journal-shipper.log
+StandardError=inherit
+# Compressing competes with the session for the housekeeping CPU (isolcpus keeps it off the trading cores).
+Nice=19
+CPUWeight=10
+IOSchedulingClass=idle
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
