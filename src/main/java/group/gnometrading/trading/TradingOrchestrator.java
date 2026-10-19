@@ -18,7 +18,7 @@ import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
-import group.gnometrading.logging.ConsoleLogger;
+import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
@@ -150,7 +150,7 @@ public class TradingOrchestrator extends Orchestrator {
     @Provides
     @Singleton
     public final Logger provideLogger(EpochNanoClock clock) {
-        return new ConsoleLogger(clock);
+        return new AsyncLogger(clock);
     }
 
     /**

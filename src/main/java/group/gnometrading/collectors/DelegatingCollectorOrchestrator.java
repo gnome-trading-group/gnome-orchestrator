@@ -13,7 +13,7 @@ import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.health.HealthCheckServer;
-import group.gnometrading.logging.ConsoleLogger;
+import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
@@ -55,7 +55,7 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
     @Provides
     @Singleton
     public final Logger provideLogger(EpochNanoClock epochClock) {
-        return new ConsoleLogger(epochClock);
+        return new AsyncLogger(epochClock);
     }
 
     @Provides

@@ -60,7 +60,7 @@ services:
       MODE: paper
       LISTINGS: "[6]"
       STRATEGY_TYPE: python
-      STRATEGY_CLASS: gnomepy_research.strategies.random_trader:RandomTrader
+      STRATEGY_CLASS: gnomepy_research.sessions.random_trader.strategy:RandomTrader
       STRATEGY_ARGS_JSON: '{"interval_seconds": 3, "size": 10, "max_position": 3}'
       RESEARCH_COMMIT: test/random-trader
       LATENCY_PROFILE: standard
