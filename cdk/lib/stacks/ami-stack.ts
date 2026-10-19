@@ -11,6 +11,7 @@ import { Construct } from 'constructs';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { gzipSync } from 'zlib';
 
 export const AMI_PARAMETER_PREFIX = '/gnome/orchestrator/ami';
 // On the Image Builder image whose AMIs new sessions launch from, so retention never deletes it however old it gets.
@@ -94,12 +95,9 @@ export class AmiStack extends cdk.Stack {
         installFile('files/start-session.sh', '/opt/gnome/start-session.sh', '0755'),
         installFile('files/gnome-strategy.service', '/etc/systemd/system/gnome-strategy.service', '0644'),
         installFile('files/gnome-boot-guard.service', '/etc/systemd/system/gnome-boot-guard.service', '0644'),
-        installFile('files/journal-shipper.py', '/opt/gnome/journal-shipper.py', '0644'),
-        installFile('files/gnome-journal-shipper.service', '/etc/systemd/system/gnome-journal-shipper.service', '0644'),
         'systemctl daemon-reload',
-        // The guard and the shipper start at boot; the session unit is started by user data on the first boot alone.
+        // Only the guard starts at boot; the session unit is started by user data on the first boot alone.
         'systemctl enable gnome-boot-guard.service',
-        'systemctl enable gnome-journal-shipper.service',
       ].join('\n')],
     ], [
       ['CheckRuntime', [
@@ -110,12 +108,6 @@ export class AmiStack extends cdk.Stack {
         // LibraryLoader extracts native libraries to /tmp and loads them from there.
         "! findmnt -no OPTIONS /tmp | grep -q noexec",
         'systemctl is-enabled gnome-boot-guard.service',
-        'systemctl is-enabled gnome-journal-shipper.service',
-        // The shipper's tests, on the image's own Python and libraries; nothing else in CI runs Python.
-        'install -d /tmp/shipper-test && cp /opt/gnome/journal-shipper.py /tmp/shipper-test/',
-        installFile('files/test_journal_shipper.py', '/tmp/shipper-test/test_journal_shipper.py', '0644'),
-        '/opt/gnome/shipper-venv/bin/python -m unittest discover -s /tmp/shipper-test -p "test_*.py"',
-        'rm -rf /tmp/shipper-test',
         // No [Install] section, so systemd reports it "static" (exit 0): it can only be started, by user data.
         'test "$(systemctl is-enabled gnome-strategy.service || true)" != enabled',
         // Nothing may upgrade packages, or restart services, under a running session.
@@ -123,6 +115,30 @@ export class AmiStack extends cdk.Stack {
         'test "$(systemctl is-enabled apt-daily.timer || true)" = masked',
         '! dpkg -s unattended-upgrades >/dev/null 2>&1',
         "grep -q \"restart} = 'l'\" /etc/needrestart/conf.d/90-gnome-no-restart.conf",
+      ].join('\n')],
+    ]);
+
+    // Its own component: Image Builder caps a component's document at 16,000 characters.
+    const shipper = this.component('journal-shipper', 'Ships session journal segments to S3', [
+      ['InstallJournalShipper', [
+        'set -euxo pipefail',
+        // Starts at boot, before a session installs anything into /opt/gnome/venv, and must not change when one does.
+        'python3.13 -m venv /opt/gnome/shipper-venv',
+        '/opt/gnome/shipper-venv/bin/pip install --quiet "boto3>=1.36.18,<2.0.0" "zstandard>=0.23.0,<0.24.0"',
+        installFile('files/journal-shipper.py', '/opt/gnome/journal-shipper.py', '0644'),
+        installFile('files/gnome-journal-shipper.service', '/etc/systemd/system/gnome-journal-shipper.service', '0644'),
+        'systemctl daemon-reload',
+        'systemctl enable gnome-journal-shipper.service',
+      ].join('\n')],
+    ], [
+      ['CheckJournalShipper', [
+        'set -euxo pipefail',
+        'systemctl is-enabled gnome-journal-shipper.service',
+        // The shipper's tests, on the image's own Python and libraries; nothing else in CI runs Python.
+        'install -d /tmp/shipper-test && cp /opt/gnome/journal-shipper.py /tmp/shipper-test/',
+        installFile('files/test_journal_shipper.py', '/tmp/shipper-test/test_journal_shipper.py', '0644'),
+        '/opt/gnome/shipper-venv/bin/python -m unittest discover -s /tmp/shipper-test -p "test_*.py"',
+        'rm -rf /tmp/shipper-test',
       ].join('\n')],
     ]);
 
@@ -138,8 +154,8 @@ export class AmiStack extends cdk.Stack {
     });
 
     for (const variant of VARIANTS) {
-      const components = [{ componentArn: runtime.attrArn }];
-      const componentVersions = [runtime.version];
+      const components = [{ componentArn: runtime.attrArn }, { componentArn: shipper.attrArn }];
+      const componentVersions = [runtime.version, shipper.version];
       if (variant.vcpus) {
         const isolated = isolatedCpus(variant.vcpus);
         const tuning = this.component(`kernel-tuning-${variant.name}`, `Isolate CPUs ${isolated}`, [
@@ -280,9 +296,10 @@ function readAmiFile(relative: string): string {
   return readFileSync(join(AMI_DIR, relative), 'utf8');
 }
 
+// Compressed so files fit in a component, whose document Image Builder caps at 16,000 characters.
 function installFile(source: string, destination: string, mode: string): string {
-  const content = Buffer.from(readAmiFile(source)).toString('base64');
-  return `echo '${content}' | base64 -d > ${destination}\nchmod ${mode} ${destination}`;
+  const content = gzipSync(readAmiFile(source), { level: 9 }).toString('base64');
+  return `echo '${content}' | base64 -d | gunzip > ${destination}\nchmod ${mode} ${destination}`;
 }
 
 // Runs on the small build-size test instance, where most of the range does not exist: the kernel isolates only the
