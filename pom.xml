@@ -46,6 +46,14 @@
     </dependencyManagement>
 
     <dependencies>
+        <!-- The AWS SDK logs through slf4j-api and warns on every start when no backend is bound. Its logs were
+             already discarded; this discards them without the warning. Keep the version on the SDK's slf4j-api. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-nop</artifactId>
+            <version>1.7.36</version>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-networking</artifactId>
