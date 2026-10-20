@@ -7,6 +7,7 @@ import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
+import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.ledger.LedgerAgent;
@@ -17,6 +18,7 @@ import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -37,7 +39,9 @@ import org.agrona.concurrent.EpochClock;
  *       wrong and resynced in the last five minutes;
  *   <li>whether risk can be trusted: stale (the registry unreachable), unguarded (a required policy missing), policies
  *       that couldn't be built, and halts the OMS couldn't record;
- *   <li>each venue account's rate limiter, and whether it is refusing requests.
+ *   <li>each venue account's rate limiter, and whether it is refusing requests;
+ *   <li>the host's CPU, memory and disk, and this process's memory;
+ *   <li>how many journal segments are waiting for the shipper to upload them.
  * </ul>
  *
  * <p>Reads only what the agents already publish for other threads, so it costs their threads nothing. Nothing here
@@ -85,6 +89,9 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private final LedgerAgent ledger;
     private final LedgerRing ledgerRing;
 
+    private final HostReadings host;
+    private final JournalSegmentSealer journal;
+
     private final ByteBuffer body = ByteBuffer.allocate(BODY_CAPACITY);
     private final JsonEncoder json = new JsonEncoder();
 
@@ -94,7 +101,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private boolean failing;
     private boolean ended;
 
-    public SessionHeartbeatAgent(
+    SessionHeartbeatAgent(
             final String sessionId,
             final RegistryConnection registry,
             final EpochClock clock,
@@ -107,6 +114,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final LedgerRing ledgerRing,
             final RiskEngine riskEngine,
             final Map<String, VenueRateLimiter> rateLimiters,
+            final HostReadings host,
+            final JournalSegmentSealer journal,
             final long sampleIntervalMs,
             final long postIntervalMs) {
         this.sessionId = sessionId;
@@ -139,6 +148,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         this.riskEngine = riskEngine;
         this.limiterNames = rateLimiters.keySet().toArray(new String[0]);
         this.limiters = rateLimiters.values().toArray(new VenueRateLimiter[0]);
+        this.host = host;
+        this.journal = journal;
     }
 
     @Override
@@ -222,7 +233,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         }
     }
 
-    private void encode(final long now) {
+    /** Writes the heartbeat into the body; package-private so a test can check it allocates nothing. */
+    void encode(final long now) {
         body.clear();
         json.wrap(body);
         json.writeObjectStart()
@@ -241,7 +253,60 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         writeRisk(now);
         json.writeComma();
         writeRateLimits();
+        json.writeComma();
+        writeHost();
+        json.writeComma();
+        writeJournal(now);
         json.writeObjectEnd();
+    }
+
+    private void writeHost() {
+        host.sample();
+        json.writeString("host")
+                .writeColon()
+                .writeObjectStart()
+                .writeObjectEntry("cpuBusyPermille", host.cpuBusyPermille())
+                .writeComma()
+                .writeObjectEntry("cpuStealPermille", host.cpuStealPermille())
+                .writeComma()
+                .writeObjectEntry("memAvailableBytes", host.memAvailableBytes())
+                .writeComma()
+                .writeObjectEntry("memTotalBytes", host.memTotalBytes())
+                .writeComma()
+                .writeObjectEntry("processRssBytes", host.processRssBytes())
+                .writeComma()
+                .writeObjectEntry("heapUsedBytes", host.heapUsedBytes())
+                .writeComma()
+                .writeObjectEntry("heapMaxBytes", host.heapMaxBytes())
+                .writeComma()
+                .writeObjectEntry("diskFreeBytes", host.diskFreeBytes())
+                .writeObjectEnd();
+    }
+
+    private void writeJournal(final long now) {
+        json.writeString("journal").writeColon();
+        if (journal == null) {
+            json.writeNull();
+            return;
+        }
+        journal.measureBacklog(now);
+        json.writeObjectStart()
+                .writeObjectEntry("pendingSegments", journal.pendingSegments())
+                .writeComma()
+                .writeObjectEntry("oldestPendingMs", journal.oldestPendingMs())
+                .writeComma()
+                .writeObjectEntry("segmentBytes", journal.segmentBytes())
+                .writeObjectEnd();
+    }
+
+    @Override
+    public void onClose() {
+        host.close();
+    }
+
+    /** The last heartbeat written, for tests. */
+    String lastBody() {
+        return new String(body.array(), 0, body.position(), StandardCharsets.UTF_8);
     }
 
     private void writeAgents(final long now) {

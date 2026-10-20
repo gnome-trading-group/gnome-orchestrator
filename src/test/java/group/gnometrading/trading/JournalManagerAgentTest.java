@@ -153,7 +153,7 @@ class JournalManagerAgentTest {
 
     private JournalManagerAgent agent(
             GlobalSequence sessionSequence, Map<SequencedRingBuffer<?>, JournalSource> sources) throws IOException {
-        JournalSegmentSealer sealer = new JournalSegmentSealer(new NullLogger());
+        JournalSegmentSealer sealer = new JournalSegmentSealer(SEGMENT_SIZE, clock, new NullLogger());
         JournalWriter writer = new JournalWriter(tempDir, SEGMENT_SIZE, sealer::submit);
         List<SequencedPoller> pollers = new ArrayList<>();
         for (SequencedRingBuffer<?> buffer : sessionSequence.buffers()) {

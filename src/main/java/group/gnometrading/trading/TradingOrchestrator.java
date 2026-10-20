@@ -18,6 +18,7 @@ import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
+import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -64,6 +65,7 @@ import group.gnometrading.strategies.StrategyAgent;
 import group.gnometrading.strategies.StrategyFactory;
 import group.gnometrading.trading.recovery.SessionNotRunnableException;
 import group.gnometrading.trading.recovery.StartupRecovery;
+import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
@@ -132,6 +134,9 @@ public class TradingOrchestrator extends Orchestrator {
     private final List<GatewayRunners> outboundGateways = new ArrayList<>();
     private SessionAccounts sessionAccounts;
     private volatile GnomeAgentRunner journalRunner;
+    // Set with the journal, before the heartbeat that reports on it starts; null with the journal off.
+    private JournalSegmentSealer journalSealer;
+    private Path journalDirectory;
     private volatile GnomeAgentRunner heartbeatRunner;
     private volatile Logger logger;
     // A session's way out on an error; null for a local run, which throws instead.
@@ -495,6 +500,9 @@ public class TradingOrchestrator extends Orchestrator {
                         ledgerRing,
                         riskEngine,
                         rateLimiters.all(),
+                        HostReadings.ofThisProcess(
+                                journalDirectory != null ? journalDirectory.toFile() : new File("/")),
+                        journalSealer,
                         HEARTBEAT_SAMPLE_INTERVAL_MS,
                         HEARTBEAT_POST_INTERVAL_MS),
                 errorHandler);
@@ -545,8 +553,10 @@ public class TradingOrchestrator extends Orchestrator {
         Path journalDirectory = Path.of(properties.getStringProperty("journal.directory"), sessionId);
         long segmentSizeBytes = (long) properties.getIntProperty("journal.segment.size.mb") * 1024L * 1024L;
         try {
-            JournalSegmentSealer sealer = new JournalSegmentSealer(logger);
+            JournalSegmentSealer sealer = new JournalSegmentSealer(segmentSizeBytes, SystemEpochClock.INSTANCE, logger);
             JournalWriter journalWriter = new JournalWriter(journalDirectory, segmentSizeBytes, sealer::submit);
+            this.journalSealer = sealer;
+            this.journalDirectory = journalDirectory;
             MAPPER.writeValue(
                     journalDirectory.resolve(JOURNAL_MANIFEST).toFile(),
                     Map.of(
@@ -907,6 +917,9 @@ public class TradingOrchestrator extends Orchestrator {
             List<Listing> result = new ArrayList<>(ids.length);
             for (int id : ids) {
                 result.add(securityMaster.getListing(id));
+                // Otherwise the OMS fetches each spec history on its first order for the listing: a blocking registry
+                // call on the OMS thread, through a client the strategy's thread also uses.
+                securityMaster.getListingSpec(id);
             }
             return result;
         } catch (JsonProcessingException e) {

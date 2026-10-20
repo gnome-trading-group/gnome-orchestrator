@@ -17,6 +17,7 @@ import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.ReaderPauseControl;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
 import group.gnometrading.gateways.ratelimit.VenueRateLimits;
+import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.ledger.LedgerAgent;
 import group.gnometrading.oms.ledger.LedgerRing;
@@ -26,16 +27,21 @@ import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.sequencer.JournalWriter;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SessionHeartbeatAgentTest {
 
@@ -54,6 +60,10 @@ class SessionHeartbeatAgentTest {
     private LedgerAgent ledger;
     private RiskEngine riskEngine;
     private VenueRateLimiters rateLimiters;
+    private HostReadings host;
+
+    @TempDir
+    Path tempDir;
 
     private static final class Named implements GnomeAgent {
         private final String name;
@@ -102,10 +112,12 @@ class SessionHeartbeatAgentTest {
         riskEngine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), ListingDirectory.EMPTY);
         rateLimiters = new VenueRateLimiters(new NullLogger(), System::nanoTime, () -> now[0]);
         rateLimiters.forAccount(VenueRateLimits.kalshi(), "key-1");
+        host = new HostReadings(tempDir.resolve("proc"), tempDir.toFile());
     }
 
     @AfterEach
     void tearDown() throws Exception {
+        host.close();
         for (GnomeAgentRunner runner : started) {
             runner.close();
         }
@@ -132,6 +144,8 @@ class SessionHeartbeatAgentTest {
                 ledgerRing,
                 riskEngine,
                 rateLimiters.all(),
+                host,
+                null,
                 SAMPLE_MS,
                 POST_MS);
     }
@@ -229,6 +243,8 @@ class SessionHeartbeatAgentTest {
                 ledgerRing,
                 riskEngine,
                 rateLimiters.all(),
+                host,
+                null,
                 SAMPLE_MS,
                 Long.MAX_VALUE / 2);
         agent.onStart();
@@ -249,5 +265,108 @@ class SessionHeartbeatAgentTest {
             agent.doWork();
         }
         assertEquals(0, threads.getThreadAllocatedBytes(threadId) - before);
+    }
+
+    private HostReadings fixtureHost() throws Exception {
+        final Path proc = tempDir.resolve("fixture-proc");
+        Files.createDirectories(proc.resolve("self"));
+        Files.writeString(proc.resolve("stat"), "cpu  1000 20 300 8000 50 0 30 0 0 0\n");
+        Files.writeString(proc.resolve("meminfo"), "MemTotal: 2000000 kB\nMemAvailable: 500000 kB\n");
+        Files.writeString(proc.resolve("self").resolve("status"), "VmRSS:\t400000 kB\n");
+        return new HostReadings(proc, tempDir.toFile());
+    }
+
+    /** A sealer that has sealed {@code count} one-record segments, all still waiting to be shipped. */
+    private JournalSegmentSealer sealed(final int count) throws Exception {
+        final JournalSegmentSealer sealer = new JournalSegmentSealer(1 << 20, () -> now[0], new NullLogger());
+        final JournalWriter writer = new JournalWriter(tempDir.resolve("journal"), 1 << 20, sealer::submit);
+        for (int sequence = 1; sequence <= count; sequence++) {
+            writer.append(0, sequence, 1, new UnsafeBuffer(new byte[0]), 0);
+            writer.roll();
+        }
+        writer.close();
+        assertTrue(sealer.close(Duration.ofSeconds(5)));
+        return sealer;
+    }
+
+    private SessionHeartbeatAgent heartbeat(final HostReadings readings, final JournalSegmentSealer journal) {
+        return new SessionHeartbeatAgent(
+                "s1",
+                registry,
+                () -> now[0],
+                new NullLogger(),
+                List.of(),
+                List.of(),
+                prices,
+                slots,
+                ledger,
+                ledgerRing,
+                riskEngine,
+                rateLimiters.all(),
+                readings,
+                journal,
+                SAMPLE_MS,
+                POST_MS);
+    }
+
+    @Test
+    void reportsTheHostAndTheJournalsBacklog() throws Exception {
+        final JournalSegmentSealer journal = sealed(2);
+        now[0] += 90_000;
+        try (HostReadings readings = fixtureHost()) {
+            final SessionHeartbeatAgent agent = heartbeat(readings, journal);
+            agent.onStart();
+            agent.encode(now[0]);
+            final JsonNode body = mapper.readTree(agent.lastBody());
+
+            final JsonNode hostNode = body.get("host");
+            assertEquals(-1, hostNode.get("cpuBusyPermille").asLong(), "no CPU share before a second sample");
+            assertEquals(500_000L * 1024, hostNode.get("memAvailableBytes").asLong());
+            assertEquals(2_000_000L * 1024, hostNode.get("memTotalBytes").asLong());
+            assertEquals(400_000L * 1024, hostNode.get("processRssBytes").asLong());
+            assertTrue(hostNode.get("heapUsedBytes").asLong() > 0);
+            assertTrue(hostNode.get("diskFreeBytes").asLong() > 0);
+
+            final JsonNode journalNode = body.get("journal");
+            assertEquals(2, journalNode.get("pendingSegments").asInt());
+            assertEquals(90_000, journalNode.get("oldestPendingMs").asLong());
+            assertEquals(1 << 20, journalNode.get("segmentBytes").asLong());
+        }
+    }
+
+    @Test
+    void reportsNoJournalWhenItIsOff() throws Exception {
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
+        agent.onStart();
+        agent.encode(now[0]);
+
+        final JsonNode body = mapper.readTree(agent.lastBody());
+        assertTrue(body.get("journal").isNull());
+        assertEquals(-1, body.get("host").get("memTotalBytes").asLong(), "this test's host has no /proc");
+    }
+
+    @Test
+    void writingTheHeartbeatAllocatesNothing() throws Exception {
+        final JournalSegmentSealer journal = sealed(3);
+        try (HostReadings readings = fixtureHost()) {
+            final SessionHeartbeatAgent agent = heartbeat(readings, journal);
+            agent.onStart();
+            final com.sun.management.ThreadMXBean threads =
+                    (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+            final long threadId = Thread.currentThread().getId();
+            for (int i = 0; i < 20_000; i++) {
+                now[0] += POST_MS;
+                agent.encode(now[0]);
+            }
+            final long before = threads.getThreadAllocatedBytes(threadId);
+            for (int i = 0; i < 1_000; i++) {
+                now[0] += POST_MS;
+                agent.encode(now[0]);
+            }
+            final long allocated = threads.getThreadAllocatedBytes(threadId) - before;
+
+            assertTrue(agent.lastBody().contains("\"pendingSegments\":3"), "the readings were written");
+            assertEquals(0, allocated);
+        }
     }
 }
