@@ -328,7 +328,7 @@ public class TradingOrchestrator extends Orchestrator {
                 RiskModule.riskMaster(getInstance(RegistryConnection.class), properties, listingDirectory),
                 riskEngine,
                 epochClock,
-                Duration.ofMillis(properties.getIntProperty("risk.refresh.interval.ms")),
+                RiskModule.refreshInterval(properties),
                 logger,
                 priceBuffer,
                 priceSlotRegistry,

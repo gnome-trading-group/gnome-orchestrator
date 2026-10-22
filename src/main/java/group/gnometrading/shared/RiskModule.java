@@ -40,9 +40,16 @@ public class RiskModule extends Module {
 
     public static RiskEngine riskEngine(final Properties properties, final ListingDirectory directory) {
         return RiskEngine.syncedFromRegistry(
-                SystemEpochClock.INSTANCE,
-                Duration.ofMillis(properties.getIntProperty("risk.stale.after.ms")),
-                directory);
+                SystemEpochClock.INSTANCE, modeDuration(properties, "stale.after.ms"), directory);
+    }
+
+    public static Duration refreshInterval(final Properties properties) {
+        return modeDuration(properties, "refresh.interval.ms");
+    }
+
+    // Keyed by mode so a missing key for a mode fails startup rather than silently borrowing the other mode's value.
+    private static Duration modeDuration(final Properties properties, final String key) {
+        return Duration.ofMillis(properties.getIntProperty("risk." + properties.getStringProperty("mode") + "." + key));
     }
 
     public static ListingDirectory directory(final List<Listing> listings) {
