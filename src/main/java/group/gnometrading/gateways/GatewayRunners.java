@@ -11,6 +11,8 @@ import java.util.List;
  */
 public final class GatewayRunners implements AutoCloseable {
 
+    // A session runs one gateway per listing, several on one venue, so the reader's name alone doesn't say which.
+    private final int listingId;
     private final ReaderPauseControl readerPause;
     private final GnomeAgentRunner reader;
     // Null for a venue gateway, whose order writer the trading orchestrator owns.
@@ -18,10 +20,12 @@ public final class GatewayRunners implements AutoCloseable {
     private final GnomeAgentRunner supervisor;
 
     private GatewayRunners(
+            final int listingId,
             final ReaderPauseControl readerPause,
             final GnomeAgentRunner reader,
             final GnomeAgentRunner socketWriter,
             final GnomeAgentRunner supervisor) {
+        this.listingId = listingId;
         this.readerPause = readerPause;
         this.reader = reader;
         this.socketWriter = socketWriter;
@@ -33,11 +37,12 @@ public final class GatewayRunners implements AutoCloseable {
      * the gateway's own and closes with it.
      */
     public static GatewayRunners marketData(
+            final int listingId,
             final ReaderPauseControl readerPause,
             final GnomeAgentRunner reader,
             final GnomeAgentRunner socketWriter,
             final GnomeAgentRunner supervisor) {
-        return new GatewayRunners(readerPause, reader, socketWriter, supervisor);
+        return new GatewayRunners(listingId, readerPause, reader, socketWriter, supervisor);
     }
 
     /**
@@ -45,8 +50,11 @@ public final class GatewayRunners implements AutoCloseable {
      * the cancels the OMS sends on shutdown go out first; only the reader and supervisor belong here.
      */
     public static GatewayRunners venue(
-            final ReaderPauseControl readerPause, final GnomeAgentRunner reader, final GnomeAgentRunner supervisor) {
-        return new GatewayRunners(readerPause, reader, null, supervisor);
+            final int listingId,
+            final ReaderPauseControl readerPause,
+            final GnomeAgentRunner reader,
+            final GnomeAgentRunner supervisor) {
+        return new GatewayRunners(listingId, readerPause, reader, null, supervisor);
     }
 
     /** Starts each runner on its own thread. */
@@ -59,9 +67,9 @@ public final class GatewayRunners implements AutoCloseable {
         return this;
     }
 
-    /** The gateway's name, after its reader. */
+    /** The gateway's name, after its reader and the listing it serves. */
     public String name() {
-        return reader.getAgent().roleName();
+        return reader.getAgent().roleName() + " " + listingId;
     }
 
     /** Whether the reader is held off its socket while the supervisor connects or reconnects it. */

@@ -130,6 +130,7 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
         ErrorHandler errorHandler = getInstance(ErrorHandler.class);
         InboundSocketReader<?> reader = getInstance(InboundSocketReader.class);
         return GatewayRunners.marketData(
+                        getInstance(Listing.class).listingId(),
                         reader.pauseControl,
                         new GnomeAgentRunner(reader, errorHandler),
                         new GnomeAgentRunner(getInstance(InboundSocketWriter.class), errorHandler),

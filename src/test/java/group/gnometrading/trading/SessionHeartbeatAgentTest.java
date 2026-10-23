@@ -162,6 +162,7 @@ class SessionHeartbeatAgentTest {
         final GnomeAgentRunner stuck = new GnomeAgentRunner(new Named("StuckAgent"), Throwable::printStackTrace);
         final GnomeAgentRunner live = running("LiveAgent");
         final GatewayRunners gateway = GatewayRunners.venue(
+                100,
                 new ReaderPauseControl(),
                 new GnomeAgentRunner(new Named("KalshiReader"), Throwable::printStackTrace),
                 new GnomeAgentRunner(new Named("KalshiGateway"), Throwable::printStackTrace));
@@ -192,7 +193,7 @@ class SessionHeartbeatAgentTest {
         assertEquals(0, ledgerHealth.get("consecutiveFailures").asInt());
         assertFalse(ledgerHealth.get("fenced").asBoolean());
         final JsonNode gatewayHealth = beat.get("gateways").get(0);
-        assertEquals("KalshiReader", gatewayHealth.get("name").asText());
+        assertEquals("KalshiReader 100", gatewayHealth.get("name").asText());
         assertTrue(gatewayHealth.get("reconnecting").asBoolean(), "a reader starts held until its socket connects");
         assertEquals(0, gatewayHealth.get("resyncsLast5m").asLong(), "a venue gateway has no book to resync");
         final JsonNode risk = beat.get("risk");

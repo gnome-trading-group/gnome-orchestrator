@@ -31,6 +31,7 @@ class GatewayRunnersTest {
             }
         };
         final GatewayRunners runners = GatewayRunners.venue(
+                        1,
                         pause,
                         new GnomeAgentRunner(reader, Throwable::printStackTrace),
                         new GnomeAgentRunner(supervisor, Throwable::printStackTrace))

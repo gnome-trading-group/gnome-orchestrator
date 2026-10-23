@@ -66,6 +66,7 @@ class TradingOrchestratorCloseTest {
 
     private static GatewayRunners marketDataGateway(final SequencedRingBuffer<Mbp10Schema> ring) {
         return GatewayRunners.marketData(
+                        1,
                         new ReaderPauseControl(),
                         new GnomeAgentRunner(new Feed(ring), Throwable::printStackTrace),
                         null,

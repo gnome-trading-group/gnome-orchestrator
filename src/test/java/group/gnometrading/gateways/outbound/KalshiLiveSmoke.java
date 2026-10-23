@@ -236,6 +236,7 @@ public final class KalshiLiveSmoke {
                 new InboundGateway(logger, new GatewayConfig.Builder().build(), reader, new SystemEpochClock());
 
         final GatewayRunners runners = GatewayRunners.marketData(
+                        1,
                         reader.pauseControl,
                         new GnomeAgentRunner(reader, Throwable::printStackTrace),
                         new GnomeAgentRunner(socketWriter, Throwable::printStackTrace),
@@ -822,6 +823,7 @@ public final class KalshiLiveSmoke {
 
             // Wired and closed as DefaultOutboundOrchestrator does: the writer stops first, then the gateway.
             this.gatewayRunners = GatewayRunners.venue(
+                            listing.listingId(),
                             reader.pauseControl,
                             new GnomeAgentRunner(reader, Throwable::printStackTrace),
                             new GnomeAgentRunner(gateway, Throwable::printStackTrace))

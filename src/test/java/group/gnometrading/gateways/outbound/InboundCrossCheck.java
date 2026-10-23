@@ -156,6 +156,7 @@ public final class InboundCrossCheck {
                     venue.reader(logger, ring, nanoClock, writer, venue.listing(id, listingId), ws);
             final InboundGateway gateway = new InboundGateway(logger, venue.config(), reader, new SystemEpochClock());
             this.runners = GatewayRunners.marketData(
+                            id,
                             reader.pauseControl,
                             new GnomeAgentRunner(reader, Throwable::printStackTrace),
                             new GnomeAgentRunner(writer, Throwable::printStackTrace),

@@ -86,6 +86,7 @@ public abstract class DefaultOutboundOrchestrator extends Orchestrator {
         final ErrorHandler errorHandler = new GatewayErrorHandler(
                 logger, "order gateway", gateway::forceReconnect, getInstance(ProcessExit.class));
         final GatewayRunners runners = GatewayRunners.venue(
+                        getInstance(Listing.class).listingId(),
                         reader.pauseControl,
                         new GnomeAgentRunner(reader, errorHandler),
                         new GnomeAgentRunner(gateway, errorHandler))

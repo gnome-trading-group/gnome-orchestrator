@@ -490,6 +490,7 @@ public final class PolymarketUsLiveSmoke {
                     .build();
             final OutboundGateway gateway = new OutboundGateway(logger, this.reader, config, new SystemEpochClock());
             this.gatewayRunners = GatewayRunners.venue(
+                            listing.listingId(),
                             this.reader.pauseControl,
                             new GnomeAgentRunner(this.reader, Throwable::printStackTrace),
                             new GnomeAgentRunner(gateway, Throwable::printStackTrace))
