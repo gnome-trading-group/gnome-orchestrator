@@ -345,6 +345,8 @@ public class TradingOrchestrator extends Orchestrator {
                 ledgerAgent,
                 priceWriterAgent,
                 riskSyncAgent,
+                riskEngine,
+                logger,
                 errorHandler);
         this.heartbeatRunner = startHeartbeat(
                 sessionId, ledgerAgent, ledgerRing, priceBuffer, priceSlotRegistry, riskEngine, errorHandler);
@@ -707,7 +709,18 @@ public class TradingOrchestrator extends Orchestrator {
             LedgerAgent ledgerAgent,
             PriceWriterAgent priceWriterAgent,
             RiskSyncAgent riskSyncAgent,
+            RiskEngine riskEngine,
+            Logger logger,
             ErrorHandler errorHandler) {
+        // Before anything that can send an order or report health: until the first refresh lands, the OMS refuses
+        // every order as stale and the heartbeat reports risk stale, so a strategy started alongside it lost its first
+        // order and a monitoring tick could catch the gap. A registry that never answers still lets the session start,
+        // failing closed like any other stale spell.
+        GnomeAgentRunner riskSyncRunner = new GnomeAgentRunner(riskSyncAgent, errorHandler);
+        GnomeAgentRunner.startOnThread(riskSyncRunner);
+        if (!riskEngine.awaitFirstRefresh()) {
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Starting with stale risk: the first policy refresh didn't succeed");
+        }
         List<GatewayRunners> inboundGateways = new ArrayList<>(inbounds.size());
         for (DefaultInboundOrchestrator<?> inbound : inbounds) {
             inboundGateways.add(inbound.startGatewayAgents());
@@ -739,8 +752,6 @@ public class TradingOrchestrator extends Orchestrator {
             ledgerRunner = new GnomeAgentRunner(ledgerAgent, errorHandler);
             GnomeAgentRunner.startOnThread(ledgerRunner);
         }
-        GnomeAgentRunner riskSyncRunner = new GnomeAgentRunner(riskSyncAgent, errorHandler);
-        GnomeAgentRunner.startOnThread(riskSyncRunner);
         return new AgentRunners(
                 inboundGateways,
                 strategyRunner,
