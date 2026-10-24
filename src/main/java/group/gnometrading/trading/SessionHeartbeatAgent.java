@@ -51,7 +51,18 @@ import org.agrona.concurrent.EpochClock;
 public final class SessionHeartbeatAgent implements GnomeAgent {
 
     private static final GnomeString PATH = new ViewString("/api/strategy-sessions/heartbeat");
-    private static final int BODY_CAPACITY = 16 * 1024;
+    // Long.MIN_VALUE, the longest number a field can hold.
+    private static final int MAX_NUMBER_BYTES = 20;
+    // The sections that don't grow with the session (ledger, risk, host, journal and the top-level keys) are well
+    // under this; the rest is counted per entry below.
+    private static final int FIXED_SECTIONS_BYTES = 2 * 1024;
+    private static final int AGENT_ENTRY_BYTES =
+            "{\"name\":\"\",\"hotPath\":false,\"stalledMs\":,\"exited\":false},".length() + MAX_NUMBER_BYTES;
+    private static final int LISTING_ENTRY_BYTES =
+            "{\"listingId\":,\"priceUnchangedMs\":},".length() + 2 * MAX_NUMBER_BYTES;
+    private static final int GATEWAY_ENTRY_BYTES =
+            "{\"name\":\"\",\"reconnecting\":false,\"resyncsLast5m\":},".length() + MAX_NUMBER_BYTES;
+    private static final int LIMITER_ENTRY_BYTES = "{\"account\":\"\",\"throttling\":false},".length();
     private static final long MAX_PARK_MS = 100;
     private static final int HTTP_OK = 200;
     private static final int HTTP_NOT_FOUND = 404;
@@ -92,7 +103,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private final HostReadings host;
     private final JournalSegmentSealer journal;
 
-    private final ByteBuffer body = ByteBuffer.allocate(BODY_CAPACITY);
+    private final ByteBuffer body;
     private final JsonEncoder json = new JsonEncoder();
 
     private long startedAtMs;
@@ -150,6 +161,36 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         this.limiters = rateLimiters.values().toArray(new VenueRateLimiter[0]);
         this.host = host;
         this.journal = journal;
+        this.body = ByteBuffer.allocate(bodyCapacity(sessionId, agents, gateways, priceSlots, rateLimiters));
+    }
+
+    /**
+     * The most bytes a heartbeat for these parts can take, so the body (and the connection that sends it) can be sized
+     * once up front: every listing, gateway and agent adds an entry, so a fixed size overflows on a large session.
+     */
+    static int bodyCapacity(
+            final String sessionId,
+            final List<GnomeAgentRunner> agents,
+            final List<GatewayRunners> gateways,
+            final PriceSlotRegistry priceSlots,
+            final Map<String, VenueRateLimiter> rateLimiters) {
+        int capacity = FIXED_SECTIONS_BYTES + escapedBytes(sessionId);
+        for (GnomeAgentRunner agent : agents) {
+            capacity += AGENT_ENTRY_BYTES + escapedBytes(agent.getAgent().roleName());
+        }
+        capacity += priceSlots.count() * LISTING_ENTRY_BYTES;
+        for (GatewayRunners gateway : gateways) {
+            capacity += GATEWAY_ENTRY_BYTES + escapedBytes(gateway.name());
+        }
+        for (String account : rateLimiters.keySet()) {
+            capacity += LIMITER_ENTRY_BYTES + escapedBytes(account);
+        }
+        return capacity;
+    }
+
+    // The encoder writes one byte per char, and a quote or backslash takes two.
+    private static int escapedBytes(final String value) {
+        return 2 * value.length();
     }
 
     @Override

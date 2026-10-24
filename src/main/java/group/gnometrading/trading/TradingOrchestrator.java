@@ -23,6 +23,7 @@ import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.HTTPClient;
+import group.gnometrading.networking.http.HTTPClientBuilder;
 import group.gnometrading.networking.http.RetryableHTTPClient;
 import group.gnometrading.oms.OmsAgent;
 import group.gnometrading.oms.OrderManagementSystem;
@@ -118,6 +119,8 @@ public class TradingOrchestrator extends Orchestrator {
     private static final int LEDGER_RESPONSE_TIMEOUT_MS = 2_000;
     private static final long HEARTBEAT_SAMPLE_INTERVAL_MS = 1_000;
     private static final long HEARTBEAT_POST_INTERVAL_MS = 5_000;
+    // The request line and headers sent ahead of the heartbeat's body (host, API key, content type and length).
+    private static final int HEARTBEAT_REQUEST_HEADER_BYTES = 4 * 1024;
     // Sealing is a local unmap, trim and rename; well inside the time systemd gives the process to stop.
     private static final Duration JOURNAL_SEAL_TIMEOUT = Duration.ofSeconds(5);
     // Read by the journal shipper (gnome-orchestrator ami/files/journal-shipper.py) to learn where segments go.
@@ -488,10 +491,13 @@ public class TradingOrchestrator extends Orchestrator {
         for (GatewayRunners gateway : gateways) {
             watched.addAll(gateway.runners());
         }
+        int bodyCapacity =
+                SessionHeartbeatAgent.bodyCapacity(sessionId, watched, gateways, priceSlotRegistry, rateLimiters.all());
         GnomeAgentRunner runner = new GnomeAgentRunner(
                 new SessionHeartbeatAgent(
                         sessionId,
-                        registryWriterConnection(),
+                        registryWriterConnection(registryWriterClient()
+                                .withWriteBufferSize(bodyCapacity + HEARTBEAT_REQUEST_HEADER_BYTES)),
                         SystemEpochClock.INSTANCE,
                         logger,
                         watched,
@@ -518,16 +524,24 @@ public class TradingOrchestrator extends Orchestrator {
      * own retries.
      */
     private RegistryConnection registryWriterConnection() {
+        return registryWriterConnection(registryWriterClient());
+    }
+
+    private RegistryConnection registryWriterConnection(HTTPClientBuilder httpClient) {
         RegistryEndpoint endpoint = getInstance(RegistryEndpoint.class);
         return new RegistryConnection(
                 endpoint.host(),
                 endpoint.apiKey(),
                 RetryableHTTPClient.builder()
                         .withMaxRetries(0)
-                        .withHttpClient(HTTPClient.builder()
-                                .withConnectTimeout(LEDGER_CONNECT_TIMEOUT_MS)
-                                .withResponseTimeout(LEDGER_RESPONSE_TIMEOUT_MS))
+                        .withHttpClient(httpClient)
                         .build());
+    }
+
+    private static HTTPClientBuilder registryWriterClient() {
+        return HTTPClient.builder()
+                .withConnectTimeout(LEDGER_CONNECT_TIMEOUT_MS)
+                .withResponseTimeout(LEDGER_RESPONSE_TIMEOUT_MS);
     }
 
     private void reportRunning(String sessionId, Logger logger) {

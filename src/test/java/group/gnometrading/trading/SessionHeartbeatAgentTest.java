@@ -207,6 +207,39 @@ class SessionHeartbeatAgentTest {
     }
 
     @Test
+    void fitsASessionWithHundredsOfListings() throws Exception {
+        final int listings = 500;
+        prices = new SharedPriceBuffer(listings);
+        slots = new PriceSlotRegistry(listings);
+        final List<GatewayRunners> gateways = new ArrayList<>();
+        final List<GnomeAgentRunner> agents = new ArrayList<>();
+        for (int i = 0; i < listings; i++) {
+            final int listingId = 1_000_000_000 + i;
+            slots.register(listingId);
+            final GatewayRunners gateway = GatewayRunners.marketData(
+                    listingId,
+                    new ReaderPauseControl(),
+                    new GnomeAgentRunner(new Named("PolymarketUsInboundReader"), Throwable::printStackTrace),
+                    new GnomeAgentRunner(new Named("PolymarketUsSocketWriter"), Throwable::printStackTrace),
+                    new GnomeAgentRunner(new Named("PolymarketUsSupervisor"), Throwable::printStackTrace));
+            gateways.add(gateway);
+            agents.addAll(gateway.runners());
+        }
+        final SessionHeartbeatAgent agent = heartbeat(agents, gateways);
+        agent.onStart();
+        // The widest stall and quiet times a field can hold.
+        now[0] = Long.MAX_VALUE;
+        agent.encode(now[0]);
+
+        final JsonNode body = mapper.readTree(agent.lastBody());
+        assertEquals(listings, body.get("listings").size());
+        assertEquals(listings, body.get("gateways").size());
+        assertEquals(3 * listings, body.get("agents").size());
+        assertTrue(agent.lastBody().length()
+                <= SessionHeartbeatAgent.bodyCapacity("s1", agents, gateways, slots, rateLimiters.all()));
+    }
+
+    @Test
     void stopsSendingOnceTheSessionHasEnded() throws Exception {
         final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
         responses.add(409);
