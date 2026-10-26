@@ -10,7 +10,8 @@ import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.ProcessExit;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.schemas.Schema;
+import group.gnometrading.schemas.RecordType;
+import group.gnometrading.schemas.StreamRecord;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.shared.RiskModule;
@@ -22,7 +23,21 @@ import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
-public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orchestrator {
+/**
+ * Runs one venue's market data gateway for a listing. {@code T} and the record type a venue passes in name the same
+ * record: the type is what the gateway publishes, so collectors key what they write by it.
+ */
+public abstract class DefaultInboundOrchestrator<T extends StreamRecord> extends Orchestrator {
+
+    private final RecordType recordType;
+
+    protected DefaultInboundOrchestrator(final RecordType recordType) {
+        this.recordType = recordType;
+    }
+
+    public final RecordType recordType() {
+        return this.recordType;
+    }
 
     @Override
     public final void configure() {
@@ -70,7 +85,10 @@ public abstract class DefaultInboundOrchestrator<T extends Schema> extends Orche
 
     @Provides
     @Singleton
-    public abstract SequencedRingBuffer<T> provideSequencedRingBuffer();
+    @SuppressWarnings("unchecked")
+    public final SequencedRingBuffer<T> provideSequencedRingBuffer() {
+        return new SequencedRingBuffer<>(() -> (T) this.recordType.newInstance(), getInstance(GlobalSequence.class));
+    }
 
     @Provides
     @Singleton

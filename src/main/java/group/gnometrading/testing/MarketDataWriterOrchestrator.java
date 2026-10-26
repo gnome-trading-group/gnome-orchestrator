@@ -11,11 +11,12 @@ import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Stream;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSocketFactory;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.sequencer.SchemaEventAdapter;
 import group.gnometrading.sequencer.SequencedPoller;
+import group.gnometrading.sequencer.StreamRecordEventAdapter;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
@@ -53,6 +54,11 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
     @Provides
     public final Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
         return securityMaster.getListing(listingId);
+    }
+
+    @Provides
+    public final Stream provideStream(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
+        return securityMaster.streamForListing(listingId);
     }
 
     @Provides
@@ -109,7 +115,7 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
                 DefaultInboundOrchestrator.findInboundOrchestrator(listing);
         final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
         final SequencedPoller poller =
-                orchestrator.getSequencedRingBuffer().createPoller(new SchemaEventAdapter(writer));
+                orchestrator.getSequencedRingBuffer().createPoller(new StreamRecordEventAdapter(writer));
         GnomeAgentRunner.startOnThread(
                 new GnomeAgentRunner(new MarketDataCollectorAgent(List.of(poller)), getInstance(ErrorHandler.class)));
         orchestrator.startGatewayAgents();

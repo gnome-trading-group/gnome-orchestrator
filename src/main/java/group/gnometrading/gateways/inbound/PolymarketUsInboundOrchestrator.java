@@ -9,13 +9,14 @@ import group.gnometrading.gateways.credentials.PolymarketUsCredentials;
 import group.gnometrading.gateways.inbound.exchanges.polymarket.us.PolymarketUsInboundReader;
 import group.gnometrading.gateways.outbound.exchanges.polymarket.us.PolymarketUsAuthSigner;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Stream;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.sequencer.GlobalSequence;
+import group.gnometrading.schemas.RecordType;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Listing;
 import java.io.IOException;
@@ -30,6 +31,10 @@ public class PolymarketUsInboundOrchestrator extends DefaultInboundOrchestrator<
 
     static {
         instanceClass = PolymarketUsInboundOrchestrator.class;
+    }
+
+    public PolymarketUsInboundOrchestrator() {
+        super(RecordType.MBP_10);
     }
 
     @Provides
@@ -60,14 +65,6 @@ public class PolymarketUsInboundOrchestrator extends DefaultInboundOrchestrator<
         return new InboundJsonWebSocketWriter(webSocketClient, new JsonEncoder());
     }
 
-    @Override
-    @Provides
-    @Singleton
-    @SuppressWarnings("unchecked")
-    public final SequencedRingBuffer<Mbp10Schema> provideSequencedRingBuffer() {
-        return new SequencedRingBuffer<>(Mbp10Schema::new, getInstance(GlobalSequence.class));
-    }
-
     @Provides
     @Singleton
     public final PolymarketUsCredentials providePolymarketUsCredentials(
@@ -93,6 +90,7 @@ public class PolymarketUsInboundOrchestrator extends DefaultInboundOrchestrator<
                     getInstance(EpochNanoClock.class),
                     getInstance(InboundSocketWriter.class),
                     getInstance(Listing.class),
+                    getInstance(Stream.class).streamId(),
                     getInstance(WebSocketClient.class),
                     new JsonDecoder(),
                     new PolymarketUsAuthSigner(credentials.apiKey(), credentials.privateKey()));

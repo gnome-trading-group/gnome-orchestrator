@@ -1,5 +1,6 @@
 package group.gnometrading.gateways.inbound;
 
+import group.gnometrading.SecurityMaster;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
@@ -7,17 +8,17 @@ import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Stream;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketResponse;
 import group.gnometrading.networking.websockets.drafts.RFC6455;
 import group.gnometrading.networking.websockets.enums.Opcode;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.schemas.Action;
-import group.gnometrading.schemas.Mbp10Encoder;
 import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.schemas.Statics;
+import group.gnometrading.schemas.book.Action;
+import group.gnometrading.schemas.book.Mbp10Encoder;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
@@ -97,7 +98,7 @@ public final class InboundLiveCheck {
             this.securityId = securityId;
             final Listing listing = new Listing(
                     id,
-                    new Exchange(id, exchangeCode, exchangeCode, "global", SchemaType.MBP_10),
+                    new Exchange(id, exchangeCode, exchangeCode, "global"),
                     new Security(id, securityId, null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                     securityId,
                     securityId);
@@ -139,7 +140,7 @@ public final class InboundLiveCheck {
                 return;
             }
             this.books++;
-            if (schema.decoder.flags().maybeBadBook()) {
+            if (schema.decoder.flags().badData()) {
                 this.suspectBooks++;
             } else if (this.suspectBooks > 0) {
                 this.booksAfterSuspect++;
@@ -204,10 +205,12 @@ public final class InboundLiveCheck {
         public void configure() {}
 
         DefaultInboundOrchestrator<?> child(final Listing listing) {
+            final Stream stream = getInstance(SecurityMaster.class).streamForListing(listing.listingId());
             final Integer dropAt = Integer.getInteger("drop");
             if (dropAt == null) {
                 return createChildOrchestrator(
-                        DefaultInboundOrchestrator.findInboundOrchestrator(listing), Map.of(Listing.class, listing));
+                        DefaultInboundOrchestrator.findInboundOrchestrator(listing),
+                        Map.of(Listing.class, listing, Stream.class, stream));
             }
             // -Ddrop=N: the feed's Nth message after connecting never reaches the reader, as if the venue had lost it,
             // to see the whole gap path (flagged book, reconnect, fresh snapshot) against the live feed.
@@ -216,7 +219,13 @@ public final class InboundLiveCheck {
                 final URI uri = new URI(getInstance(Properties.class).getStringProperty(property));
                 return createChildOrchestrator(
                         DefaultInboundOrchestrator.findInboundOrchestrator(listing),
-                        Map.of(Listing.class, listing, WebSocketClient.class, new DroppingClient(uri, dropAt)));
+                        Map.of(
+                                Listing.class,
+                                listing,
+                                Stream.class,
+                                stream,
+                                WebSocketClient.class,
+                                new DroppingClient(uri, dropAt)));
             } catch (final IOException | URISyntaxException e) {
                 throw new IllegalStateException(e);
             }

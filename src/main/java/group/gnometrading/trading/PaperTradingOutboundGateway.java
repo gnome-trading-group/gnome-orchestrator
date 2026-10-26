@@ -6,7 +6,6 @@ import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.CancelOrderEncoder;
-import group.gnometrading.schemas.Mbp10Decoder;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.MessageHeaderEncoder;
 import group.gnometrading.schemas.ModifyOrder;
@@ -17,6 +16,7 @@ import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderEncoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportEncoder;
+import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.simulation.exchange.SimulatedExchange;
@@ -181,7 +181,7 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
             writeExchangeOrderId(report);
             final PendingReport slot = pendingReports.offer();
             slot.buffer.putBytes(0, report.buffer, 0, EXEC_REPORT_SIZE);
-            slot.templateId = report.messageHeaderDecoder.templateId();
+            slot.templateId = report.templateId();
             slot.deliveryNano = deliveryNano;
         }
     }

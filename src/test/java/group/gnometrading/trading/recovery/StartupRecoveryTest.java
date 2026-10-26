@@ -20,7 +20,6 @@ import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
@@ -47,7 +46,7 @@ class StartupRecoveryTest {
     private static final String BY_ID = "/api/ledger/orders?mode=live&status=ANY&exchangeOrderIds=";
     private static final Listing LISTING = new Listing(
             501,
-            new Exchange(2, "KALSHI", "Kalshi", "global", SchemaType.MBP_10),
+            new Exchange(2, "KALSHI", "Kalshi", "global"),
             new Security(3, "KXT", null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
             "KXT-26:yes",
             "KXT");

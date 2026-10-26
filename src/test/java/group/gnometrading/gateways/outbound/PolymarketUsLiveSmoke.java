@@ -32,7 +32,6 @@ import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderType;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
@@ -732,7 +731,7 @@ public final class PolymarketUsLiveSmoke {
     private static Listing listing(final String exchangeSecurityId) {
         return new Listing(
                 1,
-                new Exchange(2, "POLYMARKET_US", "Polymarket US", "us", SchemaType.MBP_10),
+                new Exchange(2, "POLYMARKET_US", "Polymarket US", "us"),
                 new Security(3, exchangeSecurityId, null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 exchangeSecurityId,
                 exchangeSecurityId);

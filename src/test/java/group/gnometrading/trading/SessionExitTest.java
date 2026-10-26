@@ -219,7 +219,7 @@ class SessionExitTest {
     private static Listing listing(int listingId, String exchangeCode, String symbol) {
         return new Listing(
                 listingId,
-                new Exchange(1, exchangeCode, exchangeCode, "us-east-1", null),
+                new Exchange(1, exchangeCode, exchangeCode, "us-east-1"),
                 new Security(1, symbol, null, null, null, "USD", "USD", "USD", false, false, 0, 0, true, 0),
                 symbol,
                 symbol);

@@ -22,6 +22,8 @@ import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Stream;
+import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.http.HTTPClientBuilder;
 import group.gnometrading.networking.http.RetryableHTTPClient;
@@ -211,6 +213,7 @@ public class TradingOrchestrator extends Orchestrator {
         SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         int strategyId = properties.getIntProperty("strategy.id");
         List<Listing> listings = resolveListings(properties, securityMaster);
+        StreamDirectory streams = sessionStreams(securityMaster, listings);
         ListingDirectory listingDirectory = RiskModule.directory(listings);
         RiskEngine riskEngine = RiskModule.riskEngine(properties, listingDirectory);
         AgentRuntimeInstaller.install(properties, logger, listings.size());
@@ -222,10 +225,7 @@ public class TradingOrchestrator extends Orchestrator {
         Map<SequencedRingBuffer<?>, JournalSource> journalSources = new IdentityHashMap<>();
 
         List<DefaultInboundOrchestrator<?>> inbounds = createInbounds(listings, sessionSequence);
-        List<SequencedRingBuffer<?>> perListingMdBuffers = new ArrayList<>(listings.size());
-        for (DefaultInboundOrchestrator<?> inbound : inbounds) {
-            perListingMdBuffers.add(inbound.getSequencedRingBuffer());
-        }
+        List<SequencedRingBuffer<?>> perListingMdBuffers = marketDataBuffers(inbounds);
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(sharedBuffer);
         String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
@@ -278,7 +278,7 @@ public class TradingOrchestrator extends Orchestrator {
         journalSources.put(strategyMdBuffer, JournalSource.STRATEGY_MARKET_DATA);
 
         PriceWriterAgent priceWriterAgent =
-                new PriceWriterAgent(priceBuffer, priceSlotRegistry, securityMaster, strategyMdBuffer);
+                new PriceWriterAgent(priceBuffer, priceSlotRegistry, streams, strategyMdBuffer);
 
         SequencedRingBuffer<Intent> orderOutboundBuffer =
                 new SequencedRingBuffer<>(Intent::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
@@ -309,6 +309,7 @@ public class TradingOrchestrator extends Orchestrator {
                 getInstance(EpochNanoClock.class));
         StrategyAgent strategy = createStrategyAgent(
                 strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
+        strategy.configureStreams(streams);
         strategy.configureExit(listings, sessionExit(logger, properties, strategyId, listings));
         // The journal is already draining this buffer, so declaring streams here can't wait on a full ring.
         strategy.configureMetrics(new JournaledMetricRecorder(strategyMetricBuffer));
@@ -600,12 +601,36 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
+    /** The book streams of the session's listings, which its market data names. */
+    private static StreamDirectory sessionStreams(SecurityMaster securityMaster, List<Listing> listings) {
+        return StreamDirectory.of(
+                securityMaster, listings.stream().mapToInt(Listing::listingId).toArray(), new int[0]);
+    }
+
+    private static List<SequencedRingBuffer<?>> marketDataBuffers(List<DefaultInboundOrchestrator<?>> inbounds) {
+        List<SequencedRingBuffer<?>> buffers = new ArrayList<>(inbounds.size());
+        for (DefaultInboundOrchestrator<?> inbound : inbounds) {
+            buffers.add(inbound.getSequencedRingBuffer());
+        }
+        return buffers;
+    }
+
+    /** The listing's book stream: every record its gateway writes is keyed by it. */
+    private Stream bookStream(Listing listing) {
+        Stream stream = getInstance(SecurityMaster.class).streamForListing(listing.listingId());
+        if (stream == null) {
+            throw new IllegalStateException("Listing " + listing.listingId() + " has no book stream");
+        }
+        return stream;
+    }
+
     /** A lone listing's market data is what the strategy reads, so it goes straight onto the session sequence. */
     private List<DefaultInboundOrchestrator<?>> createInbounds(List<Listing> listings, GlobalSequence sessionSequence) {
         List<DefaultInboundOrchestrator<?>> inbounds = new ArrayList<>(listings.size());
         for (Listing listing : listings) {
             Map<Class<?>, Object> inboundOverrides = new HashMap<>();
             inboundOverrides.put(Listing.class, listing);
+            inboundOverrides.put(Stream.class, bookStream(listing));
             if (fatalHandler != null) {
                 inboundOverrides.put(ProcessExit.class, fatalHandler);
             }

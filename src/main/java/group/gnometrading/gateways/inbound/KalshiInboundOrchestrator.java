@@ -8,13 +8,14 @@ import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.credentials.KalshiCredentials;
 import group.gnometrading.gateways.inbound.exchanges.kalshi.KalshiInboundReader;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Stream;
 import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.sequencer.GlobalSequence;
+import group.gnometrading.schemas.RecordType;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Listing;
 import java.io.IOException;
@@ -28,6 +29,10 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
 
     static {
         instanceClass = KalshiInboundOrchestrator.class;
+    }
+
+    public KalshiInboundOrchestrator() {
+        super(RecordType.MBP_10);
     }
 
     @Provides
@@ -58,14 +63,6 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
         return new InboundJsonWebSocketWriter(webSocketClient, new JsonEncoder());
     }
 
-    @Override
-    @Provides
-    @Singleton
-    @SuppressWarnings("unchecked")
-    public final SequencedRingBuffer<Mbp10Schema> provideSequencedRingBuffer() {
-        return new SequencedRingBuffer<>(Mbp10Schema::new, getInstance(GlobalSequence.class));
-    }
-
     @Provides
     @Singleton
     public final KalshiCredentials provideKalshiCredentials(SecretsManagerClient secretsManager, Listing listing) {
@@ -89,6 +86,7 @@ public class KalshiInboundOrchestrator extends DefaultInboundOrchestrator<Mbp10S
                 getInstance(EpochNanoClock.class),
                 getInstance(InboundSocketWriter.class),
                 getInstance(Listing.class),
+                getInstance(Stream.class).streamId(),
                 getInstance(WebSocketClient.class),
                 new JsonDecoder(),
                 credentials.apiKey(),

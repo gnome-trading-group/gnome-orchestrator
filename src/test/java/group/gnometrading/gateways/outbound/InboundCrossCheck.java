@@ -21,10 +21,9 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
-import group.gnometrading.schemas.Mbp10Decoder;
 import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.schemas.Statics;
+import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
@@ -319,6 +318,7 @@ public final class InboundCrossCheck {
                     clock,
                     writer,
                     listing,
+                    77,
                     ws,
                     new JsonDecoder(),
                     this.creds.apiKey(),
@@ -376,7 +376,7 @@ public final class InboundCrossCheck {
         public Listing listing(final int id, final String exchangeSecurityId) {
             return new Listing(
                     id,
-                    new Exchange(6, "POLYMARKET_US", "Polymarket US", "us", SchemaType.MBP_10),
+                    new Exchange(6, "POLYMARKET_US", "Polymarket US", "us"),
                     new Security(
                             3, exchangeSecurityId, null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                     exchangeSecurityId,
@@ -398,6 +398,7 @@ public final class InboundCrossCheck {
                     clock,
                     writer,
                     listing,
+                    77,
                     ws,
                     new JsonDecoder(),
                     new PolymarketUsAuthSigner(this.creds.apiKey(), this.creds.privateKey()));

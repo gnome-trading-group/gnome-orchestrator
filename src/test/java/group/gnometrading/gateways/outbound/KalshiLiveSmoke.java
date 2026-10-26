@@ -39,7 +39,6 @@ import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderExecutionReportEncoder;
 import group.gnometrading.schemas.OrderType;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
@@ -228,6 +227,7 @@ public final class KalshiLiveSmoke {
                 nanoClock,
                 socketWriter,
                 listing(1, ticker + ":yes"),
+                77,
                 ws,
                 new JsonDecoder(),
                 creds.apiKey(),
@@ -1254,7 +1254,7 @@ public final class KalshiLiveSmoke {
     static Listing listing(final int listingId, final String exchangeSecurityId) {
         return new Listing(
                 listingId,
-                new Exchange(2, "KALSHI", "Kalshi", "global", SchemaType.MBP_10),
+                new Exchange(2, "KALSHI", "Kalshi", "global"),
                 new Security(3, exchangeSecurityId, null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 exchangeSecurityId,
                 exchangeSecurityId);

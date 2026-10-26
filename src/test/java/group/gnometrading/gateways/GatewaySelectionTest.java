@@ -12,7 +12,6 @@ import group.gnometrading.gateways.inbound.PolymarketUsInboundOrchestrator;
 import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.KalshiOutboundOrchestrator;
 import group.gnometrading.gateways.outbound.PolymarketIntlOutboundOrchestrator;
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import org.junit.jupiter.api.Test;
@@ -20,7 +19,7 @@ import org.junit.jupiter.api.Test;
 class GatewaySelectionTest {
 
     private static Listing listingOn(final String exchangeCode, final String exchangeName) {
-        return new Listing(1, new Exchange(1, exchangeCode, exchangeName, "global", SchemaType.MBP_10), null, "x", "x");
+        return new Listing(1, new Exchange(1, exchangeCode, exchangeName, "global"), null, "x", "x");
     }
 
     @Test

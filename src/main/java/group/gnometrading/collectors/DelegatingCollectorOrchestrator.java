@@ -16,9 +16,10 @@ import group.gnometrading.health.HealthCheckServer;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Stream;
 import group.gnometrading.resources.Properties;
-import group.gnometrading.sequencer.SchemaEventAdapter;
 import group.gnometrading.sequencer.SequencedPoller;
+import group.gnometrading.sequencer.StreamRecordEventAdapter;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.SecurityMasterModule;
 import group.gnometrading.sm.Listing;
@@ -115,26 +116,30 @@ public class DelegatingCollectorOrchestrator extends Orchestrator {
             final Listing listing = securityMaster.getListing(listingIds[i]);
             final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
                     DefaultInboundOrchestrator.findInboundOrchestrator(listing);
+            final Stream stream = securityMaster.streamForListing(listing.listingId());
+            if (stream == null) {
+                throw new IllegalStateException("Listing " + listing.listingId() + " has no book stream");
+            }
             final DefaultInboundOrchestrator<?> orchestrator =
-                    createChildOrchestrator(orchestratorClass, Map.of(Listing.class, listing));
+                    createChildOrchestrator(orchestratorClass, Map.of(Listing.class, listing, Stream.class, stream));
 
             final RawDataCollector rawCollector =
-                    new RawDataCollector(logger, clock, uploader, listing, rawCaptureBucket);
+                    new RawDataCollector(logger, clock, uploader, stream.streamId(), rawCaptureBucket);
             orchestrator.setRawDataSink(rawCollector::capture);
 
-            final MarketDataCollector collector =
-                    new MarketDataCollector(logger, clock, uploader, listing, outputBucket);
+            final MarketDataCollector collector = new MarketDataCollector(
+                    logger, clock, uploader, stream.streamId(), orchestrator.recordType(), outputBucket);
             collectors[i] = collector;
             // Created before the gateway starts: a poller only sees what is published after it exists.
-            pollers.add(orchestrator.getSequencedRingBuffer().createPoller(new SchemaEventAdapter(collector)));
+            pollers.add(orchestrator.getSequencedRingBuffer().createPoller(new StreamRecordEventAdapter(collector)));
             inbounds.add(orchestrator);
 
             logger.logf(
                     LogMessage.DEBUG,
-                    "Configured listing %s on exchange %s with schema %s on class %s",
+                    "Configured listing %s on exchange %s as stream %d on class %s",
                     listing.security().symbol(),
                     listing.exchange().exchangeName(),
-                    listing.exchange().schemaType(),
+                    stream.streamId(),
                     orchestratorClass.getSimpleName());
         }
 

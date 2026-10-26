@@ -2,16 +2,16 @@ package group.gnometrading.trading;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import group.gnometrading.schemas.Action;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
-import group.gnometrading.schemas.Mbp10Decoder;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
+import group.gnometrading.schemas.book.Action;
+import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
@@ -131,7 +131,7 @@ class PaperTradingOutboundGatewayTest {
         reports.clear();
 
         long tradeTime = now;
-        publishTrade(Side.Ask, 50, 20);
+        publishTrade(group.gnometrading.schemas.book.Side.Ask, 50, 20);
         stepTo(tradeTime + NETWORK);
 
         assertEquals(1, reports.size());
@@ -146,7 +146,7 @@ class PaperTradingOutboundGatewayTest {
         reports.clear();
 
         long tradeTime = now;
-        publishTrade(Side.Ask, 50, 5);
+        publishTrade(group.gnometrading.schemas.book.Side.Ask, 50, 5);
         stepTo(tradeTime + NETWORK - 1);
         assertEquals(0, reports.size());
         stepTo(tradeTime + NETWORK);
@@ -201,14 +201,14 @@ class PaperTradingOutboundGatewayTest {
                 .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
         order.encoder.flags().clear();
         order.encodeClientOid(clientOid, 0);
-        orderBuffer.publishRaw(order.buffer, order.messageHeaderDecoder.templateId(), order.totalMessageSize());
+        orderBuffer.publishRaw(order.buffer, order.templateId(), order.totalMessageSize());
     }
 
     private void publishCancel(long clientOid) {
         CancelOrder cancel = new CancelOrder();
         cancel.encoder.exchangeId((short) 1).securityId(1);
         cancel.encodeClientOid(clientOid, 0);
-        orderBuffer.publishRaw(cancel.buffer, cancel.messageHeaderDecoder.templateId(), cancel.totalMessageSize());
+        orderBuffer.publishRaw(cancel.buffer, cancel.templateId(), cancel.totalMessageSize());
     }
 
     private void publishBook(long bidPx, long bidSz, long askPx, long askSz) {
@@ -217,20 +217,23 @@ class PaperTradingOutboundGatewayTest {
         publishMarketData(schema);
     }
 
-    private void publishTrade(Side aggressor, long price, long size) {
+    private void publishTrade(group.gnometrading.schemas.book.Side aggressor, long price, long size) {
         Mbp10Schema schema = emptyMbp10(Action.Trade);
         schema.encoder.side(aggressor).price(price).size(size);
         publishMarketData(schema);
     }
 
     private void publishMarketData(Mbp10Schema schema) {
-        marketDataBuffer.publishRaw(schema.buffer, schema.messageHeaderDecoder.templateId(), schema.totalMessageSize());
+        marketDataBuffer.publishRaw(schema.buffer, schema.templateId(), schema.totalMessageSize());
     }
 
     private static Mbp10Schema emptyMbp10(Action action) {
         Mbp10Schema schema = new Mbp10Schema();
         var e = schema.encoder;
-        e.action(action).side(Side.None).price(PRICE_NULL).size(SIZE_NULL);
+        e.action(action)
+                .side(group.gnometrading.schemas.book.Side.None)
+                .price(PRICE_NULL)
+                .size(SIZE_NULL);
         e.bidPrice0(PRICE_NULL).bidSize0(SIZE_NULL).askPrice0(PRICE_NULL).askSize0(SIZE_NULL);
         e.bidPrice1(PRICE_NULL).bidSize1(SIZE_NULL).askPrice1(PRICE_NULL).askSize1(SIZE_NULL);
         e.bidPrice2(PRICE_NULL).bidSize2(SIZE_NULL).askPrice2(PRICE_NULL).askSize2(SIZE_NULL);
