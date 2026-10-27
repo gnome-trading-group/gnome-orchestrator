@@ -81,6 +81,7 @@ public final class FeedVenues {
                         final PolymarketUsCredentials credentials = PolymarketUsCredentials.fromJson(
                                 context.secrets().get("gnome/market-data/polymarket-us"));
                         return new PolymarketUsProtocol(
+                                context.logger(),
                                 table,
                                 new PolymarketUsAuthSigner(credentials.apiKey(), credentials.privateKey()),
                                 context.clock());

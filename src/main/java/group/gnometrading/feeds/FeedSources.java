@@ -14,6 +14,9 @@ import java.util.function.Function;
  */
 public final class FeedSources {
 
+    // A whole response has to fit: Lighter answers a probe with up to 250 resting orders, well over the 32 KB default.
+    static final int PROBE_READ_BUFFER_BYTES = 1 << 20;
+
     private final Feeds feeds;
     private final FeedVenues.Context context;
     private final boolean spinReads;
@@ -58,7 +61,14 @@ public final class FeedSources {
                         source.code(),
                         venue.feed().subjects(),
                         venue.feed().levelsPerSide(),
-                        venue.probes() == null ? null : venue.probes().create(new HTTPClient(), context.properties()),
+                        venue.probes() == null
+                                ? null
+                                : venue.probes()
+                                        .create(
+                                                HTTPClient.builder()
+                                                        .withReadBufferSize(PROBE_READ_BUFFER_BYTES)
+                                                        .build(),
+                                                context.properties()),
                         // Its own budget: probes use the venue's REST limits, not its socket's.
                         RateBudget.named(source.code() + ":probe", venue.feed().probesPerMinute())),
                 source.maxPerConnection(),
