@@ -13,6 +13,7 @@ import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.feeds.FeedVenues;
+import group.gnometrading.feeds.MarketDataCredentials;
 import group.gnometrading.feeds.WebSocketFeedOpener;
 import group.gnometrading.gateways.GatewayHealth;
 import group.gnometrading.gateways.GatewayRunners;
@@ -622,7 +623,8 @@ public class TradingOrchestrator extends Orchestrator {
         return new SessionFeeds(
                 logger,
                 securityMaster,
-                new FeedVenues.Context(logger, properties, getInstance(SecretCache.class), clock),
+                new FeedVenues.Context(
+                        logger, properties, getInstance(SecretCache.class), MarketDataCredentials.SESSION, clock),
                 listings,
                 listings.size() == 1 ? sessionSequence : null,
                 AgentRuntimeInstaller.pinsHotAgents(properties),

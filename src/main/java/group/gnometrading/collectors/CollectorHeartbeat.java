@@ -34,7 +34,8 @@ final class CollectorHeartbeat implements Runnable {
     static final String FAILED = "FAILED";
 
     /** A connection as the heartbeat reports it. */
-    record Connection(String name, String source, int markets, boolean reconnecting) {}
+    /** @param account the market-data account it signs in with; null for a public feed */
+    record Connection(String name, String source, String account, int markets, boolean reconnecting) {}
 
     /** What the heartbeat reads from the shard. */
     interface Shard {
@@ -137,13 +138,7 @@ final class CollectorHeartbeat implements Runnable {
             if (connection.reconnecting()) {
                 reconnecting++;
             }
-            final Map<String, Object> line = new LinkedHashMap<>();
-            line.put("kind", "connection");
-            line.put("name", connection.name());
-            line.put("source", connection.source());
-            line.put("markets", connection.markets());
-            line.put("reconnecting", connection.reconnecting());
-            connectionLines.add(mapper.writeValueAsString(line));
+            connectionLines.add(mapper.writeValueAsString(connectionLine(connection)));
         }
 
         final Map<String, Object> process = new LinkedHashMap<>();
@@ -201,5 +196,18 @@ final class CollectorHeartbeat implements Runnable {
 
     private static long megabytes(final long bytes) {
         return bytes == HostReadings.UNAVAILABLE ? HostReadings.UNAVAILABLE : bytes / MB;
+    }
+
+    private static Map<String, Object> connectionLine(final Connection connection) {
+        final Map<String, Object> line = new LinkedHashMap<>();
+        line.put("kind", "connection");
+        line.put("name", connection.name());
+        line.put("source", connection.source());
+        if (connection.account() != null) {
+            line.put("account", connection.account());
+        }
+        line.put("markets", connection.markets());
+        line.put("reconnecting", connection.reconnecting());
+        return line;
     }
 }

@@ -43,11 +43,17 @@ class WebSocketFeedOpenerTest {
         WebSocketFeedOpener opener = new WebSocketFeedOpener(
                 new FeedVenues.Venue(
                         HyperliquidVenue.FEED,
+                        false,
                         (context, table, channel) -> {
                             throw new IllegalStateException("no credentials");
                         },
                         null),
-                new FeedVenues.Context(new NullLogger(), new Properties("orchestrator.dev.properties"), null, () -> 0),
+                new FeedVenues.Context(
+                        new NullLogger(),
+                        new Properties("orchestrator.dev.properties"),
+                        null,
+                        MarketDataCredentials.SESSION,
+                        () -> 0),
                 ConnectLimiter.UNLIMITED,
                 RateBudget.UNLIMITED,
                 false,

@@ -19,7 +19,12 @@ class FeedSourcesTest {
     FeedSourcesTest() throws Exception {
         sources = new FeedSources(
                 feeds,
-                new FeedVenues.Context(new NullLogger(), new Properties("orchestrator.dev.properties"), null, () -> 0),
+                new FeedVenues.Context(
+                        new NullLogger(),
+                        new Properties("orchestrator.dev.properties"),
+                        null,
+                        MarketDataCredentials.SESSION,
+                        () -> 0),
                 false,
                 (status, cause) -> {},
                 source -> WebSocketFeedOpener.RawCaptures.NONE,

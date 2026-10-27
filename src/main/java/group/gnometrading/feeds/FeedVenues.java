@@ -38,8 +38,16 @@ import org.agrona.concurrent.SystemEpochClock;
  */
 public final class FeedVenues {
 
-    /** What a source's connections and probe are built from. */
-    public record Context(Logger logger, Properties properties, SecretCache secrets, EpochNanoClock clock) {}
+    /**
+     * What a source's connections and probe are built from. {@code credentials} names the secret a signed source's
+     * connections sign in with: a shard's bound market-data account, or a session's per-exchange key.
+     */
+    public record Context(
+            Logger logger,
+            Properties properties,
+            SecretCache secrets,
+            MarketDataCredentials credentials,
+            EpochNanoClock clock) {}
 
     /** The protocol for one new connection, speaking on its channel and finding markets in its table. */
     @FunctionalInterface
@@ -54,32 +62,40 @@ public final class FeedVenues {
         BookProbeClient create(HTTPClient http, Properties properties);
     }
 
-    /** @param probes reads the source's REST book; null for a source that sends whole books, which isn't probed */
-    public record Venue(VenueFeed feed, Protocols protocols, Probes probes) {}
+    /**
+     * @param signed whether its connections sign in with a market-data key, so a shard spends one of the source's
+     *     accounts on them; public feeds need none
+     * @param probes reads the source's REST book; null for a source that sends whole books, which isn't probed
+     */
+    public record Venue(VenueFeed feed, boolean signed, Protocols protocols, Probes probes) {}
 
     private static final Map<String, Venue> VENUES = Map.of(
             "HYPERLIQUID",
             new Venue(
                     HyperliquidVenue.FEED,
+                    false,
                     (context, table, channel) -> new HyperliquidProtocol(table, SystemEpochClock.INSTANCE),
                     null),
             "LIGHTER",
             new Venue(
                     LighterVenue.FEED,
+                    false,
                     (context, table, channel) -> new LighterProtocol(table, channel),
                     (http, properties) -> new LighterBookProbe(http, hostOf(properties, "lighter.ws.url"))),
             "POLYMARKET_INTL",
             new Venue(
                     PolymarketIntlVenue.FEED,
+                    false,
                     (context, table, channel) -> new PolymarketIntlProtocol(table),
                     (http, properties) ->
                             new PolymarketIntlBookProbe(http, hostOf(properties, "polymarket.intl.clob.url"))),
             "POLYMARKET_US",
             new Venue(
                     PolymarketUsVenue.FEED,
+                    true,
                     (context, table, channel) -> {
                         final PolymarketUsCredentials credentials = PolymarketUsCredentials.fromJson(
-                                context.secrets().get("gnome/market-data/polymarket-us"));
+                                context.secrets().get(context.credentials().secretFor("POLYMARKET_US")));
                         return new PolymarketUsProtocol(
                                 context.logger(),
                                 table,
@@ -90,9 +106,10 @@ public final class FeedVenues {
             "KALSHI",
             new Venue(
                     KalshiVenue.FEED,
+                    true,
                     (context, table, channel) -> {
-                        final KalshiCredentials credentials =
-                                KalshiCredentials.fromJson(context.secrets().get("gnome/market-data/kalshi"));
+                        final KalshiCredentials credentials = KalshiCredentials.fromJson(
+                                context.secrets().get(context.credentials().secretFor("KALSHI")));
                         return new KalshiProtocol(
                                 context.logger(),
                                 table,

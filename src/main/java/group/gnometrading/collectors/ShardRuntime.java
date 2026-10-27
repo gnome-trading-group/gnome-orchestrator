@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * What a shard reads, kept in step with its {@link Assignment}: every {@link #ASSIGNMENT_POLL_NANOS} the assigned
@@ -49,6 +50,8 @@ final class ShardRuntime {
     private final Feeds feeds;
     private final Consumer<Source> sources;
     private final MarketDataCollectorAgent agent;
+    // A source's market-data account label, for the heartbeat; null for a public feed.
+    private final Function<String, String> accountOf;
     private final StreamFactory factory;
     private final Map<Integer, ShardStream> running = new HashMap<>();
     private final Map<Integer, Long> retryAt = new HashMap<>();
@@ -68,7 +71,8 @@ final class ShardRuntime {
             final Feeds feeds,
             final Consumer<Source> sources,
             final MarketDataCollectorAgent agent,
-            final StreamFactory factory) {
+            final StreamFactory factory,
+            final Function<String, String> accountOf) {
         this.logger = logger;
         this.securityMaster = securityMaster;
         this.assignment = assignment;
@@ -76,6 +80,7 @@ final class ShardRuntime {
         this.sources = sources;
         this.agent = agent;
         this.factory = factory;
+        this.accountOf = accountOf;
     }
 
     /** The streams running, for the heartbeat's thread. */
@@ -219,6 +224,7 @@ final class ShardRuntime {
                 connections.add(new CollectorHeartbeat.Connection(
                         connection.name(),
                         group.source(),
+                        accountOf.apply(group.source()),
                         connection.size(),
                         connection.pauseControl().isPauseRequested()));
             }

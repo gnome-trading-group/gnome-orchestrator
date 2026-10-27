@@ -165,7 +165,8 @@ class ShardRuntimeTest {
                     });
                 }
                 return kit.stream(streamId);
-            });
+            },
+            source -> null);
 
     ShardRuntimeTest() {
         when(securityMaster.getSource(1))

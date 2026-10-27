@@ -110,6 +110,11 @@ earlier sessions). A session already stopped before startup exits 0 without repo
   replaces the task. A failing market is quarantined and retried, a failing connection keeps retrying; neither stops
   the process. Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`. No
   registry heartbeat: state is in `HEARTBEAT` log lines every 15 s (process, connection, stream).
+- Market-data credentials: a shard signs Kalshi and Polymarket US in with the source's market-data account it is bound
+  to by label (`SOURCE_ACCOUNTS`, JSON like `{"KALSHI":"md-2"}`; `md-1` when unnamed), looked up in the registry's
+  `md.source_account` as each connection opens; its key is `gnome/market-data/<source>/<label>`. A missing or retired
+  account fails only that source's markets on the shard ("No market-data account md-1 for KALSHI"), retried like any
+  failed start; each connection's heartbeat line names its account. Sessions still use `gnome/market-data/<exchange>`.
 
 **Logs.** Sessions: log group `/gnome/orchestrator/<region>`, stream `ec2/<instanceId>` (orchestrator) and
 `ec2/<instanceId>/journal-shipper`; retention 1 month. On-box: `/var/log/gnome/orchestrator.log`. The last lines

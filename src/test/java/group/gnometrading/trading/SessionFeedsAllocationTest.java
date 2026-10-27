@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.feeds.FeedVenues;
+import group.gnometrading.feeds.MarketDataCredentials;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.md.Source;
 import group.gnometrading.md.SourceKind;
@@ -167,7 +168,11 @@ class SessionFeedsAllocationTest {
                 new NullLogger(),
                 securityMaster,
                 new FeedVenues.Context(
-                        new NullLogger(), new Properties("orchestrator.dev.properties"), null, System::nanoTime),
+                        new NullLogger(),
+                        new Properties("orchestrator.dev.properties"),
+                        null,
+                        MarketDataCredentials.SESSION,
+                        System::nanoTime),
                 List.of(listing(1, "C0"), listing(2, "C1")),
                 null,
                 false,

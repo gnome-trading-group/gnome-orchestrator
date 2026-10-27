@@ -81,6 +81,7 @@ public final class FeedLiveCheck {
                         logger,
                         session.get(Properties.class),
                         session.get(SecretCache.class),
+                        MarketDataCredentials.SESSION,
                         new SystemEpochNanoClock()),
                 false,
                 (status, cause) -> System.out.println("#### gave up on a connection: " + cause),

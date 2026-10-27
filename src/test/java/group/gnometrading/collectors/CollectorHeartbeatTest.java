@@ -71,7 +71,7 @@ class CollectorHeartbeatTest {
         ShardStream stream = kit.stream(7);
         agent.add(stream);
         streams = List.of(stream);
-        connections = List.of(new CollectorHeartbeat.Connection("KALSHI-0", "KALSHI", 1, true));
+        connections = List.of(new CollectorHeartbeat.Connection("KALSHI-0", "KALSHI", "md-1", 1, true));
 
         StreamTestKit.publish(stream, 30);
         agent.doWork();
@@ -93,6 +93,7 @@ class CollectorHeartbeatTest {
         JsonNode connection = lines.get(1);
         assertEquals("connection", connection.get("kind").asText());
         assertEquals("KALSHI-0", connection.get("name").asText());
+        assertEquals("md-1", connection.get("account").asText(), "the market-data account it spends");
         assertEquals(1, connection.get("markets").asInt());
 
         JsonNode line = lines.get(2);

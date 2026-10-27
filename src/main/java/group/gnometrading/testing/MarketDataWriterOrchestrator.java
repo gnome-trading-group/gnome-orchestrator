@@ -9,6 +9,7 @@ import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.feeds.FeedSources;
 import group.gnometrading.feeds.FeedVenues;
+import group.gnometrading.feeds.MarketDataCredentials;
 import group.gnometrading.feeds.WebSocketFeedOpener;
 import group.gnometrading.gateways.ProcessExit;
 import group.gnometrading.gateways.feed.Feeds;
@@ -100,6 +101,7 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
                         logger,
                         getInstance(Properties.class),
                         getInstance(SecretCache.class),
+                        MarketDataCredentials.SESSION,
                         getInstance(EpochNanoClock.class)),
                 false,
                 ProcessExit.SYSTEM,

@@ -13,6 +13,7 @@ import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
 import group.gnometrading.feeds.FeedSources;
 import group.gnometrading.feeds.FeedVenues;
+import group.gnometrading.feeds.MarketDataCredentials;
 import group.gnometrading.feeds.S3Assignment;
 import group.gnometrading.feeds.WebSocketFeedOpener;
 import group.gnometrading.gateways.feed.Feeds;
@@ -37,12 +38,14 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -125,6 +128,8 @@ public class ShardOrchestrator extends Orchestrator {
         final String outputBucket = getInstance(String.class, "OUTPUT_BUCKET");
         final String rawBucket = getInstance(String.class, "RAW_CAPTURE_BUCKET");
 
+        final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
+        final Map<String, String> accountLabels = accountLabels();
         final BookProber prober =
                 new BookProber(logger, getInstance(EpochNanoClock.class), BookProber.Settings.DEFAULT);
         final Feeds feeds = new Feeds(logger, prober);
@@ -134,6 +139,7 @@ public class ShardOrchestrator extends Orchestrator {
                         logger,
                         getInstance(Properties.class),
                         getInstance(SecretCache.class),
+                        MarketDataCredentials.forShard(securityMaster, accountLabels),
                         getInstance(EpochNanoClock.class)),
                 false,
                 // GatewayErrorHandler has logged it; the connection's supervisor keeps trying, its markets flagged
@@ -159,7 +165,7 @@ public class ShardOrchestrator extends Orchestrator {
         final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(logger, System::nanoTime);
         final ShardRuntime runtime = new ShardRuntime(
                 logger,
-                getInstance(SecurityMaster.class),
+                securityMaster,
                 new S3Assignment(s3, outputBucket, shard),
                 feeds,
                 sources::ensure,
@@ -174,7 +180,8 @@ public class ShardOrchestrator extends Orchestrator {
                                 SequencedRingBuffer.DEFAULT_SIZE,
                                 SequencedRingBuffer.Producers.TAKING_TURNS),
                         new MarketDataCollector(
-                                logger, clock, uploader, pool, streamId, RecordType.MBP_10, outputBucket)));
+                                logger, clock, uploader, pool, streamId, RecordType.MBP_10, outputBucket)),
+                accountOf(securityMaster, accountLabels));
 
         final GnomeAgentRunner agentRunner = new GnomeAgentRunner(agent, exitOnError(logger, "Collector"));
         GnomeAgentRunner.startOnThread(agentRunner);
@@ -251,6 +258,24 @@ public class ShardOrchestrator extends Orchestrator {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    /**
+     * Which of each source's market-data accounts this shard collects with: until Phase 6 places shards, whoever starts
+     * one names them ({@code SOURCE_ACCOUNTS}), and a source not named uses md-1.
+     */
+    private Map<String, String> accountLabels() {
+        return MarketDataCredentials.parseLabels(
+                MAPPER, getInstance(Properties.class).getStringProperty("source.accounts"));
+    }
+
+    /** A source's market-data account label, for the heartbeat; null for a public feed, which signs in with none. */
+    private static Function<String, String> accountOf(
+            final SecurityMaster securityMaster, final Map<String, String> labels) {
+        return source -> FeedVenues.forAdapter(securityMaster.getSource(source).adapter())
+                        .signed()
+                ? labels.getOrDefault(source, MarketDataCredentials.DEFAULT_LABEL)
+                : null;
     }
 
     /**
