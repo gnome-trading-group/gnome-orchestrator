@@ -11,10 +11,10 @@ import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
+import group.gnometrading.feeds.DynamoAssignment;
 import group.gnometrading.feeds.FeedSources;
 import group.gnometrading.feeds.FeedVenues;
 import group.gnometrading.feeds.MarketDataCredentials;
-import group.gnometrading.feeds.S3Assignment;
 import group.gnometrading.feeds.WebSocketFeedOpener;
 import group.gnometrading.gateways.feed.Feeds;
 import group.gnometrading.gateways.feed.probe.BookProber;
@@ -38,7 +38,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -49,11 +48,15 @@ import java.util.function.Function;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * A market data shard ({@code SHARD_ID}): reads the streams its assignment names, each source's markets multiplexed
- * over a few connections, and records each stream's book into minute files and each connection's raw frames.
+ * A market data shard ({@code SHARD_ID}): reads the streams its assignment (its item in the reconciler's
+ * {@code collection-shards} table) names, each source's markets multiplexed over a few connections, records each
+ * stream's book into minute files and each connection's raw frames, and writes its status for the reconciler.
  */
 public class ShardOrchestrator extends Orchestrator {
 
@@ -102,6 +105,25 @@ public class ShardOrchestrator extends Orchestrator {
     }
 
     @Provides
+    @Named("STATUS_BUCKET")
+    public final String provideStatusBucket(Properties properties) {
+        return properties.getStringProperty("status.bucket");
+    }
+
+    /** The control plane's table, in its one region (us-east-1) wherever the shard runs. */
+    @Provides
+    @Singleton
+    @Named("COLLECTION")
+    public final DynamoDbClient provideCollectionDynamo(
+            Properties properties, @Named("AWS_PROFILE") String awsProfile) {
+        var builder = DynamoDbClient.builder().region(Region.of(properties.getStringProperty("collection.region")));
+        if (awsProfile != null && !awsProfile.isEmpty()) {
+            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
+        }
+        return builder.build();
+    }
+
+    @Provides
     @Named("LATENCY_PROBE_INTERVAL_NANOS")
     public final Long provideLatencyProbeIntervalNanos(Properties properties) {
         if (properties.hasProperty("latency.probe.interval.micros")) {
@@ -129,7 +151,10 @@ public class ShardOrchestrator extends Orchestrator {
         final String rawBucket = getInstance(String.class, "RAW_CAPTURE_BUCKET");
 
         final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
-        final Map<String, String> accountLabels = accountLabels();
+        final Properties properties = getInstance(Properties.class);
+        final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
+        final ShardAccounts accounts = new ShardAccounts();
+        final StreamTransitions transitions = new StreamTransitions();
         final BookProber prober =
                 new BookProber(logger, getInstance(EpochNanoClock.class), BookProber.Settings.DEFAULT);
         final Feeds feeds = new Feeds(logger, prober);
@@ -137,10 +162,10 @@ public class ShardOrchestrator extends Orchestrator {
                 feeds,
                 new FeedVenues.Context(
                         logger,
-                        getInstance(Properties.class),
+                        properties,
                         getInstance(SecretCache.class),
-                        MarketDataCredentials.forShard(securityMaster, accountLabels),
-                        getInstance(EpochNanoClock.class)),
+                        MarketDataCredentials.forShard(securityMaster, accounts::label),
+                        wallClock),
                 false,
                 // GatewayErrorHandler has logged it; the connection's supervisor keeps trying, its markets flagged
                 // meanwhile, and replacing the task would cut every other connection.
@@ -166,7 +191,10 @@ public class ShardOrchestrator extends Orchestrator {
         final ShardRuntime runtime = new ShardRuntime(
                 logger,
                 securityMaster,
-                new S3Assignment(s3, outputBucket, shard),
+                new DynamoAssignment(
+                        getInstance(DynamoDbClient.class, "COLLECTION"),
+                        properties.getStringProperty("collection.shards.table"),
+                        shard),
                 feeds,
                 sources::ensure,
                 agent,
@@ -181,7 +209,10 @@ public class ShardOrchestrator extends Orchestrator {
                                 SequencedRingBuffer.Producers.TAKING_TURNS),
                         new MarketDataCollector(
                                 logger, clock, uploader, pool, streamId, RecordType.MBP_10, outputBucket)),
-                accountOf(securityMaster, accountLabels));
+                accountOf(securityMaster, accounts),
+                accounts,
+                transitions,
+                wallClock);
 
         final GnomeAgentRunner agentRunner = new GnomeAgentRunner(agent, exitOnError(logger, "Collector"));
         GnomeAgentRunner.startOnThread(agentRunner);
@@ -192,7 +223,56 @@ public class ShardOrchestrator extends Orchestrator {
         runtimeThread.scheduleWithFixedDelay(
                 () -> runtime.tick(System.nanoTime()), 0, TICK_MILLIS, TimeUnit.MILLISECONDS);
 
-        final CollectorHeartbeat heartbeat = new CollectorHeartbeat(
+        final CollectorHeartbeat heartbeat = heartbeat(logger, runtime, prober, uploader, latencyProbe);
+        final ShardStatusWriter status =
+                statusWriter(logger, s3, shard, properties, wallClock, runtime, heartbeat, transitions);
+        // The status repeats the heartbeat's process line, so it is written right after it, on the same thread.
+        final Runnable report = () -> {
+            heartbeat.run();
+            status.run();
+        };
+        final ScheduledExecutorService heartbeats = daemonScheduler("collector-heartbeat");
+        heartbeats.scheduleAtFixedRate(
+                report, CollectorHeartbeat.INTERVAL_SECONDS, CollectorHeartbeat.INTERVAL_SECONDS, TimeUnit.SECONDS);
+
+        Runtime.getRuntime()
+                .addShutdownHook(new Thread(
+                        () -> {
+                            shutdown(logger, runtime, runtimeThread, proberRunner, agentRunner, uploader);
+                            // A last report, after any scheduled one finishes: the heartbeat's readings are for one
+                            // thread at a time.
+                            heartbeats.shutdown();
+                            try {
+                                if (heartbeats.awaitTermination(5, TimeUnit.SECONDS)) {
+                                    report.run();
+                                }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        },
+                        "shard-shutdown"));
+
+        try {
+            new HealthCheckServer(
+                            8080,
+                            new CollectorHealth(
+                                    agentRunner::cycles,
+                                    runtime::lastTickNanos,
+                                    now -> uploader.isStuck(now, CollectorHealth.UPLOAD_STALL_NANOS),
+                                    System::nanoTime))
+                    .start();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static CollectorHeartbeat heartbeat(
+            final Logger logger,
+            final ShardRuntime runtime,
+            final BookProber prober,
+            final CycleUploader uploader,
+            final SchedulingLatencyProbe latencyProbe) {
+        return new CollectorHeartbeat(
                 logger,
                 MAPPER,
                 new CollectorHeartbeat.Shard() {
@@ -225,56 +305,54 @@ public class ShardOrchestrator extends Orchestrator {
                 HostReadings.ofThisProcess(new File("/")),
                 latencyProbe,
                 System.nanoTime());
-        final ScheduledExecutorService heartbeats = daemonScheduler("collector-heartbeat");
-        heartbeats.scheduleAtFixedRate(
-                heartbeat, CollectorHeartbeat.INTERVAL_SECONDS, CollectorHeartbeat.INTERVAL_SECONDS, TimeUnit.SECONDS);
-
-        Runtime.getRuntime()
-                .addShutdownHook(new Thread(
-                        () -> {
-                            shutdown(logger, runtime, runtimeThread, proberRunner, agentRunner, uploader);
-                            // A last report, after any scheduled one finishes: the heartbeat's readings are for one
-                            // thread at a time.
-                            heartbeats.shutdown();
-                            try {
-                                if (heartbeats.awaitTermination(5, TimeUnit.SECONDS)) {
-                                    heartbeat.run();
-                                }
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                            }
-                        },
-                        "shard-shutdown"));
-
-        try {
-            new HealthCheckServer(
-                            8080,
-                            new CollectorHealth(
-                                    agentRunner::cycles,
-                                    runtime::lastTickNanos,
-                                    now -> uploader.isStuck(now, CollectorHealth.UPLOAD_STALL_NANOS),
-                                    System::nanoTime))
-                    .start();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
     }
 
-    /**
-     * Which of each source's market-data accounts this shard collects with: until Phase 6 places shards, whoever starts
-     * one names them ({@code SOURCE_ACCOUNTS}), and a source not named uses md-1.
-     */
-    private Map<String, String> accountLabels() {
-        return MarketDataCredentials.parseLabels(
-                MAPPER, getInstance(Properties.class).getStringProperty("source.accounts"));
+    private ShardStatusWriter statusWriter(
+            final Logger logger,
+            final S3Client s3,
+            final String shard,
+            final Properties properties,
+            final EpochNanoClock wallClock,
+            final ShardRuntime runtime,
+            final CollectorHeartbeat heartbeat,
+            final StreamTransitions transitions) {
+        return new ShardStatusWriter(
+                logger,
+                s3,
+                getInstance(String.class, "STATUS_BUCKET"),
+                ShardIdentity.resolve(
+                        MAPPER, shard, properties.getStringProperty("orchestrator.version"), wallClock.nanoTime()),
+                new ShardStatusWriter.Shard() {
+                    @Override
+                    public List<ShardStream> streams() {
+                        return runtime.streams();
+                    }
+
+                    @Override
+                    public List<CollectorHeartbeat.Connection> connections() {
+                        return runtime.connections();
+                    }
+
+                    @Override
+                    public long generation() {
+                        return runtime.generation();
+                    }
+
+                    @Override
+                    public String processLine() {
+                        return heartbeat.processLine();
+                    }
+                },
+                transitions,
+                wallClock::nanoTime);
     }
 
     /** A source's market-data account label, for the heartbeat; null for a public feed, which signs in with none. */
     private static Function<String, String> accountOf(
-            final SecurityMaster securityMaster, final Map<String, String> labels) {
+            final SecurityMaster securityMaster, final ShardAccounts accounts) {
         return source -> FeedVenues.forAdapter(securityMaster.getSource(source).adapter())
                         .signed()
-                ? labels.getOrDefault(source, MarketDataCredentials.DEFAULT_LABEL)
+                ? accounts.label(source)
                 : null;
     }
 

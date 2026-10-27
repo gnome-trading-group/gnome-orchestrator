@@ -31,6 +31,8 @@ final class ShardStream {
     private long pollNanos;
     // Set by the runtime once the stream's market is placed.
     private volatile Subject subject;
+    // The state the runtime last recorded for it (StreamTransitions); the runtime's thread only.
+    private byte recordedState = StreamTransitions.NONE;
 
     ShardStream(
             final int streamId,
@@ -88,6 +90,14 @@ final class ShardStream {
         this.subject = placed;
     }
 
+    byte recordedState() {
+        return recordedState;
+    }
+
+    void recordedState(final byte state) {
+        this.recordedState = state;
+    }
+
     long records() {
         return records.get();
     }
@@ -113,6 +123,12 @@ final class ShardStream {
             records.lazySet(records.get() + work);
         }
         return work;
+    }
+
+    /** Bounds the minutes this stream uploads, in epoch nanos (see {@code Assignment.Streams}). Any thread. */
+    void writeWindow(final long fromNanos, final long untilNanos) {
+        collector.writeFrom(fromNanos);
+        collector.writeUntil(untilNanos);
     }
 
     /** On the agent's thread, once nothing more is published: hands the open minutes to the uploader. */

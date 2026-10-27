@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.md.SourceAccount;
 import java.util.Map;
@@ -32,7 +31,9 @@ class MarketDataCredentialsTest {
         when(securityMaster.getSourceAccount("KALSHI", "md-2")).thenReturn(account("KALSHI", "md-2", "ACTIVE"));
         when(securityMaster.getSourceAccount("POLYMARKET_US", "md-1"))
                 .thenReturn(account("POLYMARKET_US", "md-1", "ACTIVE"));
-        MarketDataCredentials credentials = MarketDataCredentials.forShard(securityMaster, Map.of("KALSHI", "md-2"));
+        Map<String, String> bound = Map.of("KALSHI", "md-2");
+        MarketDataCredentials credentials = MarketDataCredentials.forShard(
+                securityMaster, source -> bound.getOrDefault(source, MarketDataCredentials.DEFAULT_LABEL));
 
         assertEquals("gnome/market-data/kalshi/md-2", credentials.secretFor("KALSHI"));
         assertEquals("gnome/market-data/polymarket_us/md-1", credentials.secretFor("POLYMARKET_US"));
@@ -41,7 +42,8 @@ class MarketDataCredentialsTest {
     @Test
     void aMissingOrRetiredAccountIsRefusedByName() {
         when(securityMaster.getSourceAccount("KALSHI", "md-1")).thenReturn(account("KALSHI", "md-1", "RETIRED"));
-        MarketDataCredentials credentials = MarketDataCredentials.forShard(securityMaster, Map.of());
+        MarketDataCredentials credentials =
+                MarketDataCredentials.forShard(securityMaster, source -> MarketDataCredentials.DEFAULT_LABEL);
 
         IllegalStateException retired =
                 assertThrows(IllegalStateException.class, () -> credentials.secretFor("KALSHI"));
@@ -50,14 +52,5 @@ class MarketDataCredentialsTest {
                 assertThrows(IllegalStateException.class, () -> credentials.secretFor("POLYMARKET_US"));
         assertTrue(
                 missing.getMessage().contains("No market-data account md-1 for POLYMARKET_US"), missing.getMessage());
-    }
-
-    @Test
-    void labelsComeAsOneJsonObjectAndNothingMeansNone() {
-        ObjectMapper mapper = new ObjectMapper();
-        assertEquals(Map.of("KALSHI", "md-2"), MarketDataCredentials.parseLabels(mapper, "{\"KALSHI\":\"md-2\"}"));
-        assertEquals(Map.of(), MarketDataCredentials.parseLabels(mapper, "{}"));
-        assertEquals(Map.of(), MarketDataCredentials.parseLabels(mapper, null));
-        assertThrows(IllegalArgumentException.class, () -> MarketDataCredentials.parseLabels(mapper, "KALSHI=md-2"));
     }
 }

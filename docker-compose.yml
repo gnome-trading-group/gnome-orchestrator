@@ -9,9 +9,9 @@ services:
     privileged: true
     container_name: gnome-orchestrator-collector
     environment:
-      # Reads its streams from s3://$OUTPUT_BUCKET/shards/local.json: {"generation": 1, "streams": [...]}.
+      # Reads its streams from the dev collection-shards item `local` (see CLAUDE.md) and writes minutes to final.
       SHARD_ID: local
-      OUTPUT_BUCKET: gnome-market-data-raw-dev
+      OUTPUT_BUCKET: gnome-market-data-dev
       RAW_CAPTURE_BUCKET: gnome-market-data-exchange-raw-dev
       MAIN_CLASS: group.gnometrading.collectors.ShardOrchestrator
       STAGE: dev

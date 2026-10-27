@@ -30,6 +30,7 @@ import group.gnometrading.md.Stream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -125,6 +126,9 @@ class ShardRuntimeTest {
     private boolean failNextCollector;
     // The next connection the feeds open throws, as when its credentials can't be loaded.
     private boolean failNextOpen;
+    private final ShardAccounts accounts = new ShardAccounts();
+    private final StreamTransitions transitions = new StreamTransitions();
+    private long wallNanos = 1_000_000;
     private final ShardRuntime runtime = new ShardRuntime(
             new NullLogger(),
             securityMaster,
@@ -166,7 +170,10 @@ class ShardRuntimeTest {
                 }
                 return kit.stream(streamId);
             },
-            source -> null);
+            source -> null,
+            accounts,
+            transitions,
+            () -> wallNanos);
 
     ShardRuntimeTest() {
         when(securityMaster.getSource(1))
@@ -350,5 +357,36 @@ class ShardRuntimeTest {
         runtime.tick(POLL);
         assertTrue(runtime.streams().isEmpty());
         assertEquals(0, runtime.generation());
+    }
+
+    @Test
+    void theAssignmentBindsEachSourcesAccountBeforeAnyStreamStarts() {
+        assigned.set(new Assignment.Streams(1, new int[] {10}, Map.of("KALSHI", "md-2")));
+        runtime.tick(0);
+
+        assertEquals("md-2", accounts.label("KALSHI"));
+        assertEquals("md-1", accounts.label("POLYMARKET_US"), "a source not named uses md-1");
+    }
+
+    @Test
+    void startsStateChangesAndStopsAreRecordedWithTheirWallClockTime() {
+        assigned.set(new Assignment.Streams(1, new int[] {10}));
+        runtime.tick(0);
+        wallNanos = 2_000_000;
+        assigned.set(new Assignment.Streams(2, new int[0]));
+        runtime.tick(POLL);
+
+        int[] ids = new int[StreamTransitions.CAPACITY];
+        byte[] from = new byte[StreamTransitions.CAPACITY];
+        byte[] to = new byte[StreamTransitions.CAPACITY];
+        long[] at = new long[StreamTransitions.CAPACITY];
+        assertEquals(2, transitions.copyTo(ids, from, to, at));
+        assertEquals(10, ids[0]);
+        assertEquals("NONE", StreamTransitions.name(from[0]));
+        assertEquals("SUBSCRIBING", StreamTransitions.name(to[0]), "placed on a connection that never connects");
+        assertEquals(1_000_000, at[0]);
+        assertEquals("SUBSCRIBING", StreamTransitions.name(from[1]));
+        assertEquals("NONE", StreamTransitions.name(to[1]), "stopped");
+        assertEquals(2_000_000, at[1]);
     }
 }

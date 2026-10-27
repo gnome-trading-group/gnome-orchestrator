@@ -49,6 +49,20 @@ class MarketDataCollectorAgentTest {
     }
 
     @Test
+    void aStreamOutsideItsWriteWindowRecordsButUploadsNothing() throws Exception {
+        ShardStream stream = kit.stream(1);
+        stream.writeWindow(Long.MAX_VALUE, Long.MAX_VALUE);
+        agent.add(stream);
+        StreamTestKit.publish(stream, 3);
+        assertEquals(3, agent.doWork(), "a warming stream still drains its ring");
+        agent.retire(stream, null);
+        now.addAndGet(MarketDataCollectorAgent.RETIRE_GRACE_NANOS);
+        agent.doWork();
+
+        assertEquals(List.of(), kit.uploads());
+    }
+
+    @Test
     void aFailedCollectorStopsRecordingButNeverHoldsItsRingBack() throws Exception {
         ShardStream stream = kit.stream(1, (sequence, templateId, buffer, length) -> {
             throw new IllegalStateException("bad record");

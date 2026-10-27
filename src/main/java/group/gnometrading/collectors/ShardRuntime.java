@@ -20,6 +20,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import org.agrona.concurrent.EpochNanoClock;
 
 /**
  * What a shard reads, kept in step with its {@link Assignment}: every {@link #ASSIGNMENT_POLL_NANOS} the assigned
@@ -30,6 +31,8 @@ import java.util.function.Function;
  *
  * <p>A stream that can't be started (gone from the registry, a source with no feed) is tried again after
  * {@link #RETRY_NANOS}, as is one whose collector failed.
+ *
+ * <p>Every tick records each stream's state changes, starts and stops in {@link StreamTransitions}, for the status.
  *
  * <p>Its methods run on one thread, the runtime's.
  */
@@ -53,7 +56,12 @@ final class ShardRuntime {
     // A source's market-data account label, for the heartbeat; null for a public feed.
     private final Function<String, String> accountOf;
     private final StreamFactory factory;
+    private final ShardAccounts accounts;
+    private final StreamTransitions transitions;
+    private final EpochNanoClock wallClock;
     private final Map<Integer, ShardStream> running = new HashMap<>();
+    // The latest assignment applied: a stream started or restarted between polls takes its write window from it.
+    private Assignment.Streams applied = new Assignment.Streams(-1, new int[0]);
     private final Map<Integer, Long> retryAt = new HashMap<>();
     private volatile List<ShardStream> view = List.of();
     private volatile List<CollectorHeartbeat.Connection> connectionView = List.of();
@@ -72,7 +80,10 @@ final class ShardRuntime {
             final Consumer<Source> sources,
             final MarketDataCollectorAgent agent,
             final StreamFactory factory,
-            final Function<String, String> accountOf) {
+            final Function<String, String> accountOf,
+            final ShardAccounts accounts,
+            final StreamTransitions transitions,
+            final EpochNanoClock wallClock) {
         this.logger = logger;
         this.securityMaster = securityMaster;
         this.assignment = assignment;
@@ -81,6 +92,9 @@ final class ShardRuntime {
         this.agent = agent;
         this.factory = factory;
         this.accountOf = accountOf;
+        this.accounts = accounts;
+        this.transitions = transitions;
+        this.wallClock = wallClock;
     }
 
     /** The streams running, for the heartbeat's thread. */
@@ -116,6 +130,7 @@ final class ShardRuntime {
             }
             replaceFailed(now);
             feeds.tick(now);
+            recordStates();
             publishConnections();
         } catch (Throwable error) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Shard tick failed: %s", CauseChain.of(error));
@@ -136,6 +151,9 @@ final class ShardRuntime {
     }
 
     private void apply(final Assignment.Streams assigned, final long now) {
+        applied = assigned;
+        // Before any stream starts: its connection signs in with the account this names.
+        accounts.update(assigned.accounts());
         final Set<Integer> wanted = new HashSet<>();
         for (int streamId : assigned.streamIds()) {
             wanted.add(streamId);
@@ -152,6 +170,9 @@ final class ShardRuntime {
             if (!running.containsKey(streamId) && (retry == null || now >= retry)) {
                 start(streamId, now);
             }
+        }
+        for (ShardStream stream : running.values()) {
+            applyWindow(stream);
         }
         generation = assigned.generation();
         publishView();
@@ -171,11 +192,13 @@ final class ShardRuntime {
             sources.accept(source);
             stream = factory.create(
                     streamId, source.code() + " " + info.nativeSubjectId() + " (stream " + streamId + ")");
+            applyWindow(stream);
             agent.add(stream);
             feeds.addStream(streamId, source.code(), info.nativeSubjectId(), stream.ring(), now);
             stream.subject(feeds.subject(streamId));
             running.put(streamId, stream);
             retryAt.remove(streamId);
+            record(stream, StreamTransitions.stateOf(stream));
             logger.logf(LogMessage.DEBUG, "Started %s", stream.name());
         } catch (Throwable error) {
             if (stream != null) {
@@ -191,9 +214,28 @@ final class ShardRuntime {
         }
     }
 
+    private void applyWindow(final ShardStream stream) {
+        stream.writeWindow(applied.writeFromNanos(stream.streamId()), applied.writeUntilNanos(stream.streamId()));
+    }
+
     private void stop(final ShardStream stream, final long now) {
         feeds.removeStream(stream.streamId(), now);
         agent.retire(stream, null);
+        record(stream, StreamTransitions.NONE);
+    }
+
+    private void recordStates() {
+        for (ShardStream stream : running.values()) {
+            final byte state = StreamTransitions.stateOf(stream);
+            if (state != stream.recordedState()) {
+                record(stream, state);
+            }
+        }
+    }
+
+    private void record(final ShardStream stream, final byte state) {
+        transitions.record(stream.streamId(), stream.recordedState(), state, wallClock.nanoTime());
+        stream.recordedState(state);
     }
 
     /** A stream whose collector failed starts over, with new minute files, once it has waited. */
@@ -242,6 +284,7 @@ final class ShardRuntime {
         feeds.closeAll();
         for (ShardStream stream : running.values()) {
             agent.retire(stream, done);
+            record(stream, StreamTransitions.NONE);
         }
         running.clear();
         publishView();

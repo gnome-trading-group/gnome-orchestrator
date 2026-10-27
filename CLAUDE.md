@@ -19,7 +19,8 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 - Local runs (Docker, same install script as the AMI; needs `~/.m2/settings.xml` and `~/.aws` with a `dev`
   profile): `docker compose up --build strategy` (paper session), `collector`, or `testing`.
   `docker compose stop strategy` sends the same SIGTERM an instance stop does. The `collector` service is shard
-  `local`: write `s3://gnome-market-data-raw-dev/shards/local.json` (`{"generation": 1, "streams": [...]}`) first.
+  `local`: put its item in the dev `collection-shards` table first (`shard_id` `local`, numeric `generation`,
+  `streams` as packed big-endian int32s, see `DynamoAssignment.pack`).
 - CDK: `cd cdk && npm ci && npx cdk synth` (needs an npm token for `@gnome-trading-group` packages). Deploys only
   happen through the pipeline; do not `cdk deploy` by hand.
 
@@ -32,12 +33,14 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   RUNNING), `SessionReports` (alerts + registry PATCH), `JournalManagerAgent` and `JournalSegmentSealer`,
   `AgentRuntimeInstaller` (latency profile / CPU pinning), `PaperTradingOutboundGateway`, `MarketDataMultiplexer` /
   `ListingRouter` (multi-listing only), `recovery/StartupRecovery`.
-- `collectors/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s),
-  `ShardStream` + `MarketDataCollectorAgent` (minute files), `CollectorHeartbeat` log lines, `CollectorHealth`.
+- `collectors/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
+  records state changes in `StreamTransitions`), `ShardStream` + `MarketDataCollectorAgent` (minute files),
+  `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler), `ShardIdentity`, `ShardAccounts`,
+  `CollectorHealth`.
 - `feeds/` - `FeedVenues` (per `md.source.adapter`: the venue's `FEED` from gnome-gateways `venues/`, and its
   protocol built with the credentials this process loads, and its REST probe), `FeedSources` (adds a registry source,
-  sized by its capacity columns), `WebSocketFeedOpener`, `Assignment` / `S3Assignment`
-  (`s3://<OUTPUT_BUCKET>/shards/<shard>.json`).
+  sized by its capacity columns), `WebSocketFeedOpener`, `Assignment` / `DynamoAssignment` (the shard's item in the
+  reconciler's `collection-shards` table, us-east-1).
 - `gateways/` - live outbound orchestrators (Kalshi, Polymarket Intl, Polymarket US), credentials,
   `GatewayErrorHandler`, `GatewayRunners` (order gateways), `GatewayHealth`.
 - `shared/` - DI modules: `PropertiesModule`, `AwsModule`, `RiskModule`, `SecurityMasterModule`, `SecretCache`.
@@ -104,14 +107,28 @@ earlier sessions). A session already stopped before startup exits 0 without repo
   `stoppedBy=strategy`, closes, exits 0.
 - Operator stop: the registry terminates the instance -> SIGTERM -> shutdown hook closes agents (60 s
   `TimeoutStopSec`). Errors during shutdown are not reported.
-- Shards: ECS Fargate tasks from gnome-market-data `CollectorRegionalStack` (`MAIN_CLASS=...ShardOrchestrator`,
-  `SHARD_ID`). Streams come from the shard's assignment file, re-read every 10 s, so streams are added and removed
-  without a restart. `/health` on :8080 fails when the agent stops cycling for 30 s or an upload hangs 5 min, and ECS
-  replaces the task. A failing market is quarantined and retried, a failing connection keeps retrying; neither stops
-  the process. Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`. No
-  registry heartbeat: state is in `HEARTBEAT` log lines every 15 s (process, connection, stream).
+- Shards: ECS tasks started by gnome-market-data's reconciler (`MAIN_CLASS=...ShardOrchestrator`, `SHARD_ID`,
+  `ORCHESTRATOR_VERSION`). Streams come from the shard's item in `collection-shards` (us-east-1): `generation`,
+  `streams` and `draining` (packed int32s, both collected), `accounts`, and `cuts`; each 10 s poll reads only the
+  generation and fetches the item when it changed, so streams are added and removed without a restart.
+  - Minutes go straight to the final bucket (`OUTPUT_BUCKET`, `gnome-market-data-<stage>`) at
+    `{stream}/book/mbp-10/YYYY/MM/DD/hh/mm.zst`, with a conditional put: the first writer keeps a minute, and a 412
+    counts as done. There is no raw copy and no merger.
+  - `cuts` (packed (stream, minute-since-epoch) pairs) bound which minutes a stream writes, by file, never by a
+    record's event time. In `streams`, writing starts at that minute (`Integer.MAX_VALUE` = warming, write nothing);
+    in `draining`, writing stops before it. A hand-off therefore cuts at a minute boundary, and each minute is
+    written once, complete.
+  - Every 15 s, after the heartbeat, the shard overwrites its status at
+    `s3://<STATUS_BUCKET>/collection/shards/<shard>/status/<task>.json` (gnome-market-data-metadata-<stage>): task
+    id, private IP, version, applied generation, the heartbeat's process line, connections, every stream's state and
+    timestamps, and the latest 256 state changes.
+  - `/health` on :8080 fails when the agent stops cycling for 30 s or an upload hangs 5 min, and ECS replaces the
+    task. A failing market is quarantined and retried, a failing connection keeps retrying; neither stops the process.
+  - Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`.
+  - No registry heartbeat: `HEARTBEAT` log lines every 15 s (process, connection, and a stream only when its state
+    changed) plus the status above.
 - Market-data credentials: a shard signs Kalshi and Polymarket US in with the source's market-data account it is bound
-  to by label (`SOURCE_ACCOUNTS`, JSON like `{"KALSHI":"md-2"}`; `md-1` when unnamed), looked up in the registry's
+  to by label (its item's `accounts`, source to label; `md-1` when unnamed), looked up in the registry's
   `md.source_account` as each connection opens; its key is `gnome/market-data/<source>/<label>`. A missing or retired
   account fails only that source's markets on the shard ("No market-data account md-1 for KALSHI"), retried like any
   failed start; each connection's heartbeat line names its account. Sessions still use `gnome/market-data/<exchange>`.

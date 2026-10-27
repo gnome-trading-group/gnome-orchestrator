@@ -104,14 +104,28 @@ class CollectorHeartbeatTest {
         assertEquals(30, line.get("records").asLong());
         assertFalse(line.has("failure"));
 
-        StreamTestKit.publish(stream, 15);
-        agent.doWork();
         assertEquals(
-                1.0,
-                parse(heartbeat.lines(30 * SECOND, wall))
-                        .get(2)
-                        .get("msgs_per_s")
-                        .asDouble());
+                lines.get(0).toString(),
+                MAPPER.readTree(heartbeat.processLine()).toString(),
+                "kept for the status");
+    }
+
+    @Test
+    void aStreamIsLoggedAgainOnlyWhenItsStateChanges() throws Exception {
+        ShardStream stream = kit.stream(7);
+        agent.add(stream);
+        streams = List.of(stream);
+        long wall = System.currentTimeMillis() * 1_000_000;
+
+        assertEquals(2, heartbeat.lines(15 * SECOND, wall).size(), "the process and the new stream");
+        assertEquals(1, heartbeat.lines(30 * SECOND, wall).size(), "unchanged: the process alone");
+        assertEquals(
+                1,
+                MAPPER.readTree(heartbeat.lines(45 * SECOND, wall).get(0))
+                        .get("states")
+                        .get("SUBSCRIBING")
+                        .asInt(),
+                "still counted by state");
     }
 
     @Test
