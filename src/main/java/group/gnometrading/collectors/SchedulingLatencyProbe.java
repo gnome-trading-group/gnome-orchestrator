@@ -1,7 +1,5 @@
 package group.gnometrading.collectors;
 
-import group.gnometrading.logging.LogMessage;
-import group.gnometrading.logging.Logger;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
@@ -15,34 +13,51 @@ import java.util.concurrent.locks.LockSupport;
  * suffers the same delays, so its wake-up lateness is the in-process measure of them.
  *
  * <p>Lateness goes into log-linear buckets (8 per power of two microseconds, so values are
- * reported to within 12.5%) and is logged as one {@code SCHED_LATENCY} line per window.
+ * reported to within 12.5%). Each finished window is published for the collector's heartbeat to report.
  */
 final class SchedulingLatencyProbe implements Runnable {
 
     private static final int SUB_BUCKETS = 8;
     private static final int SUB_BUCKET_BITS = 3;
     private static final int BUCKETS = 240;
-    private static final long WINDOW_NANOS = TimeUnit.SECONDS.toNanos(10);
+    private static final long WINDOW_NANOS = TimeUnit.SECONDS.toNanos(15);
     private static final long ONE_MS_MICROS = 1_000;
     private static final long FIVE_MS_MICROS = 5_000;
 
-    private final Logger logger;
+    /** One window's lateness, in microseconds. */
+    record Window(
+            double windowSeconds,
+            long samples,
+            long p50Micros,
+            long p99Micros,
+            long p999Micros,
+            long maxMicros,
+            long over1ms,
+            long over5ms) {}
+
     private final long intervalNanos;
+    private volatile Window latest;
     private final long[] counts = new long[BUCKETS];
     private long samples;
     private long maxMicros;
     private long over1ms;
     private long over5ms;
 
-    SchedulingLatencyProbe(Logger logger, long intervalNanos) {
-        this.logger = logger;
+    SchedulingLatencyProbe(long intervalNanos) {
         this.intervalNanos = intervalNanos;
     }
 
-    static void start(Logger logger, long intervalNanos) {
-        Thread thread = new Thread(new SchedulingLatencyProbe(logger, intervalNanos), "sched-latency-probe");
+    static SchedulingLatencyProbe start(long intervalNanos) {
+        SchedulingLatencyProbe probe = new SchedulingLatencyProbe(intervalNanos);
+        Thread thread = new Thread(probe, "sched-latency-probe");
         thread.setDaemon(true);
         thread.start();
+        return probe;
+    }
+
+    /** The last finished window; null before the first. */
+    Window latest() {
+        return latest;
     }
 
     @Override
@@ -54,7 +69,7 @@ final class SchedulingLatencyProbe implements Runnable {
             long now = System.nanoTime();
             record(now - due);
             if (now - windowStart >= WINDOW_NANOS) {
-                logger.logf(LogMessage.DEBUG, "%s", summarize(now - windowStart));
+                latest = summarize(now - windowStart);
                 windowStart = now;
             }
         }
@@ -73,10 +88,9 @@ final class SchedulingLatencyProbe implements Runnable {
         }
     }
 
-    /** Formats the window's statistics and starts a new window. */
-    String summarize(long windowNanos) {
-        String summary = String.format(
-                "SCHED_LATENCY window_s=%.3f samples=%d p50_us=%d p99_us=%d p999_us=%d max_us=%d over1ms=%d over5ms=%d",
+    /** The window's statistics; starts a new window. */
+    Window summarize(long windowNanos) {
+        Window summary = new Window(
                 windowNanos / 1e9,
                 samples,
                 percentileMicros(0.5),

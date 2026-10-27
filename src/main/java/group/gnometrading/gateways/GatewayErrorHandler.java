@@ -2,13 +2,16 @@ package group.gnometrading.gateways;
 
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.utils.CauseChain;
 import java.util.ArrayList;
 import java.util.List;
 import org.agrona.ErrorHandler;
 
 /**
- * Reconnects a gateway after an error from its reader or supervisor, and exits the process once errors come too fast
- * to recover from. A dropped socket is one of these errors: the reader reports it so the gateway reconnects at once.
+ * Reconnects a gateway after an error from its reader or supervisor, and gives up through its {@link ProcessExit} once
+ * errors come too fast to recover from or it can't connect at all: a session exits, while a shard only logs and lets
+ * the connection recover on its own. A dropped socket is one of these errors: the reader reports it so the gateway
+ * reconnects at once.
  */
 public final class GatewayErrorHandler implements ErrorHandler {
 
@@ -31,11 +34,11 @@ public final class GatewayErrorHandler implements ErrorHandler {
 
     @Override
     public void onError(final Throwable error) {
-        this.logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in %s: %s", this.gatewayName, error.getMessage());
+        this.logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in %s: %s", this.gatewayName, CauseChain.of(error));
 
         // The gateway already retried for several connect cycles; another reconnect would only repeat them.
         if (error instanceof GatewayConnectFailedException) {
-            this.logger.log(LogMessage.FATAL_ERROR_EXITING);
+            this.logger.logf(LogMessage.UNKNOWN_ERROR, "Giving up on %s", this.gatewayName);
             this.exit.exit(1, error);
             return;
         }
@@ -46,7 +49,7 @@ public final class GatewayErrorHandler implements ErrorHandler {
             this.errorTimestamps.removeIf(timestamp -> currentTime - timestamp > ERROR_WINDOW_MILLIS);
 
             if (this.errorTimestamps.size() >= MAX_ERRORS_PER_WINDOW) {
-                this.logger.log(LogMessage.FATAL_ERROR_EXITING);
+                this.logger.logf(LogMessage.UNKNOWN_ERROR, "Giving up on %s", this.gatewayName);
                 this.exit.exit(
                         1,
                         new IllegalStateException(

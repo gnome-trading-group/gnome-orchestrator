@@ -13,10 +13,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.gateways.GatewayHealth;
 import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.ReaderPauseControl;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
-import group.gnometrading.gateways.ratelimit.VenueRateLimits;
+import group.gnometrading.gateways.venues.kalshi.KalshiVenue;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.ledger.LedgerAgent;
@@ -111,7 +112,7 @@ class SessionHeartbeatAgentTest {
                 1_000);
         riskEngine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), ListingDirectory.EMPTY);
         rateLimiters = new VenueRateLimiters(new NullLogger(), System::nanoTime, () -> now[0]);
-        rateLimiters.forAccount(VenueRateLimits.kalshi(), "key-1");
+        rateLimiters.forAccount(KalshiVenue.rateLimits(), "key-1");
         host = new HostReadings(tempDir.resolve("proc"), tempDir.toFile());
     }
 
@@ -130,7 +131,7 @@ class SessionHeartbeatAgentTest {
         return runner;
     }
 
-    private SessionHeartbeatAgent heartbeat(final List<GnomeAgentRunner> agents, final List<GatewayRunners> gateways) {
+    private SessionHeartbeatAgent heartbeat(final List<GnomeAgentRunner> agents, final List<GatewayHealth> gateways) {
         return new SessionHeartbeatAgent(
                 "s1",
                 registry,
@@ -211,19 +212,13 @@ class SessionHeartbeatAgentTest {
         final int listings = 500;
         prices = new SharedPriceBuffer(listings);
         slots = new PriceSlotRegistry(listings);
-        final List<GatewayRunners> gateways = new ArrayList<>();
+        final List<GatewayHealth> gateways = new ArrayList<>();
         final List<GnomeAgentRunner> agents = new ArrayList<>();
         for (int i = 0; i < listings; i++) {
             final int listingId = 1_000_000_000 + i;
             slots.register(listingId);
-            final GatewayRunners gateway = GatewayRunners.marketData(
-                    listingId,
-                    new ReaderPauseControl(),
-                    new GnomeAgentRunner(new Named("PolymarketUsInboundReader"), Throwable::printStackTrace),
-                    new GnomeAgentRunner(new Named("PolymarketUsSocketWriter"), Throwable::printStackTrace),
-                    new GnomeAgentRunner(new Named("PolymarketUsSupervisor"), Throwable::printStackTrace));
-            gateways.add(gateway);
-            agents.addAll(gateway.runners());
+            gateways.add(new Health("market data " + listingId));
+            agents.add(new GnomeAgentRunner(new Named("PolymarketUsAgent" + i), Throwable::printStackTrace));
         }
         final SessionHeartbeatAgent agent = heartbeat(agents, gateways);
         agent.onStart();
@@ -234,9 +229,58 @@ class SessionHeartbeatAgentTest {
         final JsonNode body = mapper.readTree(agent.lastBody());
         assertEquals(listings, body.get("listings").size());
         assertEquals(listings, body.get("gateways").size());
-        assertEquals(3 * listings, body.get("agents").size());
+        assertEquals(listings, body.get("agents").size());
         assertTrue(agent.lastBody().length()
                 <= SessionHeartbeatAgent.bodyCapacity("s1", agents, gateways, slots, rateLimiters.all()));
+    }
+
+    /** A listing's market data as the heartbeat sees it. */
+    private static final class Health implements GatewayHealth {
+        private final String name;
+        volatile boolean reconnecting;
+        volatile long resyncs;
+
+        Health(final String name) {
+            this.name = name;
+        }
+
+        @Override
+        public String name() {
+            return name;
+        }
+
+        @Override
+        public boolean isReconnecting() {
+            return reconnecting;
+        }
+
+        @Override
+        public long bookResyncs() {
+            return resyncs;
+        }
+    }
+
+    @Test
+    void reportsAMarketsResyncsOverTheLastFiveMinutes() throws Exception {
+        final Health market = new Health("market data 100");
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of(market));
+        agent.onStart();
+        agent.doWork();
+        market.resyncs = 3;
+        market.reconnecting = true;
+        step(agent, POST_MS);
+
+        JsonNode gateway =
+                mapper.readTree(posted.get(posted.size() - 1)).get("gateways").get(0);
+        assertEquals("market data 100", gateway.get("name").asText());
+        assertTrue(gateway.get("reconnecting").asBoolean());
+        assertEquals(3, gateway.get("resyncsLast5m").asLong());
+
+        for (long elapsed = 0; elapsed < 5 * 60_000; elapsed += POST_MS) {
+            step(agent, POST_MS);
+        }
+        gateway = mapper.readTree(posted.get(posted.size() - 1)).get("gateways").get(0);
+        assertEquals(0, gateway.get("resyncsLast5m").asLong(), "none in the last five minutes");
     }
 
     @Test

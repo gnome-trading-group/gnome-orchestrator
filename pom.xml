@@ -57,13 +57,13 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-networking</artifactId>
-            <version>2.2.0</version>
+            <version>2.3.0</version>
             <classifier>${os.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.46.1</version>
+            <version>1.48.2</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -73,7 +73,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-strategies</artifactId>
-            <version>1.7.3</version>
+            <version>1.7.4</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -88,12 +88,12 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>1.14.2</version>
+            <version>2.0.1</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-sequencer</artifactId>
-            <version>2.2.1</version>
+            <version>2.3.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -103,7 +103,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-core</artifactId>
-            <version>1.18.0</version>
+            <version>1.20.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -150,6 +150,31 @@
 
     <build>
         <plugins>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludedGroups>allocation</excludedGroups>
+                        </configuration>
+                    </execution>
+                    <!-- Allocation tests in a JVM of their own, without assertions as sessions run: Disruptor's
+                         single-producer thread check allocates on every claim when assertions are on. -->
+                    <execution>
+                        <id>allocation-test</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <groups>allocation</groups>
+                            <reuseForks>false</reuseForks>
+                            <enableAssertions>false</enableAssertions>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>

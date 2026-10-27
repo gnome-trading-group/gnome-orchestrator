@@ -36,7 +36,7 @@ class GatewayErrorHandlerTest {
 
         assertEquals(List.of(1), exits);
         assertEquals(0, reconnects, "a reconnect is what just failed");
-        verify(logger).log(LogMessage.FATAL_ERROR_EXITING);
+        verify(logger).logf(LogMessage.UNKNOWN_ERROR, "Giving up on %s", "test gateway");
     }
 
     @Test

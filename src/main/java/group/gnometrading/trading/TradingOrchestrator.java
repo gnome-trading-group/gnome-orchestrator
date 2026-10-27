@@ -12,17 +12,18 @@ import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
+import group.gnometrading.feeds.FeedVenues;
+import group.gnometrading.feeds.WebSocketFeedOpener;
+import group.gnometrading.gateways.GatewayHealth;
 import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.ProcessExit;
-import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
-import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
-import group.gnometrading.gateways.outbound.recovery.VenueOrderQuery;
+import group.gnometrading.gateways.orders.DefaultOutboundOrchestrator;
+import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
-import group.gnometrading.md.Stream;
 import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.http.HTTPClientBuilder;
@@ -54,6 +55,7 @@ import group.gnometrading.sequencer.metrics.JournaledMetricRecorder;
 import group.gnometrading.shared.AwsModule;
 import group.gnometrading.shared.RegistryEndpoint;
 import group.gnometrading.shared.RiskModule;
+import group.gnometrading.shared.SecretCache;
 import group.gnometrading.shared.SessionTag;
 import group.gnometrading.simulation.config.ExchangeSimulationConfig;
 import group.gnometrading.simulation.config.SessionSimulationConfig;
@@ -172,6 +174,8 @@ public class TradingOrchestrator extends Orchestrator {
     public final void configure() {
         install(new RiskModule());
         install(new AwsModule());
+        // Before any gateway's child orchestrator, so they share it and each venue's key is fetched once.
+        getInstance(SecretCache.class);
 
         Logger logger = getInstance(Logger.class);
         this.logger = logger;
@@ -224,8 +228,8 @@ public class TradingOrchestrator extends Orchestrator {
         GlobalSequence sessionSequence = new GlobalSequence();
         Map<SequencedRingBuffer<?>, JournalSource> journalSources = new IdentityHashMap<>();
 
-        List<DefaultInboundOrchestrator<?>> inbounds = createInbounds(listings, sessionSequence);
-        List<SequencedRingBuffer<?>> perListingMdBuffers = marketDataBuffers(inbounds);
+        SessionFeeds marketData = createMarketData(logger, properties, securityMaster, listings, sessionSequence);
+        List<SequencedRingBuffer<?>> perListingMdBuffers = marketData.rings();
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(sharedBuffer);
         String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
@@ -340,7 +344,7 @@ public class TradingOrchestrator extends Orchestrator {
                 "live".equals(properties.getStringProperty("mode")));
 
         this.runners = startAgentRunners(
-                inbounds,
+                marketData,
                 omsAgent,
                 outboundAgents,
                 muxAgent,
@@ -391,9 +395,7 @@ public class TradingOrchestrator extends Orchestrator {
         // once the strategy stops reading. Closed after the strategy, a busy feed filled the strategy's buffer while
         // the
         // OMS and the gateways closed, and the multiplexer then waited on it for good.
-        for (GatewayRunners gateway : started.inboundGateways()) {
-            closeQuietly(gateway, "market data gateway", logger);
-        }
+        closeQuietly(started.marketData(), "market data", logger);
         closeQuietly(started.mux(), logger);
         closeQuietly(started.strategy(), logger);
         closeQuietly(started.oms(), logger);
@@ -470,7 +472,7 @@ public class TradingOrchestrator extends Orchestrator {
             return null;
         }
         AgentRunners started = this.runners;
-        List<GatewayRunners> gateways = new ArrayList<>(started.inboundGateways());
+        List<GatewayHealth> gateways = new ArrayList<>(started.marketData().health());
         gateways.addAll(outboundGateways);
         List<GnomeAgentRunner> watched = new ArrayList<>();
         for (GnomeAgentRunner runner : new GnomeAgentRunner[] {
@@ -489,7 +491,8 @@ public class TradingOrchestrator extends Orchestrator {
             }
         }
         watched.addAll(started.outboundAgents());
-        for (GatewayRunners gateway : gateways) {
+        // Market data connections come and go as they roll, so they are watched through their markets' state.
+        for (GatewayRunners gateway : outboundGateways) {
             watched.addAll(gateway.runners());
         }
         int bodyCapacity =
@@ -564,7 +567,8 @@ public class TradingOrchestrator extends Orchestrator {
         // Checked with the journal off too, so a buffer added without a source fails in every run, not only when
         // someone turns the journal on.
         verifyJournalCoverage(sessionSequence, journalSources);
-        if (!properties.getBooleanProperty("journal.enabled")) {
+        // A local run has no session to file the journal under, nor a shipper to send it, as with the ledger.
+        if (sessionId == null || !properties.getBooleanProperty("journal.enabled")) {
             return null;
         }
         Path journalDirectory = Path.of(properties.getStringProperty("journal.directory"), sessionId);
@@ -607,40 +611,24 @@ public class TradingOrchestrator extends Orchestrator {
                 securityMaster, listings.stream().mapToInt(Listing::listingId).toArray(), new int[0]);
     }
 
-    private static List<SequencedRingBuffer<?>> marketDataBuffers(List<DefaultInboundOrchestrator<?>> inbounds) {
-        List<SequencedRingBuffer<?>> buffers = new ArrayList<>(inbounds.size());
-        for (DefaultInboundOrchestrator<?> inbound : inbounds) {
-            buffers.add(inbound.getSequencedRingBuffer());
-        }
-        return buffers;
-    }
-
-    /** The listing's book stream: every record its gateway writes is keyed by it. */
-    private Stream bookStream(Listing listing) {
-        Stream stream = getInstance(SecurityMaster.class).streamForListing(listing.listingId());
-        if (stream == null) {
-            throw new IllegalStateException("Listing " + listing.listingId() + " has no book stream");
-        }
-        return stream;
-    }
-
     /** A lone listing's market data is what the strategy reads, so it goes straight onto the session sequence. */
-    private List<DefaultInboundOrchestrator<?>> createInbounds(List<Listing> listings, GlobalSequence sessionSequence) {
-        List<DefaultInboundOrchestrator<?>> inbounds = new ArrayList<>(listings.size());
-        for (Listing listing : listings) {
-            Map<Class<?>, Object> inboundOverrides = new HashMap<>();
-            inboundOverrides.put(Listing.class, listing);
-            inboundOverrides.put(Stream.class, bookStream(listing));
-            if (fatalHandler != null) {
-                inboundOverrides.put(ProcessExit.class, fatalHandler);
-            }
-            if (listings.size() == 1) {
-                inboundOverrides.put(GlobalSequence.class, sessionSequence);
-            }
-            inbounds.add(createChildOrchestrator(
-                    DefaultInboundOrchestrator.findInboundOrchestrator(listing), inboundOverrides));
-        }
-        return inbounds;
+    private SessionFeeds createMarketData(
+            Logger logger,
+            Properties properties,
+            SecurityMaster securityMaster,
+            List<Listing> listings,
+            GlobalSequence sessionSequence) {
+        EpochNanoClock clock = getInstance(EpochNanoClock.class);
+        return new SessionFeeds(
+                logger,
+                securityMaster,
+                new FeedVenues.Context(logger, properties, getInstance(SecretCache.class), clock),
+                listings,
+                listings.size() == 1 ? sessionSequence : null,
+                AgentRuntimeInstaller.pinsHotAgents(properties),
+                fatalHandler != null ? fatalHandler : ProcessExit.SYSTEM,
+                clock,
+                WebSocketFeedOpener.Clients.TLS);
     }
 
     /**
@@ -727,8 +715,14 @@ public class TradingOrchestrator extends Orchestrator {
                 new ListingRouter(orderOutboundBuffer, perListingOutBufs, perExchangeExecBufs, omsExecReportBuffer));
     }
 
+    /** A session's market data, as the close order and the heartbeat see it. */
+    interface MarketData extends AutoCloseable {
+        /** One entry per listing; filled once it has started. */
+        List<GatewayHealth> health();
+    }
+
     record AgentRunners(
-            List<GatewayRunners> inboundGateways,
+            MarketData marketData,
             GnomeAgentRunner strategy,
             GnomeAgentRunner oms,
             List<GnomeAgentRunner> outboundAgents,
@@ -739,7 +733,7 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner riskSync) {}
 
     private static AgentRunners startAgentRunners(
-            List<DefaultInboundOrchestrator<?>> inbounds,
+            SessionFeeds marketData,
             OmsAgent omsAgent,
             List<GnomeAgent> outboundAgents,
             MarketDataMultiplexer muxAgent,
@@ -760,9 +754,10 @@ public class TradingOrchestrator extends Orchestrator {
         if (!riskEngine.awaitFirstRefresh()) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Starting with stale risk: the first policy refresh didn't succeed");
         }
-        List<GatewayRunners> inboundGateways = new ArrayList<>(inbounds.size());
-        for (DefaultInboundOrchestrator<?> inbound : inbounds) {
-            inboundGateways.add(inbound.startGatewayAgents());
+        try {
+            marketData.start(errorHandler);
+        } catch (Exception e) {
+            throw new IllegalStateException("Market data didn't start", e);
         }
         GnomeAgentRunner omsRunner = new GnomeAgentRunner(omsAgent, errorHandler);
         GnomeAgentRunner.startOnThread(omsRunner);
@@ -792,7 +787,7 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner.startOnThread(ledgerRunner);
         }
         return new AgentRunners(
-                inboundGateways,
+                marketData,
                 strategyRunner,
                 omsRunner,
                 outboundRunners,

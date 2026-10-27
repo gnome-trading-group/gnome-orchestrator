@@ -9,9 +9,11 @@ services:
     privileged: true
     container_name: gnome-orchestrator-collector
     environment:
-      LISTINGS: "[16307,16308]"
-      OUTPUT_BUCKET: gnome-market-data-dev
-      MAIN_CLASS: group.gnometrading.collectors.DelegatingCollectorOrchestrator
+      # Reads its streams from s3://$OUTPUT_BUCKET/shards/local.json: {"generation": 1, "streams": [...]}.
+      SHARD_ID: local
+      OUTPUT_BUCKET: gnome-market-data-raw-dev
+      RAW_CAPTURE_BUCKET: gnome-market-data-exchange-raw-dev
+      MAIN_CLASS: group.gnometrading.collectors.ShardOrchestrator
       STAGE: dev
       AWS_PROFILE: dev
     volumes:
@@ -27,15 +29,10 @@ services:
     image: gnome-orchestrator:latest
     privileged: true
     container_name: gnome-orchestrator-testing
-    ports:
-      - "8765:8765"
-    network_mode: host
     environment:
       LISTING: 1
       MAIN_CLASS: group.gnometrading.testing.MarketDataWriterOrchestrator
       STAGE: dev
-      HOST: host.docker.internal
-      PORT: 8765
       OUTPUT: /app/market-data/output.bin
     volumes:
       - ~/.aws/:/root/.aws:ro
@@ -62,7 +59,7 @@ services:
       STRATEGY_TYPE: python
       STRATEGY_CLASS: gnomepy_research.sessions.random_trader.strategy:RandomTrader
       STRATEGY_ARGS_JSON: '{"interval_seconds": 3, "size": 10, "max_position": 3}'
-      RESEARCH_COMMIT: test/random-trader
+      RESEARCH_COMMIT: main
       LATENCY_PROFILE: standard
       # The listing simulates with its exchange's registry parameters as recorded by then, with fees zeroed.
       SIMULATION_JSON: '{"as_of": "2026-10-16T00:00:00Z", "listings": {"6": {"fee_model": {"type": "static", "taker_fee": 0, "maker_fee": 0}}}}'

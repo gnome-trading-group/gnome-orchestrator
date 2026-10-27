@@ -53,4 +53,11 @@ public class AwsModule extends Module {
         }
         return builder.build();
     }
+
+    /** An orchestrator that creates gateways must build this before its children, so they share it. */
+    @Provides
+    @Singleton
+    public final SecretCache provideSecretCache(SecretsManagerClient secretsManager) {
+        return new SecretCache(secretsManager);
+    }
 }

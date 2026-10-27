@@ -1,0 +1,133 @@
+package group.gnometrading.collectors;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import group.gnometrading.host.HostReadings;
+import group.gnometrading.logging.NullLogger;
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Test;
+
+class CollectorHeartbeatTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final long SECOND = TimeUnit.SECONDS.toNanos(1);
+
+    private final StreamTestKit kit = new StreamTestKit();
+    private final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(new NullLogger(), System::nanoTime);
+    private List<ShardStream> streams = List.of();
+    private List<CollectorHeartbeat.Connection> connections = List.of();
+
+    private final CollectorHeartbeat heartbeat = new CollectorHeartbeat(
+            new NullLogger(),
+            MAPPER,
+            new CollectorHeartbeat.Shard() {
+                @Override
+                public List<ShardStream> streams() {
+                    return streams;
+                }
+
+                @Override
+                public List<CollectorHeartbeat.Connection> connections() {
+                    return connections;
+                }
+
+                @Override
+                public long generation() {
+                    return 4;
+                }
+
+                @Override
+                public long probes() {
+                    return 12;
+                }
+
+                @Override
+                public long probeMismatches() {
+                    return 1;
+                }
+            },
+            kit.uploader,
+            HostReadings.ofThisProcess(new File("/")),
+            null,
+            0);
+
+    private static List<JsonNode> parse(final List<String> lines) throws Exception {
+        List<JsonNode> nodes = new ArrayList<>();
+        for (String line : lines) {
+            nodes.add(MAPPER.readTree(line));
+        }
+        return nodes;
+    }
+
+    @Test
+    void reportsTheProcessThenEachConnectionThenEachStream() throws Exception {
+        ShardStream stream = kit.stream(7);
+        agent.add(stream);
+        streams = List.of(stream);
+        connections = List.of(new CollectorHeartbeat.Connection("KALSHI-0", "KALSHI", 1, true));
+
+        StreamTestKit.publish(stream, 30);
+        agent.doWork();
+        long wall = stream.lastEventNanos() + 2 * SECOND;
+        List<JsonNode> lines = parse(heartbeat.lines(15 * SECOND, wall));
+
+        assertEquals(3, lines.size());
+        JsonNode process = lines.get(0);
+        assertEquals("process", process.get("kind").asText());
+        assertEquals(4, process.get("generation").asLong());
+        assertEquals(1, process.get("streams").asInt());
+        assertEquals(1, process.get("states").get("SUBSCRIBING").asInt(), "no market placed yet");
+        assertEquals(1, process.get("connections").asInt());
+        assertEquals(1, process.get("reconnecting").asInt());
+        assertEquals(12, process.get("probes").asLong());
+        assertTrue(process.get("heap_used_mb").asLong() > 0);
+        assertTrue(process.get("sched_latency").isNull());
+
+        JsonNode connection = lines.get(1);
+        assertEquals("connection", connection.get("kind").asText());
+        assertEquals("KALSHI-0", connection.get("name").asText());
+        assertEquals(1, connection.get("markets").asInt());
+
+        JsonNode line = lines.get(2);
+        assertEquals("stream", line.get("kind").asText());
+        assertEquals(7, line.get("stream_id").asInt());
+        assertEquals(2.0, line.get("last_event_age_s").asDouble());
+        assertEquals(0.0, line.get("msgs_per_s").asDouble(), "no rate before a second sample");
+        assertEquals(30, line.get("records").asLong());
+        assertFalse(line.has("failure"));
+
+        StreamTestKit.publish(stream, 15);
+        agent.doWork();
+        assertEquals(
+                1.0,
+                parse(heartbeat.lines(30 * SECOND, wall))
+                        .get(2)
+                        .get("msgs_per_s")
+                        .asDouble());
+    }
+
+    @Test
+    void aFailedStreamShowsWhy() throws Exception {
+        ShardStream stream = kit.stream(9, (sequence, templateId, buffer, length) -> {
+            throw new IllegalStateException("bad record");
+        });
+        agent.add(stream);
+        streams = List.of(stream);
+        StreamTestKit.publish(stream, 1);
+        agent.doWork();
+
+        List<JsonNode> lines = parse(heartbeat.lines(15 * SECOND, System.currentTimeMillis() * 1_000_000));
+        assertEquals(
+                1, lines.get(0).get("states").get(CollectorHeartbeat.FAILED).asInt());
+        assertEquals(CollectorHeartbeat.FAILED, lines.get(1).get("state").asText());
+        assertEquals(
+                "IllegalStateException: bad record", lines.get(1).get("failure").asText());
+    }
+}

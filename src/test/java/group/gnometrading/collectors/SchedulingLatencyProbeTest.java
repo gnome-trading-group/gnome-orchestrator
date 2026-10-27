@@ -3,13 +3,13 @@ package group.gnometrading.collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import group.gnometrading.logging.NullLogger;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SchedulingLatencyProbeTest {
 
     private static SchedulingLatencyProbe probe() {
-        return new SchedulingLatencyProbe(new NullLogger(), 1_000_000);
+        return new SchedulingLatencyProbe(1_000_000);
     }
 
     @Test
@@ -36,10 +36,11 @@ class SchedulingLatencyProbeTest {
         assertEquals(52, probe.percentileMicros(0.5));
         assertEquals(52, probe.percentileMicros(0.99));
         assertEquals(52, probe.percentileMicros(0.999));
-        String summary = probe.summarize(10_000_000_000L);
-        assertTrue(summary.contains("samples=10000"), summary);
-        assertTrue(summary.contains("max_us=80000"), summary);
-        assertTrue(summary.contains("over1ms=10 over5ms=10"), summary);
+        SchedulingLatencyProbe.Window summary = probe.summarize(10_000_000_000L);
+        assertEquals(10_000, summary.samples());
+        assertEquals(80_000, summary.maxMicros());
+        assertEquals(10, summary.over1ms());
+        assertEquals(10, summary.over5ms());
     }
 
     @Test
@@ -56,8 +57,10 @@ class SchedulingLatencyProbeTest {
         probe.record(9_000_000);
         probe.summarize(10_000_000_000L);
 
-        String next = probe.summarize(10_000_000_000L);
-        assertTrue(next.contains("samples=0") && next.contains("max_us=0") && next.contains("over1ms=0"), next);
+        SchedulingLatencyProbe.Window next = probe.summarize(10_000_000_000L);
+        assertEquals(0, next.samples());
+        assertEquals(0, next.maxMicros());
+        assertEquals(0, next.over1ms());
     }
 
     @Test
@@ -66,5 +69,18 @@ class SchedulingLatencyProbeTest {
         probe.record(-20_000);
 
         assertEquals(0, probe.percentileMicros(0.5));
+    }
+
+    @Test
+    void theHeartbeatReportsAWindowUnderSnakeCaseKeys() {
+        SchedulingLatencyProbe probe = probe();
+        probe.record(2_000_000);
+
+        Map<String, Object> latency = CollectorHeartbeat.latency(probe.summarize(15_000_000_000L));
+
+        assertEquals(15.0, latency.get("window_s"));
+        assertEquals(1L, latency.get("samples"));
+        assertEquals(2_000L, latency.get("max_us"));
+        assertEquals(1L, latency.get("over1ms"));
     }
 }

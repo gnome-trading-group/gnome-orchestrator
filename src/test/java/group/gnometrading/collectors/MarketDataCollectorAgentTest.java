@@ -1,48 +1,69 @@
 package group.gnometrading.collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.sequencer.GlobalSequence;
-import group.gnometrading.sequencer.SequencedRingBuffer;
-import java.util.ArrayList;
+import group.gnometrading.logging.NullLogger;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class MarketDataCollectorAgentTest {
 
-    @Test
-    void drainsEveryListingInOnePass() throws Exception {
-        SequencedRingBuffer<Mbp10Schema> first = new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
-        SequencedRingBuffer<Mbp10Schema> second = new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
-        List<String> received = new ArrayList<>();
-        MarketDataCollectorAgent agent = new MarketDataCollectorAgent(List.of(
-                first.createPoller((seq, templateId, buffer, length) -> received.add("first-" + seq)),
-                second.createPoller((seq, templateId, buffer, length) -> received.add("second-" + seq))));
+    private final StreamTestKit kit = new StreamTestKit();
+    private final AtomicLong now = new AtomicLong(1_000);
+    private final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(new NullLogger(), now::get);
 
-        publish(first, 2);
-        publish(second, 1);
+    @Test
+    void drainsEveryStreamInOnePass() throws Exception {
+        ShardStream first = kit.stream(1);
+        ShardStream second = kit.stream(2);
+        agent.add(first);
+        agent.add(second);
+
+        StreamTestKit.publish(first, 2);
+        StreamTestKit.publish(second, 1);
 
         assertEquals(3, agent.doWork());
-        assertEquals(List.of("first-1", "first-2", "second-1"), received);
+        assertEquals(0, agent.doWork(), "idle, so the agent can sleep");
+        assertEquals(2, first.records());
     }
 
     @Test
-    void reportsNoWorkWhenIdleSoTheAgentCanSleep() throws Exception {
-        SequencedRingBuffer<Mbp10Schema> buffer = new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
-        MarketDataCollectorAgent agent =
-                new MarketDataCollectorAgent(List.of(buffer.createPoller((seq, templateId, data, length) -> {})));
+    void aRetiredStreamIsDrainedThenFlushedAfterTheGrace() throws Exception {
+        ShardStream stream = kit.stream(1);
+        agent.add(stream);
+        agent.doWork();
+        CountDownLatch done = new CountDownLatch(1);
+        agent.retire(stream, done);
 
-        publish(buffer, 1);
+        StreamTestKit.publish(stream, 3);
+        assertEquals(3, agent.doWork(), "what its reader was publishing as it left is kept");
+        now.addAndGet(MarketDataCollectorAgent.RETIRE_GRACE_NANOS);
         agent.doWork();
 
-        assertEquals(0, agent.doWork());
+        assertEquals(0, done.getCount());
+        assertEquals(List.of(StreamTestKit.MARKET_BUCKET), kit.uploads());
     }
 
-    private static void publish(SequencedRingBuffer<Mbp10Schema> buffer, int count) {
-        for (int i = 0; i < count; i++) {
-            buffer.claim();
-            buffer.publish();
+    @Test
+    void aFailedCollectorStopsRecordingButNeverHoldsItsRingBack() throws Exception {
+        ShardStream stream = kit.stream(1, (sequence, templateId, buffer, length) -> {
+            throw new IllegalStateException("bad record");
+        });
+        agent.add(stream);
+
+        // Several rings' worth: a reader blocked on a full ring would hang here.
+        for (int i = 0; i < 10; i++) {
+            StreamTestKit.publish(stream, 64);
+            agent.doWork();
         }
+
+        assertNotNull(stream.failure());
+        assertEquals(1_000, stream.failedAtNanos());
+        assertEquals(0, stream.records());
+        assertTrue(stream.failure().getMessage().contains("bad record"));
     }
 }

@@ -1,7 +1,7 @@
 package group.gnometrading.gateways.credentials;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import group.gnometrading.gateways.outbound.exchanges.polymarket.us.PolymarketUsAuthSigner;
+import group.gnometrading.gateways.venues.polymarket.us.PolymarketUsAuthSigner;
 import java.security.PrivateKey;
 import java.util.Map;
 

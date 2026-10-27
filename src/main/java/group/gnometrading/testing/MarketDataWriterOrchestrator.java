@@ -1,29 +1,35 @@
 package group.gnometrading.testing;
 
 import group.gnometrading.SecurityMaster;
-import group.gnometrading.collectors.MarketDataCollectorAgent;
+import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Named;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
-import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
+import group.gnometrading.feeds.FeedSources;
+import group.gnometrading.feeds.FeedVenues;
+import group.gnometrading.feeds.WebSocketFeedOpener;
+import group.gnometrading.gateways.ProcessExit;
+import group.gnometrading.gateways.feed.Feeds;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Source;
 import group.gnometrading.md.Stream;
-import group.gnometrading.networking.sockets.factory.GnomeSocketFactory;
-import group.gnometrading.networking.sockets.factory.NativeSocketFactory;
 import group.gnometrading.resources.Properties;
+import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
+import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sequencer.StreamRecordEventAdapter;
 import group.gnometrading.shared.AwsModule;
+import group.gnometrading.shared.SecretCache;
 import group.gnometrading.shared.SecurityMasterModule;
-import group.gnometrading.sm.Listing;
 import group.gnometrading.trading.AgentRuntimeInstaller;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -52,41 +58,14 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
     }
 
     @Provides
-    public final Listing provideListing(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
-        return securityMaster.getListing(listingId);
-    }
-
-    @Provides
     public final Stream provideStream(SecurityMaster securityMaster, @Named("LISTING_ID") Integer listingId) {
         return securityMaster.streamForListing(listingId);
-    }
-
-    @Provides
-    @Named("HOST")
-    public final String provideHost(Properties properties) {
-        return properties.getStringProperty("host");
-    }
-
-    @Provides
-    @Named("PORT")
-    public final Integer providePort(Properties properties) {
-        return properties.getIntProperty("port");
     }
 
     @Provides
     @Named("OUTPUT_PATH")
     public final String provideFilePath(Properties properties) {
         return properties.getStringProperty("output");
-    }
-
-    @Provides
-    public final URI provideUri(@Named("HOST") String host, @Named("PORT") Integer port) throws URISyntaxException {
-        return new URI(null, host + ":" + port, null, null, null);
-    }
-
-    @Provides
-    public final GnomeSocketFactory provideSocketFactory() {
-        return new NativeSocketFactory();
     }
 
     @Provides
@@ -99,7 +78,7 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
     public final ErrorHandler provideErrorHandler() {
         Logger logger = getInstance(Logger.class);
         return (error) -> {
-            logger.logf(LogMessage.UNKNOWN_ERROR, "Exiting due to expected socket closure: %s", error);
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Market data writer failed, exiting: %s", error);
             System.exit(0);
         };
     }
@@ -107,17 +86,52 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
     @Override
     public final void configure() {
         install(new SecurityMasterModule(), new AwsModule());
-        AgentRuntimeInstaller.installStandard(getInstance(Logger.class));
+        final Logger logger = getInstance(Logger.class);
+        AgentRuntimeInstaller.installStandard(logger);
         final MarketDataWriter writer = getInstance(MarketDataWriter.class);
-        final Listing listing = getInstance(Listing.class);
+        final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
+        final Stream stream = getInstance(Stream.class);
+        final Source source = securityMaster.getSource(stream.sourceId());
 
-        final Class<? extends DefaultInboundOrchestrator<?>> orchestratorClass =
-                DefaultInboundOrchestrator.findInboundOrchestrator(listing);
-        final DefaultInboundOrchestrator<?> orchestrator = createChildOrchestrator(orchestratorClass);
-        final SequencedPoller poller =
-                orchestrator.getSequencedRingBuffer().createPoller(new StreamRecordEventAdapter(writer));
-        GnomeAgentRunner.startOnThread(
-                new GnomeAgentRunner(new MarketDataCollectorAgent(List.of(poller)), getInstance(ErrorHandler.class)));
-        orchestrator.startGatewayAgents();
+        final Feeds feeds = new Feeds(logger, null);
+        final FeedSources sources = new FeedSources(
+                feeds,
+                new FeedVenues.Context(
+                        logger,
+                        getInstance(Properties.class),
+                        getInstance(SecretCache.class),
+                        getInstance(EpochNanoClock.class)),
+                false,
+                ProcessExit.SYSTEM,
+                code -> WebSocketFeedOpener.RawCaptures.NONE,
+                WebSocketFeedOpener.Clients.TLS);
+        final SequencedRingBuffer<Mbp10Schema> ring = new SequencedRingBuffer<>(
+                Mbp10Schema::new,
+                new GlobalSequence(),
+                SequencedRingBuffer.DEFAULT_SIZE,
+                SequencedRingBuffer.Producers.TAKING_TURNS);
+        final SequencedPoller poller = ring.createPoller(new StreamRecordEventAdapter(writer));
+        final GnomeAgent drain = poller::poll;
+        GnomeAgentRunner.startOnThread(new GnomeAgentRunner(drain, getInstance(ErrorHandler.class)));
+
+        sources.ensure(source);
+        try {
+            feeds.addStream(stream.streamId(), source.code(), stream.nativeSubjectId(), ring, System.nanoTime());
+        } catch (Exception e) {
+            throw new IllegalStateException("Couldn't start stream " + stream.streamId(), e);
+        }
+        // Rolls and quarantine retries; this tool runs for as long as it is left to.
+        final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
+        ticker.scheduleWithFixedDelay(
+                () -> {
+                    try {
+                        feeds.tick(System.nanoTime());
+                    } catch (Exception e) {
+                        logger.logf(LogMessage.UNKNOWN_ERROR, "Feed tick failed: %s", e);
+                    }
+                },
+                1,
+                1,
+                TimeUnit.SECONDS);
     }
 }

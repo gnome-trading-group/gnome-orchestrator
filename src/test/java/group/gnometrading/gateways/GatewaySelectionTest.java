@@ -3,15 +3,9 @@ package group.gnometrading.gateways;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import group.gnometrading.gateways.inbound.DefaultInboundOrchestrator;
-import group.gnometrading.gateways.inbound.HyperliquidInboundOrchestrator;
-import group.gnometrading.gateways.inbound.KalshiInboundOrchestrator;
-import group.gnometrading.gateways.inbound.LighterInboundOrchestrator;
-import group.gnometrading.gateways.inbound.PolymarketIntlInboundOrchestrator;
-import group.gnometrading.gateways.inbound.PolymarketUsInboundOrchestrator;
-import group.gnometrading.gateways.outbound.DefaultOutboundOrchestrator;
-import group.gnometrading.gateways.outbound.KalshiOutboundOrchestrator;
-import group.gnometrading.gateways.outbound.PolymarketIntlOutboundOrchestrator;
+import group.gnometrading.gateways.orders.DefaultOutboundOrchestrator;
+import group.gnometrading.gateways.orders.KalshiOutboundOrchestrator;
+import group.gnometrading.gateways.orders.PolymarketIntlOutboundOrchestrator;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import org.junit.jupiter.api.Test;
@@ -20,26 +14,6 @@ class GatewaySelectionTest {
 
     private static Listing listingOn(final String exchangeCode, final String exchangeName) {
         return new Listing(1, new Exchange(1, exchangeCode, exchangeName, "global"), null, "x", "x");
-    }
-
-    @Test
-    void inbound_SelectedByExchangeCode() {
-        assertEquals(
-                HyperliquidInboundOrchestrator.class,
-                DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("HYPERLIQUID", "Hyperliquid")));
-        assertEquals(
-                LighterInboundOrchestrator.class,
-                DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("LIGHTER", "Lighter")));
-        assertEquals(
-                KalshiInboundOrchestrator.class,
-                DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("KALSHI", "Kalshi")));
-        assertEquals(
-                PolymarketIntlInboundOrchestrator.class,
-                DefaultInboundOrchestrator.findInboundOrchestrator(
-                        listingOn("POLYMARKET_INTL", "Polymarket (International)")));
-        assertEquals(
-                PolymarketUsInboundOrchestrator.class,
-                DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("POLYMARKET_US", "Polymarket (US)")));
     }
 
     @Test
@@ -66,9 +40,6 @@ class GatewaySelectionTest {
 
     @Test
     void unknownCode_FailsLoudly() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> DefaultInboundOrchestrator.findInboundOrchestrator(listingOn("UNKNOWN_VENUE", "Unknown")));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> DefaultOutboundOrchestrator.findOutboundOrchestrator(listingOn("UNKNOWN_VENUE", "Unknown")));

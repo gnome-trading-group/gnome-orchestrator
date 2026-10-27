@@ -5,7 +5,7 @@ import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.concurrent.ThreadProfile;
-import group.gnometrading.gateways.GatewayRunners;
+import group.gnometrading.gateways.GatewayHealth;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.LogMessage;
@@ -87,7 +87,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private final long[] lastPriceVersions;
     private final long[] priceChangedAtMs;
 
-    private final GatewayRunners[] gateways;
+    private final GatewayHealth[] gateways;
     private final String[] gatewayNames;
     // Each gateway's resync count at each of the last five minutes' posts, oldest at resyncSlot.
     private final long[][] resyncHistory;
@@ -118,7 +118,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final EpochClock clock,
             final Logger logger,
             final List<GnomeAgentRunner> agents,
-            final List<GatewayRunners> gateways,
+            final List<GatewayHealth> gateways,
             final SharedPriceBuffer prices,
             final PriceSlotRegistry priceSlots,
             final LedgerAgent ledger,
@@ -148,7 +148,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         this.priceSlots = priceSlots;
         this.lastPriceVersions = new long[priceSlots.count()];
         this.priceChangedAtMs = new long[priceSlots.count()];
-        this.gateways = gateways.toArray(new GatewayRunners[0]);
+        this.gateways = gateways.toArray(new GatewayHealth[0]);
         this.gatewayNames = new String[this.gateways.length];
         for (int i = 0; i < this.gateways.length; i++) {
             this.gatewayNames[i] = this.gateways[i].name();
@@ -171,7 +171,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     static int bodyCapacity(
             final String sessionId,
             final List<GnomeAgentRunner> agents,
-            final List<GatewayRunners> gateways,
+            final List<GatewayHealth> gateways,
             final PriceSlotRegistry priceSlots,
             final Map<String, VenueRateLimiter> rateLimiters) {
         int capacity = FIXED_SECTIONS_BYTES + escapedBytes(sessionId);
@@ -179,7 +179,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             capacity += AGENT_ENTRY_BYTES + escapedBytes(agent.getAgent().roleName());
         }
         capacity += priceSlots.count() * LISTING_ENTRY_BYTES;
-        for (GatewayRunners gateway : gateways) {
+        for (GatewayHealth gateway : gateways) {
             capacity += GATEWAY_ENTRY_BYTES + escapedBytes(gateway.name());
         }
         for (String account : rateLimiters.keySet()) {

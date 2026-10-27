@@ -1,8 +1,9 @@
 package group.gnometrading.gateways;
 
 /**
- * Ends the process when a gateway can't go on. A trading session binds its own, which reports why before exiting; a
- * collector or a gateway run on its own just exits.
+ * What a gateway does when it can't go on. A trading session binds its own, which reports why before exiting; a shard
+ * binds one that only logs, as a connection that can't connect keeps retrying and one market's failures are its own
+ * quarantine; a gateway run on its own just exits.
  */
 @FunctionalInterface
 public interface ProcessExit {

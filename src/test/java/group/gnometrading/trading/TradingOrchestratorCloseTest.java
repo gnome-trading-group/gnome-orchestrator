@@ -4,8 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
-import group.gnometrading.gateways.GatewayRunners;
-import group.gnometrading.gateways.ReaderPauseControl;
+import group.gnometrading.gateways.GatewayHealth;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.Mbp10Schema;
@@ -37,24 +36,28 @@ class TradingOrchestratorCloseTest {
         final GnomeAgentRunner strategy = start(polling("strategy", strategyMd.createPoller((s, t, b, l) -> {})));
         final GnomeAgentRunner priceWriter =
                 start(polling("price-writer", strategyMd.createPoller((s, t, b, l) -> {})));
-        final GatewayRunners gatewayA = marketDataGateway(listingA);
-        final GatewayRunners gatewayB = marketDataGateway(listingB);
+        final GnomeAgentRunner feedA = start(new Feed(listingA));
+        final GnomeAgentRunner feedB = start(new Feed(listingB));
         final GnomeAgentRunner muxRunner = start(mux);
         // The order writers send their cancels as they close, one REST call at a time: seconds, during which a busy
         // feed fills the strategy's buffer many times over.
         final GnomeAgentRunner slowOrderWriter = start(new SlowToClose());
         Thread.sleep(300);
 
+        final TradingOrchestrator.MarketData marketData = new TradingOrchestrator.MarketData() {
+            @Override
+            public List<GatewayHealth> health() {
+                return List.of();
+            }
+
+            @Override
+            public void close() throws Exception {
+                feedA.close();
+                feedB.close();
+            }
+        };
         final TradingOrchestrator.AgentRunners started = new TradingOrchestrator.AgentRunners(
-                List.of(gatewayA, gatewayB),
-                strategy,
-                null,
-                List.of(slowOrderWriter),
-                muxRunner,
-                null,
-                null,
-                priceWriter,
-                null);
+                marketData, strategy, null, List.of(slowOrderWriter), muxRunner, null, null, priceWriter, null);
         final Thread closing =
                 new Thread(() -> TradingOrchestrator.closeAgents(started, List.of(), null, null, new NullLogger()));
         closing.setDaemon(true);
@@ -62,16 +65,6 @@ class TradingOrchestratorCloseTest {
         closing.join(TimeUnit.SECONDS.toMillis(15));
 
         assertTrue(!closing.isAlive(), "every agent closed");
-    }
-
-    private static GatewayRunners marketDataGateway(final SequencedRingBuffer<Mbp10Schema> ring) {
-        return GatewayRunners.marketData(
-                        1,
-                        new ReaderPauseControl(),
-                        new GnomeAgentRunner(new Feed(ring), Throwable::printStackTrace),
-                        null,
-                        new GnomeAgentRunner(polling("supervisor", () -> 0), Throwable::printStackTrace))
-                .start();
     }
 
     private static GnomeAgentRunner start(final GnomeAgent agent) {
