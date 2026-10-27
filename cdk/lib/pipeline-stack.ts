@@ -8,7 +8,7 @@ import { PRIMARY_REGION, Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONFIGS, GITHUB_BRANCH, GITHUB_REPO, OrchestratorConfig } from './config';
 import { AmiStack } from './stacks/ami-stack';
 import { Ec2Stack } from './stacks/ec2-stack';
-import { NetworkStack } from './stacks/network-stack';
+import { SessionLogStack } from './stacks/session-log-stack';
 import { StorageStack } from './stacks/storage-stack';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -39,8 +39,8 @@ class AppStage extends cdk.Stage {
 
     for (const region of config.regions) {
       const env = { account: config.account.accountId, region };
-      // Construct id kept from when this stack held the ECS cluster; changing it would recreate the VPC.
-      new NetworkStack(this, `OrchestratorEcsStack-${region}`, { env });
+      // Construct id kept from when this stack held the ECS cluster; changing it would recreate the log group.
+      new SessionLogStack(this, `OrchestratorEcsStack-${region}`, { env });
       new Ec2Stack(this, `OrchestratorEc2Stack-${region}`, {
         env,
         stage: config.account.stage,
