@@ -25,7 +25,9 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
  *
  * <p>{@code -Dsecrets=gnome/market-data/kalshi/md-1,gnome/market-data/kalshi/md-2} (two keys on one account, or one to
  * find a single key's limit), {@code -Durl=} the websocket (default prod), {@code -Dmax=} the most to try per key
- * (default 300), {@code -Dregion=} Secrets Manager's (default us-east-1). Needs AWS credentials for the secrets.
+ * (default 300), {@code -DperSecond=} connects a second (default 2, as the feeds pace Kalshi, so its connect rate limit
+ * isn't mistaken for the connection limit), {@code -Dregion=} Secrets Manager's (default us-east-1). Needs AWS
+ * credentials for the secrets.
  */
 public final class KalshiConnectionLimitCheck {
 
@@ -37,6 +39,7 @@ public final class KalshiConnectionLimitCheck {
         final String[] secretNames = System.getProperty("secrets", "").split(",");
         final URI url = URI.create(System.getProperty("url", "wss://external-api-ws.kalshi.com" + PATH));
         final int max = Integer.getInteger("max", 300);
+        final long spacingMillis = 1000L / Integer.getInteger("perSecond", 2);
         final HttpClient http = HttpClient.newHttpClient();
         final List<WebSocket> open = new ArrayList<>();
         try (SecretsManagerClient secrets = SecretsManagerClient.builder()
@@ -52,6 +55,7 @@ public final class KalshiConnectionLimitCheck {
                 String refusal = "none: reached -Dmax";
                 for (; opened < max; opened++) {
                     try {
+                        TimeUnit.MILLISECONDS.sleep(spacingMillis);
                         open.add(connect(http, url, key));
                     } catch (CompletionException e) {
                         refusal = String.valueOf(e.getCause());

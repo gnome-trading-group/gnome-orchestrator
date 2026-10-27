@@ -1,13 +1,14 @@
 import * as cdk from 'aws-cdk-lib';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as imagebuilder from 'aws-cdk-lib/aws-imagebuilder';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as triggers from 'aws-cdk-lib/triggers';
 import { Construct } from 'constructs';
+import { PLATFORM_SSM } from '@gnome-trading-group/gnome-shared-cdk';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -47,8 +48,6 @@ export function isolatedCpus(vcpus: number): string {
 }
 
 interface Props extends cdk.StackProps {
-  vpc: ec2.IVpc;
-  securityGroup: ec2.ISecurityGroup;
   regions: string[];
 }
 
@@ -82,8 +81,9 @@ export class AmiStack extends cdk.Stack {
       name: 'gnome-orchestrator-ami-build',
       instanceProfileName: instanceProfile.ref,
       instanceTypes: ['c7i.large'],
-      subnetId: props.vpc.publicSubnets[0].subnetId,
-      securityGroupIds: [props.securityGroup.securityGroupId],
+      // Builds run in the platform network (gnome-shared-infra), read from its SSM parameters at deploy time.
+      subnetId: cdk.Fn.select(0, cdk.Fn.split(',', ssm.StringParameter.valueForStringParameter(this, PLATFORM_SSM.subnetIds))),
+      securityGroupIds: [ssm.StringParameter.valueForStringParameter(this, PLATFORM_SSM.securityGroupId)],
       snsTopicArn: completions.topicArn,
       terminateInstanceOnFailure: true,
     });

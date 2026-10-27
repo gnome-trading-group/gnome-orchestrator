@@ -4,7 +4,7 @@ import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
-import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
+import { PRIMARY_REGION, Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONFIGS, GITHUB_BRANCH, GITHUB_REPO, OrchestratorConfig } from './config';
 import { AmiStack } from './stacks/ami-stack';
 import { Ec2Stack } from './stacks/ec2-stack';
@@ -40,19 +40,16 @@ class AppStage extends cdk.Stage {
     for (const region of config.regions) {
       const env = { account: config.account.accountId, region };
       // Construct id kept from when this stack held the ECS cluster; changing it would recreate the VPC.
-      const network = new NetworkStack(this, `OrchestratorEcsStack-${region}`, { env });
+      new NetworkStack(this, `OrchestratorEcsStack-${region}`, { env });
       new Ec2Stack(this, `OrchestratorEc2Stack-${region}`, {
         env,
         stage: config.account.stage,
         registryApiKeyId: config.registryApiKeyId,
-        securityGroup: network.securityGroup,
       });
       // Built once per account and copied to every region, rather than built in each.
-      if (region === 'us-east-1') {
+      if (region === PRIMARY_REGION) {
         new AmiStack(this, 'OrchestratorAmiStack', {
           env,
-          vpc: network.vpc,
-          securityGroup: network.securityGroup,
           regions: config.regions,
         });
       }

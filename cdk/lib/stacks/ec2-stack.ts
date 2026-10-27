@@ -13,12 +13,12 @@ export const LIVE_LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator-live';
 interface Props extends cdk.StackProps {
   stage: Stage;
   registryApiKeyId: string;
-  securityGroup: ec2.ISecurityGroup;
 }
 
 /**
  * What the registry's launcher needs to start a strategy instance in this region. The AMI, instance type,
- * subnet and user data are chosen per session at launch time.
+ * subnet, security group and user data are chosen per session at launch time: the launcher puts sessions in the
+ * platform network (gnome-shared-infra), so the template names no network of its own.
  */
 export class Ec2Stack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
@@ -93,7 +93,6 @@ export class Ec2Stack extends cdk.Stack {
     const template = new ec2.LaunchTemplate(this, live ? 'LiveLaunchTemplate' : 'LaunchTemplate', {
       launchTemplateName: name,
       role,
-      securityGroup: props.securityGroup,
       requireImdsv2: true,
       detailedMonitoring: true,
       ebsOptimized: true,
