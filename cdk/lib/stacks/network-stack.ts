@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
+import { PRIMARY_REGION } from '@gnome-trading-group/gnome-shared-cdk';
 
 export const ORCHESTRATOR_TAG = 'gnome:purpose';
 export const ORCHESTRATOR_TAG_VALUE = 'orchestrator-ecs';
@@ -44,6 +45,14 @@ export class NetworkStack extends cdk.Stack {
       allowAllOutbound: true,
     });
     cdk.Tags.of(this.securityGroup).add(ORCHESTRATOR_TAG, ORCHESTRATOR_TAG_VALUE);
+
+    // Sessions and the AMI builder moved to the platform network, but the stacks that imported these deploy after
+    // this one, and an export can't be deleted while it is still imported: keep them for one release, then delete
+    // them together with this VPC.
+    this.exportValue(this.securityGroup.securityGroupId);
+    if (this.region === PRIMARY_REGION) {
+      this.exportValue(this.vpc.publicSubnets[0].subnetId);
+    }
 
     this.logGroup = new logs.LogGroup(this, 'OrchestratorLogGroup', {
       logGroupName: `/gnome/orchestrator/${this.region}`,
