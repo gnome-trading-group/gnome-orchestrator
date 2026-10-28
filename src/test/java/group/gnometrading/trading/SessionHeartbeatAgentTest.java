@@ -131,6 +131,19 @@ class SessionHeartbeatAgentTest {
         return runner;
     }
 
+    @Test
+    void aListingWhoseBookIsFlaggedBadReportsForHowLong() throws Exception {
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
+        agent.onStart();
+        agent.doWork();
+        prices.markBad(0, (now[0] - 3_000) * 1_000_000);
+        step(agent, POST_MS);
+
+        final JsonNode listing =
+                mapper.readTree(posted.get(posted.size() - 1)).get("listings").get(0);
+        assertEquals(3_000 + POST_MS, listing.get("marketDataBadMs").asLong());
+    }
+
     private SessionHeartbeatAgent heartbeat(final List<GnomeAgentRunner> agents, final List<GatewayHealth> gateways) {
         return new SessionHeartbeatAgent(
                 "s1",
@@ -189,6 +202,7 @@ class SessionHeartbeatAgentTest {
         final JsonNode listing = beat.get("listings").get(0);
         assertEquals(100, listing.get("listingId").asInt());
         assertEquals(2_000, listing.get("priceUnchangedMs").asLong(), "moved at the sample 2s before");
+        assertEquals(0, listing.get("marketDataBadMs").asLong(), "its book is trusted");
         final JsonNode ledgerHealth = beat.get("ledger");
         assertTrue(ledgerHealth.get("lastAcceptedAgoMs").isNull(), "nothing written yet");
         assertEquals(0, ledgerHealth.get("consecutiveFailures").asInt());

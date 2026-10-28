@@ -98,7 +98,8 @@ first heartbeat also counts) -> STOPPING -> STOPPED or FAILED (set by the regist
 instance goes away). On boot it runs `StartupRecovery` (inherits positions, and in live open venue orders, from
 earlier sessions). A session already stopped before startup exits 0 without reporting.
 - Heartbeat: every 5 s to `/api/strategy-sessions/heartbeat` (agents' `stalledMs`/`exited`, per-listing
-  `priceUnchangedMs`, ledger, gateways `reconnecting`/`resyncsLast5m`, risk, rate limiters, host CPU/mem/disk,
+  `priceUnchangedMs` and `marketDataBadMs` (how long its book has been flagged bad data, the OMS refusing new orders;
+  0 trusted), ledger, gateways `reconnecting`/`resyncsLast5m`, risk, rate limiters, host CPU/mem/disk,
   journal backlog). Stops once the registry says the session ended.
 - Journal: segments under `/var/lib/gnome/journal/<sessionId>/`; `gnome-journal-shipper` uploads them to
   `gnome-journals-<stage>/<sessionId>/` and ships open segments after the strategy unit stops. Strategy metrics live
@@ -146,7 +147,7 @@ unset means no alerts):
   Check the listed positions on the venue.
 - Everything else about a session is raised by the registry's session monitor from heartbeat fields
   (gnome-registry `cdk/lambda/monitoring/rules/sessions.ts`): `AGENT_STALLED`, `AGENT_EXITED`, `RECONNECTING`,
-  `BOOK_RESYNCS`, `LEDGER_FAILING`, `LEDGER_FENCED`, `RISK_STALE`, `RISK_UNGUARDED`, `POLICY_UNBUILDABLE`,
+  `BOOK_RESYNCS`, `MARKET_DATA_BAD`, `MARKET_DATA_BAD_HELD`, `LEDGER_FAILING`, `LEDGER_FENCED`, `RISK_STALE`, `RISK_UNGUARDED`, `POLICY_UNBUILDABLE`,
   `LATCHES_DROPPED`, `RATE_LIMIT_THROTTLING`, `HOST_CPU_HIGH`, `HOST_MEMORY_LOW`, `DISK_LOW`, `JOURNAL_BACKLOG`,
   `SILENT`; lifecycle ones (`START_STUCK`, `STOP_STUCK`, `FAILED`) come from other monitor rules.
 - This repo defines no CloudWatch alarms. Collectors have no alerting from here either.

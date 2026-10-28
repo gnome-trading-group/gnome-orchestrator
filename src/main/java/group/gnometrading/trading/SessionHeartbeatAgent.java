@@ -59,7 +59,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private static final int AGENT_ENTRY_BYTES =
             "{\"name\":\"\",\"hotPath\":false,\"stalledMs\":,\"exited\":false},".length() + MAX_NUMBER_BYTES;
     private static final int LISTING_ENTRY_BYTES =
-            "{\"listingId\":,\"priceUnchangedMs\":},".length() + 2 * MAX_NUMBER_BYTES;
+            "{\"listingId\":,\"priceUnchangedMs\":,\"marketDataBadMs\":},".length() + 3 * MAX_NUMBER_BYTES;
     private static final int GATEWAY_ENTRY_BYTES =
             "{\"name\":\"\",\"reconnecting\":false,\"resyncsLast5m\":},".length() + MAX_NUMBER_BYTES;
     private static final int LIMITER_ENTRY_BYTES = "{\"account\":\"\",\"throttling\":false},".length();
@@ -379,9 +379,17 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                     .writeObjectEntry("listingId", priceSlots.listingId(slot))
                     .writeComma()
                     .writeObjectEntry("priceUnchangedMs", now - priceChangedAtMs[slot])
+                    .writeComma()
+                    .writeObjectEntry("marketDataBadMs", marketDataBadMs(slot, now))
                     .writeObjectEnd();
         }
         json.writeArrayEnd();
+    }
+
+    /** How long the listing's book has been flagged bad data, the OMS refusing new orders on it; 0 while trusted. */
+    private long marketDataBadMs(final int slot, final long now) {
+        final long badSinceNanos = prices.badSince(slot);
+        return badSinceNanos == 0 ? 0 : Math.max(1, now - badSinceNanos / 1_000_000);
     }
 
     private void writeLedger(final long now) {
