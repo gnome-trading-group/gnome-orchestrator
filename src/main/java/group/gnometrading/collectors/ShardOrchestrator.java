@@ -187,7 +187,8 @@ public class ShardOrchestrator extends Orchestrator {
                 },
                 WebSocketFeedOpener.Clients.TLS);
 
-        final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(logger, System::nanoTime);
+        final MarketDataCollectorAgent agent =
+                new MarketDataCollectorAgent(logger, System::nanoTime, ShardOrchestrator::wallNanos);
         final ShardRuntime runtime = new ShardRuntime(
                 logger,
                 securityMaster,
@@ -422,5 +423,9 @@ public class ShardOrchestrator extends Orchestrator {
             logger.logf(LogMessage.FATAL_ERROR_EXITING, "%s error: %s", what, CauseChain.of(error));
             System.exit(1);
         };
+    }
+
+    private static long wallNanos() {
+        return TimeUnit.MILLISECONDS.toNanos(System.currentTimeMillis());
     }
 }

@@ -18,10 +18,14 @@ import java.util.function.LongSupplier;
  *
  * <p>Receive timestamps are stamped by the connections' readers, not here, so this agent can sleep when idle without
  * delaying them. It only has to keep up well enough that no ring fills and blocks its reader.
+ *
+ * <p>Every {@link #EXPIRE_EVERY_NANOS} it also hands over minutes that have ended by the wall clock, so a quiet
+ * market's minute is written when it ends, not whenever its next record arrives.
  */
 public final class MarketDataCollectorAgent implements GnomeAgent {
 
     static final long RETIRE_GRACE_NANOS = TimeUnit.SECONDS.toNanos(1);
+    static final long EXPIRE_EVERY_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private record Join(ShardStream stream) {}
 
@@ -29,13 +33,20 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
 
     private final Logger logger;
     private final LongSupplier nanoTime;
+    private final LongSupplier wallNanos;
+    private long nextExpireNanos;
     private final ConcurrentLinkedQueue<Object> commands = new ConcurrentLinkedQueue<>();
     private final List<ShardStream> streams = new ArrayList<>();
     private final List<Leave> leaving = new ArrayList<>();
 
-    MarketDataCollectorAgent(final Logger logger, final LongSupplier nanoTime) {
+    /**
+     * @param nanoTime a monotonic clock, for timing
+     * @param wallNanos epoch nanoseconds, for which minutes have ended
+     */
+    MarketDataCollectorAgent(final Logger logger, final LongSupplier nanoTime, final LongSupplier wallNanos) {
         this.logger = logger;
         this.nanoTime = nanoTime;
+        this.wallNanos = wallNanos;
     }
 
     /** From any thread: starts draining the stream. */
@@ -64,6 +75,7 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
         for (int i = 0; i < streams.size(); i++) {
             work += streams.get(i).poll(now);
         }
+        expire(now);
         for (int i = leaving.size() - 1; i >= 0; i--) {
             final Leave leave = leaving.get(i);
             final int drained = leave.stream().poll(now);
@@ -77,6 +89,17 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
             }
         }
         return work;
+    }
+
+    private void expire(final long now) {
+        if (now < nextExpireNanos) {
+            return;
+        }
+        nextExpireNanos = now + EXPIRE_EVERY_NANOS;
+        final long wall = wallNanos.getAsLong();
+        for (int i = 0; i < streams.size(); i++) {
+            streams.get(i).expire(wall);
+        }
     }
 
     private void flush(final ShardStream stream) {

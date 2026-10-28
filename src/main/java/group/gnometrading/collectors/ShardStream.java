@@ -131,6 +131,13 @@ final class ShardStream {
         collector.writeUntil(untilNanos);
     }
 
+    /** On the agent's thread: hands over minutes that have ended by the wall clock; not a failed collector's. */
+    void expire(final long wallNanos) {
+        if (failure == null) {
+            collector.expire(wallNanos);
+        }
+    }
+
     /** On the agent's thread, once nothing more is published: hands the open minutes to the uploader. */
     void flush() {
         collector.flush();

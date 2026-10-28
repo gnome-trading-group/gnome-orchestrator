@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import group.gnometrading.logging.NullLogger;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -14,7 +15,7 @@ class MarketDataCollectorAgentTest {
 
     private final StreamTestKit kit = new StreamTestKit();
     private final AtomicLong now = new AtomicLong(1_000);
-    private final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(new NullLogger(), now::get);
+    private final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(new NullLogger(), now::get, () -> 0L);
 
     @Test
     void drainsEveryStreamInOnePass() throws Exception {
@@ -60,6 +61,22 @@ class MarketDataCollectorAgentTest {
         agent.doWork();
 
         assertEquals(List.of(), kit.uploads());
+    }
+
+    @Test
+    void aQuietStreamsMinuteIsHandedOverByTheWallClock() throws Exception {
+        long[] wall = {kit.clock.millis() * 1_000_000L};
+        MarketDataCollectorAgent clocked = new MarketDataCollectorAgent(new NullLogger(), now::get, () -> wall[0]);
+        ShardStream stream = kit.stream(1);
+        clocked.add(stream);
+        StreamTestKit.publish(stream, 1);
+        clocked.doWork();
+
+        wall[0] += TimeUnit.MINUTES.toNanos(2);
+        now.addAndGet(MarketDataCollectorAgent.EXPIRE_EVERY_NANOS);
+        clocked.doWork();
+
+        assertEquals(List.of(StreamTestKit.MARKET_BUCKET), kit.uploads(), "written without a later record");
     }
 
     @Test

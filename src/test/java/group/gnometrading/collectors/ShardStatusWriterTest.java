@@ -17,7 +17,8 @@ class ShardStatusWriterTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final StreamTestKit kit = new StreamTestKit();
-    private final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(new NullLogger(), System::nanoTime);
+    private final MarketDataCollectorAgent agent =
+            new MarketDataCollectorAgent(new NullLogger(), System::nanoTime, () -> 0L);
     private final StreamTransitions transitions = new StreamTransitions();
     private List<ShardStream> streams = List.of();
     private List<CollectorHeartbeat.Connection> connections = List.of();

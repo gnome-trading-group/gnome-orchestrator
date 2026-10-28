@@ -20,7 +20,8 @@ class CollectorHeartbeatTest {
     private static final long SECOND = TimeUnit.SECONDS.toNanos(1);
 
     private final StreamTestKit kit = new StreamTestKit();
-    private final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(new NullLogger(), System::nanoTime);
+    private final MarketDataCollectorAgent agent =
+            new MarketDataCollectorAgent(new NullLogger(), System::nanoTime, () -> 0L);
     private List<ShardStream> streams = List.of();
     private List<CollectorHeartbeat.Connection> connections = List.of();
 
