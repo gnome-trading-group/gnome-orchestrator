@@ -30,12 +30,12 @@ class TradingOrchestratorCloseTest {
                 new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
         final SequencedRingBuffer<Mbp10Schema> listingB =
                 new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
-        // As the session builds it: the strategy's buffer at its default size, read by the strategy and price writer.
+        // As the session builds it: the strategy's buffer at its default size, read by the strategy and by the OMS
+        // (its price writer).
         final SequencedRingBuffer<?> strategyMd = new SequencedRingBuffer<>(Intent::new, new GlobalSequence());
         final MarketDataMultiplexer mux = new MarketDataMultiplexer(List.of(listingA, listingB), strategyMd);
         final GnomeAgentRunner strategy = start(polling("strategy", strategyMd.createPoller((s, t, b, l) -> {})));
-        final GnomeAgentRunner priceWriter =
-                start(polling("price-writer", strategyMd.createPoller((s, t, b, l) -> {})));
+        final GnomeAgentRunner oms = start(polling("oms", strategyMd.createPoller((s, t, b, l) -> {})));
         final GnomeAgentRunner feedA = start(new Feed(listingA));
         final GnomeAgentRunner feedB = start(new Feed(listingB));
         final GnomeAgentRunner muxRunner = start(mux);
@@ -57,7 +57,7 @@ class TradingOrchestratorCloseTest {
             }
         };
         final TradingOrchestrator.AgentRunners started = new TradingOrchestrator.AgentRunners(
-                marketData, strategy, null, List.of(slowOrderWriter), muxRunner, null, null, priceWriter, null);
+                marketData, strategy, oms, List.of(slowOrderWriter), muxRunner, null, null, null);
         final Thread closing =
                 new Thread(() -> TradingOrchestrator.closeAgents(started, List.of(), null, null, new NullLogger()));
         closing.setDaemon(true);

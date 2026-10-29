@@ -35,7 +35,7 @@ import group.gnometrading.oms.ledger.LedgerAgent;
 import group.gnometrading.oms.ledger.LedgerRing;
 import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
-import group.gnometrading.oms.pnl.PriceWriterAgent;
+import group.gnometrading.oms.pnl.PriceWriter;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.PositionView;
@@ -282,8 +282,7 @@ public class TradingOrchestrator extends Orchestrator {
         }
         journalSources.put(strategyMdBuffer, JournalSource.STRATEGY_MARKET_DATA);
 
-        PriceWriterAgent priceWriterAgent =
-                new PriceWriterAgent(priceBuffer, priceSlotRegistry, streams, strategyMdBuffer);
+        PriceWriter priceWriter = new PriceWriter(priceBuffer, priceSlotRegistry, streams, strategyMdBuffer);
 
         SequencedRingBuffer<Intent> orderOutboundBuffer =
                 new SequencedRingBuffer<>(Intent::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
@@ -311,6 +310,7 @@ public class TradingOrchestrator extends Orchestrator {
                 omsExecReportBuffer,
                 orderOutboundBuffer,
                 stratExecReportBuffer,
+                priceWriter,
                 getInstance(EpochNanoClock.class));
         StrategyAgent strategy = createStrategyAgent(
                 strategyId, strategyMdBuffer, stratExecReportBuffer, intentBuffer, positionView, securityMaster);
@@ -352,7 +352,6 @@ public class TradingOrchestrator extends Orchestrator {
                 routerAgent,
                 strategy,
                 ledgerAgent,
-                priceWriterAgent,
                 riskSyncAgent,
                 riskEngine,
                 logger,
@@ -409,7 +408,6 @@ public class TradingOrchestrator extends Orchestrator {
         }
         // After the OMS and gateways, so its final write holds everything they recorded while closing.
         closeQuietly(started.ledger(), logger);
-        closeQuietly(started.priceWriter(), logger);
         closeQuietly(started.riskSync(), logger);
         // Last, so the journal holds everything the agents wrote while closing.
         closeQuietly(journalRunner, logger);
@@ -482,7 +480,6 @@ public class TradingOrchestrator extends Orchestrator {
             started.mux(),
             started.router(),
             started.ledger(),
-            started.priceWriter(),
             started.riskSync(),
             // A stuck journal holds up market data and every trading buffer once their rings fill.
             journalRunner
@@ -731,7 +728,6 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner mux,
             GnomeAgentRunner router,
             GnomeAgentRunner ledger,
-            GnomeAgentRunner priceWriter,
             GnomeAgentRunner riskSync) {}
 
     private static AgentRunners startAgentRunners(
@@ -742,7 +738,6 @@ public class TradingOrchestrator extends Orchestrator {
             ListingRouter routerAgent,
             StrategyAgent strategy,
             LedgerAgent ledgerAgent,
-            PriceWriterAgent priceWriterAgent,
             RiskSyncAgent riskSyncAgent,
             RiskEngine riskEngine,
             Logger logger,
@@ -763,8 +758,6 @@ public class TradingOrchestrator extends Orchestrator {
         }
         GnomeAgentRunner omsRunner = new GnomeAgentRunner(omsAgent, errorHandler);
         GnomeAgentRunner.startOnThread(omsRunner);
-        GnomeAgentRunner priceWriterRunner = new GnomeAgentRunner(priceWriterAgent, errorHandler);
-        GnomeAgentRunner.startOnThread(priceWriterRunner);
         List<GnomeAgentRunner> outboundRunners = new ArrayList<>(outboundAgents.size());
         for (GnomeAgent outbound : outboundAgents) {
             GnomeAgentRunner runner = new GnomeAgentRunner(outbound, errorHandler);
@@ -796,7 +789,6 @@ public class TradingOrchestrator extends Orchestrator {
                 muxRunner,
                 routerRunner,
                 ledgerRunner,
-                priceWriterRunner,
                 riskSyncRunner);
     }
 
