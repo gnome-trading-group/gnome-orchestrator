@@ -68,7 +68,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-oms</artifactId>
-            <version>1.13.1</version>
+            <version>1.13.2</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -78,7 +78,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-schemas</artifactId>
-            <version>2.2.0</version>
+            <version>2.3.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -88,12 +88,12 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>2.0.7</version>
+            <version>2.0.8</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-sequencer</artifactId>
-            <version>2.4.0</version>
+            <version>2.5.0</version>
         </dependency>
         <dependency>
             <groupId>io.aeron</groupId>

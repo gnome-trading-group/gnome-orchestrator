@@ -93,6 +93,9 @@ class ShardStatusWriterTest {
         assertEquals(12, line.get("id").asInt());
         assertEquals("SUBSCRIBING", line.get("state").asText());
         assertEquals(3, line.get("records").asLong());
+        assertEquals(false, line.get("published").asBoolean());
+        assertEquals(0, line.get("offered").asLong());
+        assertEquals(0, line.get("dropped").asLong());
         assertEquals(stream.lastEventNanos(), line.get("last_event_ns").asLong());
         assertFalse(line.has("failure"));
         assertEquals("md-1", status.get("connections").get(0).get("account").asText());

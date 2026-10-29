@@ -59,6 +59,7 @@ final class ShardRuntime {
     private final ShardAccounts accounts;
     private final StreamTransitions transitions;
     private final EpochNanoClock wallClock;
+    private final StreamPublishing publishing;
     private final Map<Integer, ShardStream> running = new HashMap<>();
     // The latest assignment applied: a stream started or restarted between polls takes its write window from it.
     private Assignment.Streams applied = new Assignment.Streams(-1, new int[0]);
@@ -83,7 +84,8 @@ final class ShardRuntime {
             final Function<String, String> accountOf,
             final ShardAccounts accounts,
             final StreamTransitions transitions,
-            final EpochNanoClock wallClock) {
+            final EpochNanoClock wallClock,
+            final StreamPublishing publishing) {
         this.logger = logger;
         this.securityMaster = securityMaster;
         this.assignment = assignment;
@@ -95,6 +97,7 @@ final class ShardRuntime {
         this.accounts = accounts;
         this.transitions = transitions;
         this.wallClock = wallClock;
+        this.publishing = publishing;
     }
 
     /** The streams running, for the heartbeat's thread. */
@@ -174,6 +177,7 @@ final class ShardRuntime {
         for (ShardStream stream : running.values()) {
             applyWindow(stream);
         }
+        applyPublish(assigned);
         generation = assigned.generation();
         publishView();
     }
@@ -194,6 +198,7 @@ final class ShardRuntime {
                     streamId, source.code() + " " + info.nativeSubjectId() + " (stream " + streamId + ")");
             applyWindow(stream);
             agent.add(stream);
+            publishing.add(stream);
             feeds.addStream(streamId, source.code(), info.nativeSubjectId(), stream.ring(), now);
             stream.subject(feeds.subject(streamId));
             running.put(streamId, stream);
@@ -203,6 +208,7 @@ final class ShardRuntime {
         } catch (Throwable error) {
             if (stream != null) {
                 agent.retire(stream, null);
+                publishing.retire(stream);
             }
             retryAt.put(streamId, now + RETRY_NANOS);
             logger.logf(
@@ -221,7 +227,44 @@ final class ShardRuntime {
     private void stop(final ShardStream stream, final long now) {
         feeds.removeStream(stream.streamId(), now);
         agent.retire(stream, null);
+        unpublish(stream);
+        publishing.retire(stream);
         record(stream, StreamTransitions.NONE);
+    }
+
+    /**
+     * Opens a publication for every running stream a session leases and closes the rest. A stream started on a later
+     * tick (a retry) gets its publication on the next assignment change or poll after it starts.
+     */
+    private void applyPublish(final Assignment.Streams assigned) {
+        final Set<Integer> leased = new HashSet<>();
+        for (int streamId : assigned.publish()) {
+            leased.add(streamId);
+        }
+        for (ShardStream stream : running.values()) {
+            final boolean wanted = leased.contains(stream.streamId());
+            if (wanted && stream.publication() == null) {
+                try {
+                    stream.publication(publishing.open(stream.streamId()));
+                } catch (Throwable error) {
+                    logger.logf(
+                            LogMessage.UNKNOWN_ERROR,
+                            "Can't publish %s, retrying at the next assignment: %s",
+                            stream.name(),
+                            CauseChain.of(error));
+                }
+            } else if (!wanted && stream.publication() != null) {
+                unpublish(stream);
+            }
+        }
+    }
+
+    private void unpublish(final ShardStream stream) {
+        final StreamPublication publication = stream.publication();
+        if (publication != null) {
+            stream.publication(null);
+            publication.close();
+        }
     }
 
     private void recordStates() {
@@ -284,6 +327,8 @@ final class ShardRuntime {
         feeds.closeAll();
         for (ShardStream stream : running.values()) {
             agent.retire(stream, done);
+            unpublish(stream);
+            publishing.retire(stream);
             record(stream, StreamTransitions.NONE);
         }
         running.clear();

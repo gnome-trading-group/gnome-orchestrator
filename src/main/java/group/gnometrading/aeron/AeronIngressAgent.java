@@ -14,7 +14,7 @@ import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
  * Polls every Aeron subscription a process reads (a session's shard streams, later its order-gateway replies) on one
  * thread, handing each message to its subscription's {@link Sink}. A sink that has no room leaves the message in
  * Aeron's log to be offered again on the next pass, so nothing is dropped or reordered here: a reader that stays behind
- * long enough falls off the end of the shard's term, which the session sees as a stalled stream (Phase 10, §3).
+ * long enough falls off the end of the shard's term, which the session sees as a stalled stream.
  *
  * <p>Subscriptions are added and removed from any thread; the change takes effect on the agent's next pass. Zero
  * allocation on the poll path once added.
@@ -40,7 +40,10 @@ public final class AeronIngressAgent implements GnomeAgent {
         offer(new Change(new Entry(subscription, sink), true));
     }
 
-    /** Stops polling {@code subscription}; the caller closes it once the agent has let go (or on its own thread). */
+    /**
+     * Stops polling {@code subscription} from the agent's next pass. Closing blocks on the media driver, so the caller
+     * closes it, off the agent's thread, once that pass has run.
+     */
     public void remove(final Subscription subscription) {
         offer(new Change(new Entry(subscription, null), false));
     }

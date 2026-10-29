@@ -1,6 +1,7 @@
 package group.gnometrading.trading;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
@@ -28,6 +29,7 @@ import org.junit.jupiter.api.Test;
 /** Drives the gateway against a real simulated exchange, advancing a hand-held clock. */
 class PaperTradingOutboundGatewayTest {
 
+    private static final int STREAM_ID = 101;
     private static final long NETWORK = 5_000_000L;
     private static final long PROCESSING = 1_000_000L;
     private static final long TAKER_DELAY = 250_000_000L;
@@ -55,7 +57,7 @@ class PaperTradingOutboundGatewayTest {
         marketDataBuffer = new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
         execReportBuffer = new SequencedRingBuffer<>(OrderExecutionReport::new, new GlobalSequence());
         gateway = new PaperTradingOutboundGateway(
-                exchange, marketDataBuffer, orderBuffer, execReportBuffer, () -> now, "session-a");
+                exchange, marketDataBuffer, STREAM_ID, orderBuffer, execReportBuffer, () -> now, "session-a");
         execReportPoller = execReportBuffer.createPoller((globalSeq, templateId, buf, len) -> {
             OrderExecutionReport report = new OrderExecutionReport();
             report.buffer.putBytes(0, buf, 0, len);
@@ -65,6 +67,25 @@ class PaperTradingOutboundGatewayTest {
 
         publishBook(49, 10, 51, 10);
         gateway.doWork();
+    }
+
+    @Test
+    void anotherStreamsBooksNeverReachThisListingsExchange() throws Exception {
+        Mbp10Schema other = emptyMbp10(Action.Add);
+        other.encoder
+                .streamId(STREAM_ID + 1)
+                .bidPrice0(60)
+                .bidSize0(10)
+                .askPrice0(61)
+                .askSize0(10);
+        publishMarketData(other);
+        gateway.doWork();
+
+        // Against the other stream's 60 bid this would fill; against this listing's 49 bid it rests.
+        publishLimit(55, 5, Side.Ask, 1L);
+        stepTo(now + TAKER_DELAY + 4 * NETWORK);
+
+        assertTrue(reports.stream().noneMatch(r -> r.decoder.execType() == ExecType.FILL));
     }
 
     @Test
@@ -230,7 +251,8 @@ class PaperTradingOutboundGatewayTest {
     private static Mbp10Schema emptyMbp10(Action action) {
         Mbp10Schema schema = new Mbp10Schema();
         var e = schema.encoder;
-        e.action(action)
+        e.streamId(STREAM_ID)
+                .action(action)
                 .side(group.gnometrading.schemas.book.Side.None)
                 .price(PRICE_NULL)
                 .size(SIZE_NULL);

@@ -58,6 +58,7 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
     private final Order order = new Order();
     private final CancelOrder cancelOrder = new CancelOrder();
     private final ModifyOrder modifyOrder = new ModifyOrder();
+    private final int streamId;
 
     private final FixedCapacityQueue<PendingAction> pendingActions =
             new FixedCapacityQueue<>(PendingAction[]::new, PendingAction::new, PENDING_CAPACITY);
@@ -70,14 +71,20 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
     private final byte[] orderIdBytes = new byte[OrderExecutionReportEncoder.exchangeOrderIdLength()];
     private final ByteBuffer orderIdBuffer = ByteBuffer.wrap(orderIdBytes);
 
+    /**
+     * @param streamId the listing's book stream: the buffer may carry several streams (a session reading from shards
+     *     puts all of them in one), and the exchange simulates only its own.
+     */
     public PaperTradingOutboundGateway(
             SimulatedExchange exchange,
             SequencedRingBuffer<?> marketDataBuffer,
+            int streamId,
             SequencedRingBuffer<?> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             EpochNanoClock clock,
             String sessionTag) {
         this.exchange = exchange;
+        this.streamId = streamId;
         this.orderIdPrefix = (sessionTag + "-").getBytes(StandardCharsets.US_ASCII);
         this.execReportBuffer = execReportBuffer;
         this.clock = clock;
@@ -112,6 +119,9 @@ public final class PaperTradingOutboundGateway implements GnomeAgent {
     private void onMarketData(long globalSeq, int templateId, UnsafeBuffer buf, int len) {
         if (templateId == Mbp10Decoder.TEMPLATE_ID) {
             mbp10.wrap(buf);
+            if (mbp10.streamId() != streamId) {
+                return;
+            }
             scheduleExecReports(exchange.onMarketData(mbp10), exchange.simulateNetworkLatency());
         }
     }

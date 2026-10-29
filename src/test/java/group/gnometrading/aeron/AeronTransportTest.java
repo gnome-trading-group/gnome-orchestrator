@@ -23,7 +23,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The Aeron behaviour Phase 10 relies on, checked against real media drivers on loopback: one per simulated host.
+ * The Aeron behaviour sessions and shards rely on, checked against real media drivers on loopback: one per simulated host.
  * Re-run on every Aeron upgrade.
  */
 class AeronTransportTest {

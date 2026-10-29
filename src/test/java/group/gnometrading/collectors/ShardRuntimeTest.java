@@ -130,6 +130,51 @@ class ShardRuntimeTest {
     private final ShardAccounts accounts = new ShardAccounts();
     private final StreamTransitions transitions = new StreamTransitions();
     private long wallNanos = 1_000_000;
+
+    /** A publication that records whether it was closed. */
+    private static final class FakePublication implements StreamPublication {
+        boolean closed;
+
+        @Override
+        public long offer(final org.agrona.DirectBuffer buffer, final int offset, final int length) {
+            return 1;
+        }
+
+        @Override
+        public long position() {
+            return 0;
+        }
+
+        @Override
+        public int sessionId() {
+            return 1;
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+    }
+
+    private final List<Integer> opened = new ArrayList<>();
+    private final List<ShardStream> publisherStreams = new ArrayList<>();
+    private final StreamPublishing publishing = new StreamPublishing() {
+        @Override
+        public void add(final ShardStream stream) {
+            publisherStreams.add(stream);
+        }
+
+        @Override
+        public void retire(final ShardStream stream) {
+            publisherStreams.remove(stream);
+        }
+
+        @Override
+        public StreamPublication open(final int streamId) {
+            opened.add(streamId);
+            return new FakePublication();
+        }
+    };
     private final ShardRuntime runtime = new ShardRuntime(
             new NullLogger(),
             securityMaster,
@@ -174,7 +219,8 @@ class ShardRuntimeTest {
             source -> null,
             accounts,
             transitions,
-            () -> wallNanos);
+            () -> wallNanos,
+            publishing);
 
     ShardRuntimeTest() {
         when(securityMaster.getSource(1))
@@ -248,6 +294,50 @@ class ShardRuntimeTest {
         assertEquals("T10", running(10).subject().key());
         assertEquals(List.of("KALSHI", "KALSHI"), sourcesAdded);
         assertEquals(1, runtime.connections().size(), "both on one connection");
+    }
+
+    @Test
+    void everyStartedStreamIsHandedToThePublisherAndLeasedOnesArePublished() {
+        assigned.set(new Assignment.Streams(1, new int[] {10, 11}, Map.of(), Map.of(), Map.of(), new int[] {10}));
+        runtime.tick(0);
+
+        assertEquals(
+                List.of(10, 11),
+                publisherStreams.stream().map(ShardStream::streamId).sorted().toList());
+        assertEquals(List.of(10), opened);
+        assertNotNull(running(10).publication());
+        assertNull(running(11).publication());
+    }
+
+    @Test
+    void aLeaseThatEndsClosesThePublicationAndAStoppedStreamClosesItsOwn() {
+        assigned.set(new Assignment.Streams(1, new int[] {10, 11}, Map.of(), Map.of(), Map.of(), new int[] {10, 11}));
+        runtime.tick(0);
+        final FakePublication ten = (FakePublication) running(10).publication();
+        final FakePublication eleven = (FakePublication) running(11).publication();
+
+        assigned.set(new Assignment.Streams(2, new int[] {11}, Map.of(), Map.of(), Map.of(), new int[0]));
+        runtime.tick(POLL);
+
+        assertTrue(ten.closed, "its stream stopped");
+        assertTrue(eleven.closed, "no longer leased");
+        assertNull(running(11).publication());
+        assertEquals(
+                List.of(11),
+                publisherStreams.stream().map(ShardStream::streamId).toList());
+        assertEquals(List.of(10, 11), opened, "nothing opened twice");
+    }
+
+    @Test
+    void aStillLeasedStreamKeepsItsPublicationAcrossPolls() {
+        assigned.set(new Assignment.Streams(1, new int[] {10}, Map.of(), Map.of(), Map.of(), new int[] {10}));
+        runtime.tick(0);
+        final StreamPublication first = running(10).publication();
+
+        runtime.tick(POLL);
+
+        assertSame(first, running(10).publication());
+        assertEquals(List.of(10), opened);
     }
 
     @Test

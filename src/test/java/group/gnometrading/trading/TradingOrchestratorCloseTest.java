@@ -46,6 +46,9 @@ class TradingOrchestratorCloseTest {
 
         final TradingOrchestrator.MarketData marketData = new TradingOrchestrator.MarketData() {
             @Override
+            public void start(final org.agrona.ErrorHandler errorHandler) {}
+
+            @Override
             public List<GatewayHealth> health() {
                 return List.of();
             }

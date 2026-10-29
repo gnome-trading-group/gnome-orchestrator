@@ -2,6 +2,7 @@ package group.gnometrading.collectors;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import group.gnometrading.aeron.HostAddress;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -17,7 +18,6 @@ import java.time.Duration;
 final class ShardIdentity {
 
     private static final String METADATA_URI = "ECS_CONTAINER_METADATA_URI_V4";
-    private static final String IMDS = "http://169.254.169.254/latest";
     private static final Duration TIMEOUT = Duration.ofSeconds(1);
 
     private ShardIdentity() {}
@@ -26,7 +26,11 @@ final class ShardIdentity {
             final ObjectMapper mapper, final String shard, final String version, final long startedAtNanos) {
         final HttpClient http = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
         return new ShardStatusWriter.Identity(
-                shard, taskId(http, mapper, System.getenv(METADATA_URI)), privateIp(http), version, startedAtNanos);
+                shard,
+                taskId(http, mapper, System.getenv(METADATA_URI)),
+                HostAddress.privateIp(),
+                version,
+                startedAtNanos);
     }
 
     static String taskId(final HttpClient http, final ObjectMapper mapper, final String metadataUri) {
@@ -48,26 +52,6 @@ final class ShardIdentity {
             throw new IllegalArgumentException("Task metadata has no TaskARN");
         }
         return arn.substring(arn.lastIndexOf('/') + 1);
-    }
-
-    private static String privateIp(final HttpClient http) {
-        try {
-            final String token = send(
-                    http,
-                    HttpRequest.newBuilder(URI.create(IMDS + "/api/token"))
-                            .header("X-aws-ec2-metadata-token-ttl-seconds", "60")
-                            .PUT(HttpRequest.BodyPublishers.noBody()));
-            return get(
-                    http,
-                    HttpRequest.newBuilder(URI.create(IMDS + "/meta-data/local-ipv4"))
-                            .header("X-aws-ec2-metadata-token", token));
-        } catch (Exception e) {
-            try {
-                return InetAddress.getLocalHost().getHostAddress();
-            } catch (Exception unknown) {
-                return null;
-            }
-        }
     }
 
     private static String hostname() {

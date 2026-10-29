@@ -7,6 +7,9 @@ import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.account.SessionAccounts;
 import group.gnometrading.account.VenueAccount;
+import group.gnometrading.aeron.AeronProfile;
+import group.gnometrading.aeron.AeronRuntime;
+import group.gnometrading.aeron.HostAddress;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Orchestrator;
@@ -46,6 +49,7 @@ import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Intent;
+import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.MetricRow;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.sequencer.GlobalSequence;
@@ -71,24 +75,30 @@ import group.gnometrading.strategies.StrategyAgent;
 import group.gnometrading.strategies.StrategyFactory;
 import group.gnometrading.trading.recovery.SessionNotRunnableException;
 import group.gnometrading.trading.recovery.StartupRecovery;
+import group.gnometrading.utils.CauseChain;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import org.agrona.concurrent.SystemNanoClock;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 
 /**
  * Concrete orchestrator for all live and paper trading sessions.
@@ -119,7 +129,9 @@ public class TradingOrchestrator extends Orchestrator {
         instanceClass = TradingOrchestrator.class;
     }
 
-    private static final int OUTBOUND_BUFFER_SIZE = 64;
+    // The OMS waits when one is full, and it reads the market data the strategy sees (to price takes against it): room
+    // for a kill sweep's cancels or a busy strategy's reports keeps a slow venue writer from stopping the books too.
+    private static final int OUTBOUND_BUFFER_SIZE = 1024;
     private static final int LEDGER_CONNECT_TIMEOUT_MS = 1_000;
     private static final int LEDGER_RESPONSE_TIMEOUT_MS = 2_000;
     private static final long HEARTBEAT_SAMPLE_INTERVAL_MS = 1_000;
@@ -218,7 +230,7 @@ public class TradingOrchestrator extends Orchestrator {
         SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         int strategyId = properties.getIntProperty("strategy.id");
         List<Listing> listings = resolveListings(properties, securityMaster);
-        StreamDirectory streams = sessionStreams(securityMaster, listings);
+        StreamDirectory streams = sessionStreams(securityMaster, listings, dataStreams(properties));
         ListingDirectory listingDirectory = RiskModule.directory(listings);
         RiskEngine riskEngine = RiskModule.riskEngine(properties, listingDirectory);
         AgentRuntimeInstaller.install(properties, logger, listings.size());
@@ -229,8 +241,10 @@ public class TradingOrchestrator extends Orchestrator {
         GlobalSequence sessionSequence = new GlobalSequence();
         Map<SequencedRingBuffer<?>, JournalSource> journalSources = new IdentityHashMap<>();
 
-        SessionFeeds marketData = createMarketData(logger, properties, securityMaster, listings, sessionSequence);
-        List<SequencedRingBuffer<?>> perListingMdBuffers = marketData.rings();
+        SessionMarketData sessionMarketData =
+                sessionMarketData(logger, properties, securityMaster, listings, streams, sessionSequence);
+        MarketData marketData = sessionMarketData.marketData();
+        List<SequencedRingBuffer<?>> perListingMdBuffers = sessionMarketData.perListing();
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(sharedBuffer);
         String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
@@ -272,14 +286,8 @@ public class TradingOrchestrator extends Orchestrator {
                 new SequencedRingBuffer<>(MetricRow::new, sessionSequence);
         journalSources.put(strategyMetricBuffer, JournalSource.STRATEGY_METRIC);
 
-        SequencedRingBuffer<?> strategyMdBuffer;
-        MarketDataMultiplexer muxAgent = null;
-        if (listings.size() == 1) {
-            strategyMdBuffer = perListingMdBuffers.get(0);
-        } else {
-            strategyMdBuffer = new SequencedRingBuffer<>(Intent::new, sessionSequence);
-            muxAgent = new MarketDataMultiplexer(perListingMdBuffers, strategyMdBuffer);
-        }
+        SequencedRingBuffer<?> strategyMdBuffer = sessionMarketData.strategyBuffer();
+        MarketDataMultiplexer muxAgent = sessionMarketData.mux();
         journalSources.put(strategyMdBuffer, JournalSource.STRATEGY_MARKET_DATA);
 
         PriceWriter priceWriter = new PriceWriter(priceBuffer, priceSlotRegistry, streams, strategyMdBuffer);
@@ -300,7 +308,13 @@ public class TradingOrchestrator extends Orchestrator {
 
         Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
         OutboundSetup outboundSetup = setupOutbound(
-                listings, perListingMdBuffers, orderOutboundBuffer, omsExecReportBuffer, routedBuffers, venueQueries);
+                listings,
+                streams,
+                perListingMdBuffers,
+                orderOutboundBuffer,
+                omsExecReportBuffer,
+                routedBuffers,
+                venueQueries);
         List<GnomeAgent> outboundAgents = outboundSetup.agents();
         ListingRouter routerAgent = outboundSetup.router();
 
@@ -603,10 +617,136 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
-    /** The book streams of the session's listings, which its market data names. */
-    private static StreamDirectory sessionStreams(SecurityMaster securityMaster, List<Listing> listings) {
+    /**
+     * Where the session's market data comes from and the buffer the strategy reads it in. From shards, every stream
+     * goes straight into that one buffer. From its own feeds, a lone listing's ring is that buffer; with
+     * several, a multiplexer copies each listing's ring into it.
+     */
+    private record SessionMarketData(
+            MarketData marketData,
+            List<SequencedRingBuffer<?>> perListing,
+            SequencedRingBuffer<?> strategyBuffer,
+            MarketDataMultiplexer mux) {}
+
+    private SessionMarketData sessionMarketData(
+            Logger logger,
+            Properties properties,
+            SecurityMaster securityMaster,
+            List<Listing> listings,
+            StreamDirectory streams,
+            GlobalSequence sessionSequence) {
+        if (readsShards(properties)) {
+            SequencedRingBuffer<?> buffer = new SequencedRingBuffer<>(Mbp10Schema::new, sessionSequence);
+            return new SessionMarketData(
+                    createShardMarketData(logger, properties, listings, streams, dataStreams(properties), buffer),
+                    Collections.nCopies(listings.size(), buffer),
+                    buffer,
+                    null);
+        }
+        SessionFeeds feeds = createMarketData(logger, properties, securityMaster, listings, sessionSequence);
+        List<SequencedRingBuffer<?>> rings = feeds.rings();
+        if (listings.size() == 1) {
+            return new SessionMarketData(feeds, rings, rings.get(0), null);
+        }
+        SequencedRingBuffer<?> merged = new SequencedRingBuffer<>(Intent::new, sessionSequence);
+        return new SessionMarketData(feeds, rings, merged, new MarketDataMultiplexer(rings, merged));
+    }
+
+    /** The book streams of the session's listings, and the data-only streams it reads, which its market data names. */
+    private static StreamDirectory sessionStreams(
+            SecurityMaster securityMaster, List<Listing> listings, int[] dataStreams) {
         return StreamDirectory.of(
-                securityMaster, listings.stream().mapToInt(Listing::listingId).toArray(), new int[0]);
+                securityMaster, listings.stream().mapToInt(Listing::listingId).toArray(), dataStreams);
+    }
+
+    /** {@code streams}: market-data streams the session reads but doesn't trade (JSON ids); none when absent. */
+    static int[] dataStreams(Properties properties) {
+        if (!properties.hasProperty("streams")) {
+            return new int[0];
+        }
+        try {
+            return MAPPER.readValue(properties.getStringProperty("streams"), int[].class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to parse the streams property", e);
+        }
+    }
+
+    /**
+     * Whether the session reads its market data from shards rather than opening venue connections: paper sessions the
+     * launcher leased streams for (it passes the market-data API). Live sessions still open their own; a local run has
+     * no lease.
+     */
+    static boolean readsShards(Properties properties) {
+        return "paper".equals(properties.getStringProperty("mode"))
+                && properties.hasProperty("session.id")
+                && properties.hasProperty("market.data.api.url");
+    }
+
+    private ShardMarketData createShardMarketData(
+            Logger logger,
+            Properties properties,
+            List<Listing> listings,
+            StreamDirectory streams,
+            int[] dataStreams,
+            SequencedRingBuffer<?> buffer) {
+        List<StreamFeed> feeds = new ArrayList<>();
+        List<GatewayHealth> health = new ArrayList<>();
+        for (Listing listing : listings) {
+            StreamFeed feed =
+                    new StreamFeed(streams.streamId(listing.listingId()), "market data " + listing.listingId());
+            feeds.add(feed);
+            health.add(feed);
+        }
+        for (int streamId : dataStreams) {
+            feeds.add(new StreamFeed(streamId, "stream " + streamId));
+        }
+        AeronRuntime aeron = AeronRuntime.launch(
+                "session",
+                AgentRuntimeInstaller.pinsHotAgents(properties) ? AeronProfile.LATENCY : AeronProfile.STANDARD,
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
+        String sessionId = properties.getStringProperty("session.id");
+        MarketDataLeases client = new MarketDataLeases(
+                HttpClient.newHttpClient(),
+                URI.create(properties.getStringProperty("market.data.api.url")),
+                marketDataApiKey(properties.getStringProperty("market.data.api.key.secret")),
+                MAPPER);
+        long startTimeout = properties.getLongProperty("market.data.start.timeout.seconds");
+        return new ShardMarketData(
+                logger,
+                aeron,
+                HostAddress.privateIp(),
+                () -> client.get(sessionId),
+                feeds,
+                health,
+                new ShardFeedAgent(buffer, feeds, System::nanoTime),
+                TimeUnit.SECONDS.toNanos(startTimeout),
+                System::nanoTime);
+    }
+
+    /** The market-data API key from its Secrets Manager copy, which lives in us-east-1 only; read again after a rotation. */
+    private static MarketDataLeases.ApiKey marketDataApiKey(String secretName) {
+        AtomicReference<String> key = new AtomicReference<>();
+        return new MarketDataLeases.ApiKey() {
+            @Override
+            public String get() {
+                String known = key.get();
+                if (known == null) {
+                    try (SecretsManagerClient secrets = SecretsManagerClient.builder()
+                            .region(Region.US_EAST_1)
+                            .build()) {
+                        known = secrets.getSecretValue(request -> request.secretId(secretName))
+                                .secretString();
+                    }
+                    key.set(known);
+                }
+                return known;
+            }
+
+            @Override
+            public void invalidate() {
+                key.set(null);
+            }
+        };
     }
 
     /** A lone listing's market data is what the strategy reads, so it goes straight onto the session sequence. */
@@ -674,6 +814,7 @@ public class TradingOrchestrator extends Orchestrator {
 
     private OutboundSetup setupOutbound(
             List<Listing> listings,
+            StreamDirectory streams,
             List<SequencedRingBuffer<?>> perListingMdBuffers,
             SequencedRingBuffer<Intent> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
@@ -684,6 +825,7 @@ public class TradingOrchestrator extends Orchestrator {
         if (routedBuffers == null) {
             agents.add(createOutboundGateway(
                     listings.get(0),
+                    streams,
                     perListingMdBuffers.get(0),
                     orderOutboundBuffer,
                     omsExecReportBuffer,
@@ -703,6 +845,7 @@ public class TradingOrchestrator extends Orchestrator {
             perListingOutBufs.put(routingKey, perExchangeOutBuf);
             agents.add(createOutboundGateway(
                     listing,
+                    streams,
                     perListingMdBuffers.get(i),
                     perExchangeOutBuf,
                     perExchangeExecBuf,
@@ -716,6 +859,9 @@ public class TradingOrchestrator extends Orchestrator {
 
     /** A session's market data, as the close order and the heartbeat see it. */
     interface MarketData extends AutoCloseable {
+        /** Starts delivering; may wait for it to be ready, and throws if it can't be. */
+        void start(ErrorHandler errorHandler) throws Exception;
+
         /** One entry per listing; filled once it has started. */
         List<GatewayHealth> health();
     }
@@ -731,7 +877,7 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner riskSync) {}
 
     private static AgentRunners startAgentRunners(
-            SessionFeeds marketData,
+            MarketData marketData,
             OmsAgent omsAgent,
             List<GnomeAgent> outboundAgents,
             MarketDataMultiplexer muxAgent,
@@ -828,6 +974,7 @@ public class TradingOrchestrator extends Orchestrator {
 
     private GnomeAgent createOutboundGateway(
             Listing listing,
+            StreamDirectory streams,
             SequencedRingBuffer<?> marketDataBuffer,
             SequencedRingBuffer<?> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
@@ -854,6 +1001,7 @@ public class TradingOrchestrator extends Orchestrator {
             return new PaperTradingOutboundGateway(
                     exchange,
                     marketDataBuffer,
+                    streams.streamId(listing.listingId()),
                     orderOutboundBuffer,
                     execReportBuffer,
                     getInstance(EpochNanoClock.class),

@@ -94,6 +94,21 @@ class DynamoAssignmentTest {
     }
 
     @Test
+    void readsTheStreamsSessionsLeaseForPublishing() {
+        item = item(3, new int[] {10, 11}, new int[] {12}, Map.of());
+        item.put(DynamoAssignment.PUBLISH, AttributeValue.fromB(DynamoAssignment.pack(11, 12)));
+
+        assertArrayEquals(new int[] {11, 12}, assignment.read().publish());
+    }
+
+    @Test
+    void anItemWithoutPublishPublishesNothing() {
+        item = item(3, new int[] {10}, null, Map.of());
+
+        assertEquals(0, assignment.read().publish().length);
+    }
+
+    @Test
     void noItemReadsAsNothingAssigned() {
         Assignment.Streams streams = assignment.read();
 

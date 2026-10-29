@@ -13,6 +13,7 @@ import group.gnometrading.schemas.RecordType;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedEventHandler;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.sequencer.StreamRecordEventAdapter;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -56,6 +57,13 @@ final class StreamTestKit {
     /** A stream whose records go to {@code handler} instead, e.g. one that throws. */
     ShardStream stream(final int streamId, final SequencedEventHandler handler) {
         return new ShardStream(streamId, "stream " + streamId, ring(), collector(streamId), handler);
+    }
+
+    /** A stream the publisher agent also reads, as a shard builds them. */
+    ShardStream publishingStream(final int streamId) {
+        final MarketDataCollector collector = collector(streamId);
+        return new ShardStream(
+                streamId, "stream " + streamId, ring(), collector, new StreamRecordEventAdapter(collector), true);
     }
 
     private static SequencedRingBuffer<Mbp10Schema> ring() {

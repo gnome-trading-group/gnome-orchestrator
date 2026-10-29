@@ -12,7 +12,7 @@ public final class AeronChannels {
     /** A market-data stream's term: room for a few seconds of a busy book, so a brief pause loses nothing. */
     public static final int MARKET_DATA_TERM_LENGTH = 256 * 1024;
 
-    /** The order gateway's links: an order is ~100 bytes, so a term still holds hundreds (order-gateway plan). */
+    /** The order gateway's links: an order is ~100 bytes, so a term still holds hundreds. */
     public static final int GATEWAY_TERM_LENGTH = 64 * 1024;
 
     private AeronChannels() {}
@@ -25,7 +25,7 @@ public final class AeronChannels {
         return shardPublication(shardIp, AeronPorts.SHARD_CONTROL);
     }
 
-    static String shardPublication(final String shardIp, final int controlPort) {
+    public static String shardPublication(final String shardIp, final int controlPort) {
         return "aeron:udp?control=" + shardIp + ":" + controlPort + "|control-mode=dynamic|fc=max|term-length="
                 + MARKET_DATA_TERM_LENGTH + "|mtu=" + MTU;
     }
@@ -38,7 +38,8 @@ public final class AeronChannels {
         return shardSubscription(localIp, shardIp, AeronPorts.SHARD_CONTROL, tag);
     }
 
-    static String shardSubscription(final String localIp, final String shardIp, final int controlPort, final long tag) {
+    public static String shardSubscription(
+            final String localIp, final String shardIp, final int controlPort, final long tag) {
         return "aeron:udp?endpoint=" + localIp + ":0|control=" + shardIp + ":" + controlPort
                 + "|control-mode=dynamic|tags=" + tag;
     }

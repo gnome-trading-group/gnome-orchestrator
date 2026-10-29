@@ -11,19 +11,30 @@ public interface Assignment {
      * by label (a source not named uses {@link MarketDataCredentials#DEFAULT_LABEL}), and the minutes each stream may
      * write: epoch nanos from which ({@code writeFrom}) and before which ({@code writeUntil}) its minute files are
      * uploaded, for a stream handed between shards at a minute cut. A stream not named in either writes every minute.
+     * {@code publish} names the streams sessions lease, which a shard also sends over Aeron.
      */
     record Streams(
             long generation,
             int[] streamIds,
             Map<String, String> accounts,
             Map<Integer, Long> writeFrom,
-            Map<Integer, Long> writeUntil) {
+            Map<Integer, Long> writeUntil,
+            int[] publish) {
         public Streams(final long generation, final int[] streamIds) {
             this(generation, streamIds, Map.of());
         }
 
         public Streams(final long generation, final int[] streamIds, final Map<String, String> accounts) {
             this(generation, streamIds, accounts, Map.of(), Map.of());
+        }
+
+        public Streams(
+                final long generation,
+                final int[] streamIds,
+                final Map<String, String> accounts,
+                final Map<Integer, Long> writeFrom,
+                final Map<Integer, Long> writeUntil) {
+            this(generation, streamIds, accounts, writeFrom, writeUntil, new int[0]);
         }
 
         /** Epoch nanos from which {@code streamId}'s minutes are written; {@link Long#MIN_VALUE} when unbounded. */

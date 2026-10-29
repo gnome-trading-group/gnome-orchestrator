@@ -180,7 +180,11 @@ final class ShardStatusWriter implements Runnable {
                     .writeComma();
             json.writeObjectEntry("resyncs", subject == null ? 0 : subject.resyncs())
                     .writeComma();
-            json.writeObjectEntry("records", stream.records());
+            json.writeObjectEntry("records", stream.records()).writeComma();
+            // Whether a session leases it, and what reached or missed its Aeron publication.
+            json.writeObjectEntry("published", stream.publication() != null).writeComma();
+            json.writeObjectEntry("offered", stream.offered()).writeComma();
+            json.writeObjectEntry("dropped", stream.dropped());
             final Throwable failure = stream.failure();
             if (failure != null) {
                 json.writeComma().writeObjectEntry("failure", CauseChain.of(failure));

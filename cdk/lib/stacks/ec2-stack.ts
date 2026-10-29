@@ -64,6 +64,8 @@ export class Ec2Stack extends cdk.Stack {
       resources: [
         `arn:aws:secretsmanager:*:${this.account}:secret:gnome/market-data/*`,
         `arn:aws:secretsmanager:*:${this.account}:secret:gnomepy/*`,
+        // The market-data API key, to read the session's lease; its one copy is in us-east-1.
+        `arn:aws:secretsmanager:us-east-1:${this.account}:secret:gnome/api-keys/market-data-*`,
         ...(live ? [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*/trading-*`] : []),
       ],
     }));

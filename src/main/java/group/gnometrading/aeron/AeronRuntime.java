@@ -38,9 +38,8 @@ public final class AeronRuntime implements AutoCloseable {
                 .publicationTermBufferLength(AeronChannels.MARKET_DATA_TERM_LENGTH)
                 .errorHandler(errors);
         if (profile.dedicated()) {
-            context.threadingMode(ThreadingMode.DEDICATED)
-                    .senderIdleStrategy(new BusySpinIdleStrategy())
-                    .receiverIdleStrategy(new BusySpinIdleStrategy())
+            context.threadingMode(ThreadingMode.SHARED_NETWORK)
+                    .sharedNetworkIdleStrategy(new BusySpinIdleStrategy())
                     .conductorIdleStrategy(backoff());
         } else {
             context.threadingMode(ThreadingMode.SHARED).sharedIdleStrategy(backoff());

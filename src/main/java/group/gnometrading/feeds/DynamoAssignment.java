@@ -18,8 +18,10 @@ import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
  *
  * <p>{@code cuts} are packed big-endian int32 pairs (stream id, minute since the epoch). For a stream in {@code streams}
  * the minute is the first it writes ({@link #WARMING}: none yet); for one in {@code draining} it is the first it no
- * longer writes. So the shard taking a stream over writes from the cut minute and the one giving it up writes up to it,
- * and each minute is written once.
+ * longer writes. So the shard taking a stream over writes from the cut minute and the one giving it up writes up to
+ * it, and each minute is written once.
+ *
+ * <p>{@code publish} (packed like the id lists) names the streams sessions lease, which the shard also sends over Aeron.
  *
  * <p>Read every few seconds, so each read asks only for the generation and fetches the rest when it changed. Both id
  * lists are packed big-endian int32s in one binary attribute: a list of numbers would come back as an SDK object per id.
@@ -32,6 +34,7 @@ public final class DynamoAssignment implements Assignment {
     static final String DRAINING = "draining";
     static final String ACCOUNTS = "accounts";
     static final String CUTS = "cuts";
+    static final String PUBLISH = "publish";
     /** A cut minute meaning: collect, but write nothing until a cut is set. */
     public static final int WARMING = Integer.MAX_VALUE;
 
@@ -103,7 +106,8 @@ public final class DynamoAssignment implements Assignment {
                 collected,
                 accounts(item.get(ACCOUNTS)),
                 Map.copyOf(writeFrom),
-                Map.copyOf(writeUntil));
+                Map.copyOf(writeUntil),
+                ids(item.get(PUBLISH)));
     }
 
     private static long generationOf(final Map<String, AttributeValue> item) {

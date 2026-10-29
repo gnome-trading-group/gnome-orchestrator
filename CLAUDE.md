@@ -28,25 +28,43 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 
 - `trading/TradingOrchestrator` - the session process: listings, buffers, OMS, strategy, gateways, ledger, risk
   sync, journal, heartbeat, and the close order of all of them (`closeAgents`).
+- `trading/` market data: a paper session the launcher leased streams for (`MARKET_DATA_API_URL` set) reads them from
+  shards. `ShardFeedAgent` (HOT_PATH) is the only writer of the journaled strategy buffer and of which subscription
+  each stream reads; `ShardMarketData`'s control thread makes and closes subscriptions (they block on the driver),
+  waits up to `market.data.start.timeout.seconds` for the lease to be live, polls it every 10 s, follows moves (switch
+  on the new shard's first clean record; a move that doesn't deliver in 60 s, or the lease stops naming, is given up)
+  and re-subscribes a stalled stream after closing the old subscription (so the new one joins at the live position).
+  A stream is marked bad (its last record repeated with `badData`) when its shard's status stops for 5 s, nothing
+  arrives for 15 s (also never), its image goes, the shard reports it reconnecting or reports records it couldn't send
+  (`ShardStatus.dropped` rising), or it stalls behind the publication position (same Aeron session id) for 1 s. A
+  shard's re-send is dropped only as an exact byte repeat (venues often have no sequence and millisecond stamps).
+  `MarketDataLeases` reads `GET /collection/leases/{sessionId}` with the `gnome/api-keys/market-data` key (read again
+  on 401/403). Live sessions and local runs still open venue connections themselves:
 - `trading/` also: `SessionFeeds` (the session's market data on the same feeds as a shard), `SessionExit` (graceful
   exit), `SessionFatalHandler` (every error exit), `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING ->
   RUNNING), `SessionReports` (alerts + registry PATCH), `JournalManagerAgent` and `JournalSegmentSealer`,
   `AgentRuntimeInstaller` (latency profile / CPU pinning), `PaperTradingOutboundGateway`, `MarketDataMultiplexer` /
   `ListingRouter` (multi-listing only), `recovery/StartupRecovery`.
 - `collectors/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
-  records state changes in `StreamTransitions`), `ShardStream` + `MarketDataCollectorAgent` (minute files),
+  records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
+  `ShardStream` + `MarketDataCollectorAgent` (minute files), `StreamPublisherAgent` (drains every ring a second time,
+  offers leased streams' records, re-sends a quiet stream's last record every 5 s, sends the core SBE `ShardStatus`
+  every 1 s; reads the rings through a `LappingPoller`, so it never gates collection: a record it was lapped past or a
+  back-pressured offer is dropped and counted, and sessions see the count),
   `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler), `ShardIdentity`, `ShardAccounts`,
   `CollectorHealth`.
 - `feeds/` - `FeedVenues` (per `md.source.adapter`: the venue's `FEED` from gnome-gateways `venues/`, and its
   protocol built with the credentials this process loads, and its REST probe), `FeedSources` (adds a registry source,
   sized by its capacity columns), `WebSocketFeedOpener`, `Assignment` / `DynamoAssignment` (the shard's item in the
   reconciler's `collection-shards` table, us-east-1).
-- `aeron/` - the Aeron layer shards, sessions and order gateways share (Phase 10; nothing wires it in yet):
+- `aeron/` - the Aeron layer shards, sessions and order gateways share:
   `AeronRuntime` (embedded media driver + client per process, `AeronProfile` per host kind), `AeronChannels`
   (shard MDC publications with `fc=max`, per-shard tagged wildcard receive ports), `AeronPorts` (split of UDP
   40000-40999; mirrors gnome-shared-cdk `AERON_PORT_MAP`), `AeronStreamIds` (market data = `stream_id`, >= 2^30
-  reserved), `AeronIngressAgent` + `RingSink` (one thread polls every subscription into rings, zero allocation; a full
-  ring leaves messages in Aeron), `ServiceEndpoints` (the `service-endpoints` table, us-east-1). `AeronTransportTest`
+  reserved), `AeronIngressAgent` (one thread polls every subscription into sinks, zero allocation; a sink with no room
+  leaves the message in Aeron; removal takes effect next pass and the caller closes, since closing blocks), `ServiceEndpoints` (the `service-endpoints` table, us-east-1), `HostAddress`.
+  A shard's 1 s status is core SBE `ShardStatus` (gnome-schemas; per published stream its state and publication
+  position), never journaled. `AeronTransportTest`
   pins the Aeron behaviour the design relies on: re-run it on every Aeron upgrade (a lagging subscriber stalls
   silently rather than losing its image; a fixed receive port can't serve two shards).
 - `gateways/` - live outbound orchestrators (Kalshi, Polymarket Intl, Polymarket US), credentials,

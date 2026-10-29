@@ -4,12 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.schemas.MessageHeaderDecoder;
 import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import io.aeron.Publication;
 import io.aeron.Subscription;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BooleanSupplier;
@@ -69,7 +71,7 @@ class AeronIngressAgentTest {
             templates.add(templateId);
             sequences.add(received.decoder.sequence());
         });
-        this.agent.add(this.subscription, new RingSink(ring));
+        this.agent.add(this.subscription, toRing(ring));
         await(this.publication::isConnected, "the session to join");
 
         for (int i = 1; i <= 50; i++) {
@@ -103,7 +105,7 @@ class AeronIngressAgentTest {
             received.buffer.putBytes(0, buffer, 0, length);
             sequences.add(received.decoder.sequence());
         });
-        this.agent.add(this.subscription, new RingSink(ring));
+        this.agent.add(this.subscription, toRing(ring));
         await(this.publication::isConnected, "the session to join");
 
         for (int i = 1; i <= 20; i++) {
@@ -127,7 +129,7 @@ class AeronIngressAgentTest {
         final SequencedRingBuffer<Mbp10Schema> ring = new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
         final List<Long> seen = new ArrayList<>();
         final SequencedPoller poller = ring.createPoller((seq, templateId, buffer, length) -> seen.add(seq));
-        this.agent.add(this.subscription, new RingSink(ring));
+        this.agent.add(this.subscription, toRing(ring));
         await(this.publication::isConnected, "the session to join");
         publish(1);
         await(
@@ -151,5 +153,15 @@ class AeronIngressAgentTest {
 
         poller.poll();
         assertEquals(1, seen.size());
+    }
+
+    /** Each message into the ring as it came, its template id read from the SBE header. */
+    private static AeronIngressAgent.Sink toRing(final SequencedRingBuffer<?> ring) {
+        return (buffer, offset, length) -> ring.tryPublishRaw(
+                buffer,
+                offset,
+                buffer.getShort(offset + MessageHeaderDecoder.templateIdEncodingOffset(), ByteOrder.LITTLE_ENDIAN)
+                        & 0xFFFF,
+                length);
     }
 }

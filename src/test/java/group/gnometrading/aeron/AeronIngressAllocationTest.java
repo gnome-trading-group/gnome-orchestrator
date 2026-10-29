@@ -4,12 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.schemas.MessageHeaderDecoder;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import java.lang.management.ManagementFactory;
+import java.nio.ByteOrder;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Tag;
@@ -40,7 +42,7 @@ class AeronIngressAllocationTest {
             final SequencedPoller strategy =
                     ring.createPoller((seq, templateId, buffer, length) -> strategySeen.lazySet(seq));
             final AeronIngressAgent agent = new AeronIngressAgent();
-            agent.add(subscription, new RingSink(ring));
+            agent.add(subscription, toRing(ring));
             final AtomicLong ingressThread = new AtomicLong();
             final GnomeAgentRunner runner = new GnomeAgentRunner(
                     new group.gnometrading.concurrent.GnomeAgent() {
@@ -103,5 +105,15 @@ class AeronIngressAllocationTest {
         while (seen.get() < count) {
             Thread.sleep(5);
         }
+    }
+
+    /** Each message into the ring as it came, its template id read from the SBE header. */
+    private static AeronIngressAgent.Sink toRing(final SequencedRingBuffer<?> ring) {
+        return (buffer, offset, length) -> ring.tryPublishRaw(
+                buffer,
+                offset,
+                buffer.getShort(offset + MessageHeaderDecoder.templateIdEncodingOffset(), ByteOrder.LITTLE_ENDIAN)
+                        & 0xFFFF,
+                length);
     }
 }

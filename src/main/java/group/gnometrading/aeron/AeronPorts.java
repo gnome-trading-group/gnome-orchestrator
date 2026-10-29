@@ -9,7 +9,7 @@ public final class AeronPorts {
     /** A shard's MDC control endpoint: every stream it publishes, and its status stream. One shard per host. */
     public static final int SHARD_CONTROL = 40000;
 
-    /** Order gateways' ingress, one port per gateway (order-gateway plan). */
+    /** Order gateways' ingress, one port per gateway. */
     public static final int GATEWAY_INGRESS_FIRST = 40010;
 
     public static final int GATEWAY_INGRESS_LAST = 40019;

@@ -119,7 +119,8 @@ final class SessionFeeds implements TradingOrchestrator.MarketData {
     }
 
     /** Opens the connections and starts the probe and the tick; the strategy's pollers must already exist. */
-    void start(final ErrorHandler errorHandler) throws Exception {
+    @Override
+    public void start(final ErrorHandler errorHandler) throws Exception {
         final long now = System.nanoTime();
         for (Market market : markets) {
             sources.ensure(market.source());
