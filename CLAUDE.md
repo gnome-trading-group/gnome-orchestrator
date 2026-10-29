@@ -41,6 +41,14 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   protocol built with the credentials this process loads, and its REST probe), `FeedSources` (adds a registry source,
   sized by its capacity columns), `WebSocketFeedOpener`, `Assignment` / `DynamoAssignment` (the shard's item in the
   reconciler's `collection-shards` table, us-east-1).
+- `aeron/` - the Aeron layer shards, sessions and order gateways share (Phase 10; nothing wires it in yet):
+  `AeronRuntime` (embedded media driver + client per process, `AeronProfile` per host kind), `AeronChannels`
+  (shard MDC publications with `fc=max`, per-shard tagged wildcard receive ports), `AeronPorts` (split of UDP
+  40000-40999; mirrors gnome-shared-cdk `AERON_PORT_MAP`), `AeronStreamIds` (market data = `stream_id`, >= 2^30
+  reserved), `AeronIngressAgent` + `RingSink` (one thread polls every subscription into rings, zero allocation; a full
+  ring leaves messages in Aeron), `ServiceEndpoints` (the `service-endpoints` table, us-east-1). `AeronTransportTest`
+  pins the Aeron behaviour the design relies on: re-run it on every Aeron upgrade (a lagging subscriber stalls
+  silently rather than losing its image; a fixed receive port can't serve two shards).
 - `gateways/` - live outbound orchestrators (Kalshi, Polymarket Intl, Polymarket US), credentials,
   `GatewayErrorHandler`, `GatewayRunners` (order gateways), `GatewayHealth`.
 - `shared/` - DI modules: `PropertiesModule`, `AwsModule`, `RiskModule`, `SecurityMasterModule`, `SecretCache`.
