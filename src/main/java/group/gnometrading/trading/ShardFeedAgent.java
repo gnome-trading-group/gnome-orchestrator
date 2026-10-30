@@ -80,13 +80,24 @@ final class ShardFeedAgent implements GnomeAgent {
     // What waits for the ingress agent to stop polling before the control thread may close it.
     private final List<Object> afterRemoval = new ArrayList<>();
     private final UnsafeBuffer flagged = new UnsafeBuffer(new byte[SequencedEvent.MAX_MESSAGE_SIZE]);
+    private final ShardArrivals arrivals;
     private long now;
     private long nextCheckNanos;
 
     ShardFeedAgent(final SequencedRingBuffer<?> ring, final List<StreamFeed> feeds, final LongSupplier nanoTime) {
+        this(ring, feeds, nanoTime, null);
+    }
+
+    /** @param arrivals where every record passed on is also copied, stamped on arrival; null when nothing compares */
+    ShardFeedAgent(
+            final SequencedRingBuffer<?> ring,
+            final List<StreamFeed> feeds,
+            final LongSupplier nanoTime,
+            final ShardArrivals arrivals) {
         this.ring = ring;
         this.feeds = feeds;
         this.nanoTime = nanoTime;
+        this.arrivals = arrivals;
         for (final StreamFeed feed : feeds) {
             byStream.put(feed.streamId, feed);
         }
@@ -208,6 +219,9 @@ final class ShardFeedAgent implements GnomeAgent {
         final int templateId = buffer.getShort(offset + TEMPLATE_ID_OFFSET, ByteOrder.LITTLE_ENDIAN) & 0xFFFF;
         if (!ring.tryPublishRaw(buffer, offset, templateId, length)) {
             return false;
+        }
+        if (arrivals != null) {
+            arrivals.record(buffer, offset, templateId, length);
         }
         feed.last.putBytes(0, buffer, offset, length);
         feed.lastLength = length;

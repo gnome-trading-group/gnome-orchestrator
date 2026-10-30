@@ -31,7 +31,6 @@ COPY ami/files/start-session.sh /opt/gnome/start-session.sh
 
 # The same environment the gnome-strategy systemd unit sets on EC2.
 ENV JAVA_HOME=/usr/lib/jvm/current \
-    MAIN_CLASS=group.gnometrading.trading.TradingOrchestrator \
     PYTHONUNBUFFERED=1 \
     OPENBLAS_NUM_THREADS=1 \
     OMP_NUM_THREADS=1 \

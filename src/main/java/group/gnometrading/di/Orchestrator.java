@@ -224,7 +224,12 @@ public abstract class Orchestrator implements AutoCloseable {
 
     /** Configures the orchestrator and returns it running, so the caller can {@link #close()} it. */
     public static Orchestrator start(String[] args) throws Exception {
-        Orchestrator orchestrator = instanceClass.getDeclaredConstructor().newInstance();
+        return start(instanceClass, args);
+    }
+
+    /** Configures an orchestrator of {@code type} and returns it running, so the caller can {@link #close()} it. */
+    public static Orchestrator start(Class<? extends Orchestrator> type, String[] args) throws Exception {
+        Orchestrator orchestrator = type.getDeclaredConstructor().newInstance();
         orchestrator.cliArgs = args;
         orchestrator.configure();
         return orchestrator;

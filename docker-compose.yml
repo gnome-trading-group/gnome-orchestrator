@@ -13,7 +13,7 @@ services:
       SHARD_ID: local
       OUTPUT_BUCKET: gnome-market-data-dev
       RAW_CAPTURE_BUCKET: gnome-market-data-exchange-raw-dev
-      MAIN_CLASS: group.gnometrading.collectors.ShardOrchestrator
+      ORCHESTRATOR_ROLE: shard
       STAGE: dev
       AWS_PROFILE: dev
     volumes:
@@ -31,7 +31,7 @@ services:
     container_name: gnome-orchestrator-testing
     environment:
       LISTING: 1
-      MAIN_CLASS: group.gnometrading.testing.MarketDataWriterOrchestrator
+      ORCHESTRATOR_ROLE: market-data-writer
       STAGE: dev
       OUTPUT: /app/market-data/output.bin
     volumes:

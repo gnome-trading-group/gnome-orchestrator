@@ -1,6 +1,5 @@
-package group.gnometrading.collectors;
+package group.gnometrading.utils;
 
-import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
@@ -12,20 +11,16 @@ import java.util.concurrent.locks.LockSupport;
  * receive timestamp by the same amount, and nothing inside the reader can see it. This thread
  * suffers the same delays, so its wake-up lateness is the in-process measure of them.
  *
- * <p>Lateness goes into log-linear buckets (8 per power of two microseconds, so values are
- * reported to within 12.5%). Each finished window is published for the collector's heartbeat to report.
+ * <p>Lateness goes into a {@link LatencyHistogram}. Each finished window is published for a heartbeat or report to read.
  */
-final class SchedulingLatencyProbe implements Runnable {
+public final class SchedulingLatencyProbe implements Runnable {
 
-    private static final int SUB_BUCKETS = 8;
-    private static final int SUB_BUCKET_BITS = 3;
-    private static final int BUCKETS = 240;
     private static final long WINDOW_NANOS = TimeUnit.SECONDS.toNanos(15);
     private static final long ONE_MS_MICROS = 1_000;
     private static final long FIVE_MS_MICROS = 5_000;
 
     /** One window's lateness, in microseconds. */
-    record Window(
+    public record Window(
             double windowSeconds,
             long samples,
             long p50Micros,
@@ -36,10 +31,8 @@ final class SchedulingLatencyProbe implements Runnable {
             long over5ms) {}
 
     private final long intervalNanos;
+    private final LatencyHistogram lateness = new LatencyHistogram();
     private volatile Window latest;
-    private final long[] counts = new long[BUCKETS];
-    private long samples;
-    private long maxMicros;
     private long over1ms;
     private long over5ms;
 
@@ -47,7 +40,7 @@ final class SchedulingLatencyProbe implements Runnable {
         this.intervalNanos = intervalNanos;
     }
 
-    static SchedulingLatencyProbe start(long intervalNanos) {
+    public static SchedulingLatencyProbe start(long intervalNanos) {
         SchedulingLatencyProbe probe = new SchedulingLatencyProbe(intervalNanos);
         Thread thread = new Thread(probe, "sched-latency-probe");
         thread.setDaemon(true);
@@ -56,7 +49,7 @@ final class SchedulingLatencyProbe implements Runnable {
     }
 
     /** The last finished window; null before the first. */
-    Window latest() {
+    public Window latest() {
         return latest;
     }
 
@@ -75,11 +68,9 @@ final class SchedulingLatencyProbe implements Runnable {
         }
     }
 
-    void record(long lateNanos) {
+    public void record(long lateNanos) {
         long micros = Math.max(0, lateNanos) / 1_000;
-        counts[bucketOf(micros)]++;
-        samples++;
-        maxMicros = Math.max(maxMicros, micros);
+        lateness.record(micros);
         if (micros >= ONE_MS_MICROS) {
             over1ms++;
         }
@@ -89,55 +80,23 @@ final class SchedulingLatencyProbe implements Runnable {
     }
 
     /** The window's statistics; starts a new window. */
-    Window summarize(long windowNanos) {
+    public Window summarize(long windowNanos) {
         Window summary = new Window(
                 windowNanos / 1e9,
-                samples,
-                percentileMicros(0.5),
-                percentileMicros(0.99),
-                percentileMicros(0.999),
-                maxMicros,
+                lateness.count(),
+                lateness.percentileMicros(0.5),
+                lateness.percentileMicros(0.99),
+                lateness.percentileMicros(0.999),
+                lateness.maxMicros(),
                 over1ms,
                 over5ms);
-        Arrays.fill(counts, 0);
-        samples = 0;
-        maxMicros = 0;
+        lateness.reset();
         over1ms = 0;
         over5ms = 0;
         return summary;
     }
 
-    /** The upper edge of the bucket holding the given quantile, capped at the largest value seen. */
     long percentileMicros(double quantile) {
-        if (samples == 0) {
-            return 0;
-        }
-        long rank = (long) Math.ceil(quantile * samples);
-        long seen = 0;
-        for (int i = 0; i < BUCKETS; i++) {
-            seen += counts[i];
-            if (seen >= rank) {
-                return Math.min(upperMicros(i), maxMicros);
-            }
-        }
-        return maxMicros;
-    }
-
-    static int bucketOf(long micros) {
-        if (micros < SUB_BUCKETS) {
-            return (int) micros;
-        }
-        int exponent = 63 - Long.numberOfLeadingZeros(micros);
-        int sub = (int) (micros >> (exponent - SUB_BUCKET_BITS)) & (SUB_BUCKETS - 1);
-        return Math.min(BUCKETS - 1, (exponent - SUB_BUCKET_BITS + 1) * SUB_BUCKETS + sub);
-    }
-
-    static long upperMicros(int bucket) {
-        if (bucket < SUB_BUCKETS) {
-            return bucket + 1;
-        }
-        int exponent = bucket / SUB_BUCKETS + SUB_BUCKET_BITS - 1;
-        int sub = bucket % SUB_BUCKETS;
-        return (long) (SUB_BUCKETS + sub + 1) << (exponent - SUB_BUCKET_BITS);
+        return lateness.percentileMicros(quantile);
     }
 }

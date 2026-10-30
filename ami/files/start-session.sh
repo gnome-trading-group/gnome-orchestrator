@@ -60,5 +60,5 @@ fi
 unset GH_TOKEN
 # JVM flags live in gnomepy so the Java and Python launch paths cannot drift apart.
 mapfile -t JVM_ARGS < <("$VENV/bin/python" -c 'from gnomepy.java._jvm import STRATEGY_JVM_ARGS; print("\n".join(STRATEGY_JVM_ARGS))')
-echo "start-session: starting ${MAIN_CLASS} ${STRATEGY_CLASS:-}"
-exec java "${JVM_ARGS[@]}" -cp "$APP_JAR" "$MAIN_CLASS"
+echo "start-session: starting ${ORCHESTRATOR_ROLE:-session} ${STRATEGY_CLASS:-}"
+exec java "${JVM_ARGS[@]}" -cp "$APP_JAR" group.gnometrading.orchestrator.Main "${ORCHESTRATOR_ROLE:-session}"

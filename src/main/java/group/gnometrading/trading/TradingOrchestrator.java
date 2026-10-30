@@ -76,6 +76,7 @@ import group.gnometrading.strategies.StrategyFactory;
 import group.gnometrading.trading.recovery.SessionNotRunnableException;
 import group.gnometrading.trading.recovery.StartupRecovery;
 import group.gnometrading.utils.CauseChain;
+import group.gnometrading.utils.SchedulingLatencyProbe;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -637,11 +638,16 @@ public class TradingOrchestrator extends Orchestrator {
             GlobalSequence sessionSequence) {
         if (readsShards(properties)) {
             SequencedRingBuffer<?> buffer = new SequencedRingBuffer<>(Mbp10Schema::new, sessionSequence);
-            return new SessionMarketData(
-                    createShardMarketData(logger, properties, listings, streams, dataStreams(properties), buffer),
-                    Collections.nCopies(listings.size(), buffer),
-                    buffer,
-                    null);
+            ShardArrivals arrivals = compares(properties) ? new ShardArrivals(System::nanoTime) : null;
+            ShardMarketData shards = createShardMarketData(
+                    logger, properties, listings, streams, dataStreams(properties), buffer, arrivals);
+            MarketData marketData = arrivals == null
+                    ? shards
+                    : comparedMarketData(logger, properties, securityMaster, listings, streams, shards, arrivals);
+            return new SessionMarketData(marketData, Collections.nCopies(listings.size(), buffer), buffer, null);
+        }
+        if (compares(properties)) {
+            throw new IllegalArgumentException("market.data.compare needs the session's market data from shards");
         }
         SessionFeeds feeds = createMarketData(logger, properties, securityMaster, listings, sessionSequence);
         List<SequencedRingBuffer<?>> rings = feeds.rings();
@@ -682,13 +688,22 @@ public class TradingOrchestrator extends Orchestrator {
                 && properties.hasProperty("market.data.api.url");
     }
 
+    /**
+     * {@code market.data.compare}: also open the session's own venue connections for its listings, which nothing trades
+     * on, and time the shard path against them ({@link FeedComparator}).
+     */
+    static boolean compares(Properties properties) {
+        return properties.hasProperty("market.data.compare") && properties.getBooleanProperty("market.data.compare");
+    }
+
     private ShardMarketData createShardMarketData(
             Logger logger,
             Properties properties,
             List<Listing> listings,
             StreamDirectory streams,
             int[] dataStreams,
-            SequencedRingBuffer<?> buffer) {
+            SequencedRingBuffer<?> buffer,
+            ShardArrivals arrivals) {
         List<StreamFeed> feeds = new ArrayList<>();
         List<GatewayHealth> health = new ArrayList<>();
         for (Listing listing : listings) {
@@ -718,9 +733,46 @@ public class TradingOrchestrator extends Orchestrator {
                 () -> client.get(sessionId),
                 feeds,
                 health,
-                new ShardFeedAgent(buffer, feeds, System::nanoTime),
+                new ShardFeedAgent(buffer, feeds, System::nanoTime, arrivals),
                 TimeUnit.SECONDS.toNanos(startTimeout),
                 System::nanoTime);
+    }
+
+    private ComparedMarketData comparedMarketData(
+            Logger logger,
+            Properties properties,
+            SecurityMaster securityMaster,
+            List<Listing> listings,
+            StreamDirectory streams,
+            ShardMarketData shards,
+            ShardArrivals arrivals) {
+        EpochNanoClock clock = getInstance(EpochNanoClock.class);
+        SessionFeeds direct = new SessionFeeds(
+                logger,
+                securityMaster,
+                new FeedVenues.Context(
+                        logger, properties, getInstance(SecretCache.class), MarketDataCredentials.SESSION, clock),
+                listings,
+                null,
+                false,
+                (status, cause) -> logger.logf(
+                        LogMessage.UNKNOWN_ERROR,
+                        "Market data compare: a direct connection failed: %s",
+                        CauseChain.of(cause)),
+                clock,
+                WebSocketFeedOpener.Clients.TLS);
+        int[] streamIds =
+                listings.stream().mapToInt(l -> streams.streamId(l.listingId())).toArray();
+        FeedComparator comparator = new FeedComparator(
+                logger,
+                clock,
+                System::nanoTime,
+                streamIds,
+                direct.rings(),
+                arrivals.ring(),
+                SchedulingLatencyProbe.start(TimeUnit.MILLISECONDS.toNanos(1)),
+                MAPPER);
+        return new ComparedMarketData(shards, direct, comparator);
     }
 
     /** The market-data API key from its Secrets Manager copy, which lives in us-east-1 only; read again after a rotation. */

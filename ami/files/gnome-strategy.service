@@ -16,7 +16,6 @@ KillSignal=SIGTERM
 StandardOutput=append:/var/log/gnome/orchestrator.log
 StandardError=inherit
 Environment=JAVA_HOME=/usr/lib/jvm/current
-Environment=MAIN_CLASS=group.gnometrading.trading.TradingOrchestrator
 Environment=PYTHONUNBUFFERED=1
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=OMP_NUM_THREADS=1

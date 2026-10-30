@@ -1,26 +1,13 @@
-package group.gnometrading.collectors;
+package group.gnometrading.utils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SchedulingLatencyProbeTest {
 
     private static SchedulingLatencyProbe probe() {
         return new SchedulingLatencyProbe(1_000_000);
-    }
-
-    @Test
-    void everyValueFallsInsideItsBucket() {
-        for (long micros = 0; micros < 5_000_000; micros += micros < 100 ? 1 : micros / 7) {
-            int bucket = SchedulingLatencyProbe.bucketOf(micros);
-            long upper = SchedulingLatencyProbe.upperMicros(bucket);
-            long lower = bucket == 0 ? 0 : SchedulingLatencyProbe.upperMicros(bucket - 1);
-            assertTrue(lower <= micros && micros < upper, micros + " not in [" + lower + ", " + upper + ")");
-            assertTrue(upper - lower <= Math.max(1, lower / 8), "bucket " + bucket + " is wider than 12.5%");
-        }
     }
 
     @Test
@@ -69,18 +56,5 @@ class SchedulingLatencyProbeTest {
         probe.record(-20_000);
 
         assertEquals(0, probe.percentileMicros(0.5));
-    }
-
-    @Test
-    void theHeartbeatReportsAWindowUnderSnakeCaseKeys() {
-        SchedulingLatencyProbe probe = probe();
-        probe.record(2_000_000);
-
-        Map<String, Object> latency = CollectorHeartbeat.latency(probe.summarize(15_000_000_000L));
-
-        assertEquals(15.0, latency.get("window_s"));
-        assertEquals(1L, latency.get("samples"));
-        assertEquals(2_000L, latency.get("max_us"));
-        assertEquals(1L, latency.get("over1ms"));
     }
 }

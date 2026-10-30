@@ -27,8 +27,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * Once warm, the thread that reads a session's shard streams must not allocate, liveness checks and status frames
- * included: a GC pause there delays every book the strategy sees.
+ * Once warm, the thread that reads a session's shard streams must not allocate, liveness checks, status frames and the
+ * copy a comparison takes of each record included: a GC pause there delays every book the strategy sees.
  */
 @Tag("allocation")
 class ShardFeedAllocationTest {
@@ -55,7 +55,8 @@ class ShardFeedAllocationTest {
             final SequencedPoller strategy =
                     ring.createPoller((seq, templateId, buffer, length) -> strategySeen.lazySet(seq));
             final StreamFeed feed = new StreamFeed(STREAM_ID, "market data 1");
-            final ShardFeedAgent agent = new ShardFeedAgent(ring, List.of(feed), System::nanoTime);
+            final ShardFeedAgent agent =
+                    new ShardFeedAgent(ring, List.of(feed), System::nanoTime, new ShardArrivals(System::nanoTime));
             final ShardMarketData marketData = new ShardMarketData(
                     new NullLogger(),
                     session,

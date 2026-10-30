@@ -8,9 +8,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.utils.SchedulingLatencyProbe;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
@@ -171,5 +173,16 @@ class CollectorHeartbeatTest {
         assertEquals(CollectorHeartbeat.FAILED, lines.get(1).get("state").asText());
         assertEquals(
                 "IllegalStateException: bad record", lines.get(1).get("failure").asText());
+    }
+
+    @Test
+    void theHeartbeatReportsAProbeWindowUnderSnakeCaseKeys() {
+        Map<String, Object> latency = CollectorHeartbeat.latency(
+                new SchedulingLatencyProbe.Window(15.0, 1, 2_000, 2_000, 2_000, 2_000, 1, 0));
+
+        assertEquals(15.0, latency.get("window_s"));
+        assertEquals(1L, latency.get("samples"));
+        assertEquals(2_000L, latency.get("max_us"));
+        assertEquals(1L, latency.get("over1ms"));
     }
 }

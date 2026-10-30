@@ -26,6 +26,10 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 
 ## Layout
 
+- `orchestrator/Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`,
+  `market-data-writer`; also the jar's `Main-Class`), or `Main.start(role, args)` from gnomepy's runner. Callers
+  name a role, never a class, so classes can move; a new process is a new `Main.Role`. `start-session.sh` takes the
+  role from `ORCHESTRATOR_ROLE` (default `session`).
 - `trading/TradingOrchestrator` - the session process: listings, buffers, OMS, strategy, gateways, ledger, risk
   sync, journal, heartbeat, and the close order of all of them (`closeAgents`).
 - `trading/` market data: a paper session the launcher leased streams for (`MARKET_DATA_API_URL` set) reads them from
@@ -40,7 +44,13 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   bad spell is logged with its reason ("Market data: stream N marked bad: ..."; for drops, the shard's total). A
   shard's re-send is dropped only as an exact byte repeat (venues often have no sequence and millisecond stamps).
   `MarketDataLeases` reads `GET /collection/leases/{sessionId}` with the `gnome/api-keys/market-data` key (read again
-  on 401/403). Live sessions and local runs still open venue connections themselves:
+  on 401/403). `market.data.compare: true` (shard sessions only) also opens the session's own venue connections for
+  its listings, which nothing trades on, and `FeedComparator` times the shard path against them: records are paired
+  by their bytes less `timestampRecv` and flags (k-th with k-th), shard arrivals are copied by `ShardArrivals` on the
+  ingress thread (monotonic stamp: the wall clock's `Instant` wasn't always optimized away there), and each minute it logs `FEED_COMPARE` lines
+  (`feed_compare` per stream: matched, one-sided after 10 s, bad, hop p50–max in µs, venue lag per path;
+  `feed_compare_host`: lapped, scheduling lateness) and `feed_compare_total` at close. Live sessions and local runs
+  still open venue connections themselves:
 - `trading/` also: `SessionFeeds` (the session's market data on the same feeds as a shard), `SessionExit` (graceful
   exit), `SessionFatalHandler` (every error exit), `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING ->
   RUNNING), `SessionReports` (alerts + registry PATCH), `JournalManagerAgent` and `JournalSegmentSealer`,
@@ -135,7 +145,7 @@ earlier sessions). A session already stopped before startup exits 0 without repo
   `stoppedBy=strategy`, closes, exits 0.
 - Operator stop: the registry terminates the instance -> SIGTERM -> shutdown hook closes agents (60 s
   `TimeoutStopSec`). Errors during shutdown are not reported.
-- Shards: ECS tasks started by gnome-market-data's reconciler (`MAIN_CLASS=...ShardOrchestrator`, `SHARD_ID`,
+- Shards: ECS tasks started by gnome-market-data's reconciler (`Main shard`, `SHARD_ID`,
   `ORCHESTRATOR_VERSION`). Streams come from the shard's item in `collection-shards` (us-east-1): `generation`,
   `streams` and `draining` (packed int32s, both collected), `accounts`, and `cuts`; each 10 s poll reads only the
   generation and fetches the item when it changed, so streams are added and removed without a restart.
