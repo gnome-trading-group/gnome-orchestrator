@@ -44,9 +44,11 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   bad spell is logged with its reason ("Market data: stream N marked bad: ..."; for drops, the shard's total). A
   shard's re-send is dropped only as an exact byte repeat (venues often have no sequence and millisecond stamps).
   The market-data path's threads (shard publisher and driver, session driver and `ShardFeedAgent`, i.e. the
-  `MarketDataPathAgent`s and both `AeronRuntime`s) park at most `market.data.idle.max.park.micros` when idle
-  (`MarketDataIdle`; dev 50, prod 1000): each park delays a record that arrives during it, so on a quiet stream the
-  parks add up along the path.
+  `MarketDataPathAgent`s and both `AeronRuntime`s) park at most `MarketDataIdle` when idle: each park delays a record
+  that arrives during it, so on a quiet stream the parks add up along the path. Shards use
+  `shard.market.data.idle.max.park.micros` (50: saves every subscriber ~1–1.5 ms for ~7% of the host's CPU); sessions
+  `market.data.idle.max.park.micros` (1000; a session's config may lower it, but at 50 a t3.small runs ~15 points
+  hotter, past its credits). Low-latency sessions spin their Aeron network thread and pin the ingress agent anyway.
   `MarketDataLeases` reads `GET /collection/leases/{sessionId}` with the `gnome/api-keys/market-data` key (read again
   on 401/403). `market.data.compare: true` (shard sessions only) also opens the session's own venue connections for
   its listings, which nothing trades on, and `FeedComparator` times the shard path against them: records are paired by

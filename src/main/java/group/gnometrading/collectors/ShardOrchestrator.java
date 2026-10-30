@@ -150,7 +150,7 @@ public class ShardOrchestrator extends Orchestrator {
         final Logger logger = getInstance(Logger.class);
         // Before any agent thread starts. Shards run on fractional Fargate CPUs, where anything spinning burns the
         // quota and the throttled task delays every socket read, inflating receive timestamps.
-        AgentRuntimeInstaller.installStandard(logger, MarketDataIdle.from(getInstance(Properties.class)));
+        AgentRuntimeInstaller.installStandard(logger, MarketDataIdle.forShard(getInstance(Properties.class)));
         final SchedulingLatencyProbe latencyProbe =
                 SchedulingLatencyProbe.start(getInstance(Long.class, "LATENCY_PROBE_INTERVAL_NANOS"));
 
@@ -210,7 +210,7 @@ public class ShardOrchestrator extends Orchestrator {
         final AeronRuntime aeron = AeronRuntime.launch(
                 "shard",
                 AeronProfile.STANDARD,
-                MarketDataIdle.from(properties),
+                MarketDataIdle.forShard(properties),
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
         final AtomicReference<ShardRuntime> runtimeRef = new AtomicReference<>();
         final StreamPublisherAgent publisher = publisher(aeron, identity, runtimeRef);
