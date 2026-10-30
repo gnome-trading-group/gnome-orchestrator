@@ -9,7 +9,10 @@ public final class AeronChannels {
     /** Fits the inter-region peering path; Aeron's default of 1408 already does, stated so it can't drift. */
     public static final int MTU = 1408;
 
-    /** A market-data stream's term: room for a few seconds of a busy book, so a brief pause loses nothing. */
+    /**
+     * A market-data stream's term. A publisher may run half a term (~256 records) ahead of what the driver has sent; a
+     * larger burst waits in the shard's ring. Larger terms cost three times their length in /dev/shm per stream.
+     */
     public static final int MARKET_DATA_TERM_LENGTH = 256 * 1024;
 
     /** The order gateway's links: an order is ~100 bytes, so a term still holds hundreds. */

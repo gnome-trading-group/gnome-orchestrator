@@ -55,16 +55,14 @@ class StreamPublisherAllocationTest {
                         public int doWork() throws Exception {
                             publisherThread.compareAndSet(
                                     0, Thread.currentThread().getId());
-                            // The collector's poller gates the ring too; drain it here as the collector agent would.
-                            return agent.doWork() + stream.poll(System.nanoTime());
+                            return agent.doWork();
                         }
                     },
                     Throwable::printStackTrace);
             GnomeAgentRunner.startOnThread(runner);
             final AtomicBoolean running = new AtomicBoolean(true);
-            // The collector's poller gates the ring too; it drains here, off the measured thread, as the collector
-            // agent
-            // would on its own.
+            // The collector's poller gates the ring too; it drains here, on one thread of its own as the collector
+            // agent does, and off the measured one.
             final Thread reader = new Thread(() -> {
                 try {
                     while (running.get()) {

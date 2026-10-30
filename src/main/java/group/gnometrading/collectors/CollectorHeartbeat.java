@@ -24,7 +24,8 @@ import java.util.concurrent.TimeUnit;
  * connection, and one per stream whose state changed since the last (every stream on the first), each a JSON object
  * with a {@code kind}. A line each keeps every one under the logger's 4 KB cut however many streams the shard runs, and
  * lets a log query filter by stream or connection; logging only changes keeps a large shard's log volume flat. A
- * {@code publish} line names a stream that dropped records sessions should have had since the last, and why. Every
+ * {@code publish} line names a stream that held records back for a full publication, or dropped some sessions should
+ * have had, since the last. Every
  * stream's numbers are in the shard's status ({@link ShardStatusWriter}), which keeps only the latest.
  *
  * <p>Runs on its own thread, so its allocation stays off the threads that read and record data.
@@ -63,6 +64,7 @@ final class CollectorHeartbeat implements Runnable {
     private Map<Integer, Long> previousRecords = new HashMap<>();
     private Map<Integer, String> previousStates = new HashMap<>();
     private Map<Integer, Long> previousDropped = new HashMap<>();
+    private Map<Integer, Long> previousHeld = new HashMap<>();
     private long previousNanos;
     // The latest process line, which the status repeats; set on the heartbeat's thread, read by the status writer's.
     private volatile String processLine;
@@ -96,14 +98,34 @@ final class CollectorHeartbeat implements Runnable {
         }
     }
 
-    private String publishLine(final ShardStream stream, final long newlyDropped) throws JsonProcessingException {
+    /** Notes the stream's totals and, when it held or dropped records since the last interval, says so. */
+    private void addPublishLine(
+            final ShardStream stream,
+            final Map<Integer, Long> dropped,
+            final Map<Integer, Long> held,
+            final List<String> lines)
+            throws JsonProcessingException {
+        final long droppedNow = stream.dropped();
+        dropped.put(stream.streamId(), droppedNow);
+        final long newlyDropped = droppedNow - previousDropped.getOrDefault(stream.streamId(), 0L);
+        final long heldNow = stream.held();
+        held.put(stream.streamId(), heldNow);
+        final long newlyHeld = heldNow - previousHeld.getOrDefault(stream.streamId(), 0L);
+        if (newlyDropped > 0 || newlyHeld > 0) {
+            lines.add(publishLine(stream, newlyDropped, newlyHeld));
+        }
+    }
+
+    private String publishLine(final ShardStream stream, final long newlyDropped, final long newlyHeld)
+            throws JsonProcessingException {
         final Map<String, Object> line = new LinkedHashMap<>();
         line.put("kind", "publish");
         line.put("stream_id", stream.streamId());
         line.put("name", stream.name());
         line.put("dropped", newlyDropped);
+        line.put("held", newlyHeld);
         line.put("offered_total", stream.offered());
-        line.put("back_pressured_total", stream.backPressured());
+        line.put("held_total", stream.held());
         line.put("lapped_total", stream.lapped());
         return mapper.writeValueAsString(line);
     }
@@ -119,6 +141,7 @@ final class CollectorHeartbeat implements Runnable {
         final Map<Integer, Long> records = new HashMap<>();
         final Map<Integer, String> states = new HashMap<>();
         final Map<Integer, Long> dropped = new HashMap<>();
+        final Map<Integer, Long> held = new HashMap<>();
         final List<String> streamLines = new ArrayList<>();
         for (ShardStream stream : streams) {
             final Subject subject = stream.subject();
@@ -128,12 +151,7 @@ final class CollectorHeartbeat implements Runnable {
             final long total = stream.records();
             records.put(stream.streamId(), total);
             final long delta = Math.max(0, total - previousRecords.getOrDefault(stream.streamId(), total));
-            final long droppedNow = stream.dropped();
-            dropped.put(stream.streamId(), droppedNow);
-            final long newlyDropped = droppedNow - previousDropped.getOrDefault(stream.streamId(), 0L);
-            if (newlyDropped > 0) {
-                streamLines.add(publishLine(stream, newlyDropped));
-            }
+            addPublishLine(stream, dropped, held, streamLines);
             if (state.equals(previousStates.get(stream.streamId()))) {
                 continue;
             }
@@ -159,6 +177,7 @@ final class CollectorHeartbeat implements Runnable {
         previousRecords = records;
         previousStates = states;
         previousDropped = dropped;
+        previousHeld = held;
 
         final List<Connection> connections = shard.connections();
         final List<String> connectionLines = new ArrayList<>(connections.size());

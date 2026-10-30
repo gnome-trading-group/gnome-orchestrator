@@ -68,8 +68,10 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
   `ShardStream` + `MarketDataCollectorAgent` (minute files), `StreamPublisherAgent` (drains every ring a second time,
   offers leased streams' records, re-sends a quiet stream's last record every 5 s, sends the core SBE `ShardStatus`
-  every 1 s; reads the rings through a `LappingPoller`, so it never gates collection: a record it was lapped past or a
-  back-pressured offer is dropped and counted, and sessions see the count),
+  every 1 s; reads the rings through a controlled `LappingPoller`, so it never gates collection: a record its
+  publication has no room for (one venue message can carry hundreds of fills, past the 128 KB window) waits in the
+  ring, with the stream's later records, for the next pass; one the ring laps first is dropped and counted, and
+  sessions see the count),
   `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler), `ShardIdentity`, `ShardAccounts`,
   `CollectorHealth`.
 - `feeds/` - `FeedVenues` (per `md.source.adapter`: the venue's `FEED` from gnome-gateways `venues/`, and its
@@ -172,8 +174,9 @@ earlier sessions). A session already stopped before startup exits 0 without repo
     task. A failing market is quarantined and retried, a failing connection keeps retrying; neither stops the process.
   - Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`.
   - No registry heartbeat: `HEARTBEAT` log lines every 15 s (process, connection, and a stream only when its state
-    changed; a `publish` line when a stream dropped records for sessions since the last, with totals split into
-    `back_pressured` (a session not reading) and `lapped` (the shard's publisher behind)) plus the status above.
+    changed; a `publish` line when a stream held or dropped records for sessions since the last: `held` counts offers
+    a full publication refused and retried (a burst, nothing lost), `lapped` the records lost because the ring went
+    round first) plus the status above.
 - Market-data credentials: a shard signs Kalshi and Polymarket US in with the source's market-data account it is bound
   to by label (its item's `accounts`, source to label; `md-1` when unnamed), looked up in the registry's
   `md.source_account` as each connection opens; its key is `gnome/market-data/<source>/<label>`. A missing or retired

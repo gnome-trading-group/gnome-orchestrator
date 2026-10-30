@@ -20,8 +20,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  * shard's {@code ShardStatus} (core schema): that it is alive, and for each leased stream its state, its publication
  * and that publication's position (a session behind it has stalled), and the records sessions never got.
  *
- * <p>Never blocks collection: the reader doesn't gate the rings, and a record no session can take is dropped and
- * counted. Every stream the runtime starts is read here, leased or not.
+ * <p>Never blocks collection: the reader doesn't gate the rings. A record its publication has no room for waits in the
+ * ring for the next pass, and the stream's later records behind it; one the ring laps first is dropped and counted.
+ * Every stream the runtime starts is read here, leased or not.
  */
 final class StreamPublisherAgent implements MarketDataPathAgent {
 

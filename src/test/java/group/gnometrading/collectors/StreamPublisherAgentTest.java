@@ -169,22 +169,53 @@ class StreamPublisherAgentTest {
     }
 
     @Test
-    void aRecordNoSessionCouldTakeIsCountedAndDroppedNotRetried() throws Exception {
+    void aRecordThePublicationHasNoRoomForWaitsAndGoesOutInOrderOnceThereIs() throws Exception {
+        final ShardStream stream = publishedStream(10);
+        final ShardStream other = publishedStream(11);
+        final Recording publication = new Recording();
+        final Recording otherPublication = new Recording();
+        stream.publication(publication);
+        other.publication(otherPublication);
+        publication.result = Publication.BACK_PRESSURED;
+        book(stream, 1);
+        book(stream, 2);
+        book(other, 9);
+
+        agent.doWork();
+        agent.doWork();
+        assertEquals(List.of(1, 1), sequencesOf(publication), "the first record, offered again; the second waits");
+        assertEquals(List.of(9), sequencesOf(otherPublication), "another stream isn't held up");
+
+        publication.result = 1;
+        agent.doWork();
+
+        assertEquals(List.of(1, 1, 1, 2), sequencesOf(publication));
+        assertEquals(2, stream.held());
+        assertEquals(2, stream.offered());
+        assertEquals(0, stream.dropped());
+    }
+
+    @Test
+    void aRecordNobodyIsListeningForIsPassedOverNotHeld() throws Exception {
         final ShardStream stream = publishedStream(10);
         final Recording publication = new Recording();
-        publication.result = Publication.BACK_PRESSURED;
+        publication.result = Publication.NOT_CONNECTED;
         stream.publication(publication);
         book(stream, 1);
         agent.doWork();
-
-        publication.result = Publication.NOT_CONNECTED;
+        publication.result = 1;
         book(stream, 2);
         agent.doWork();
 
-        assertEquals(1, stream.dropped(), "nobody listening isn't a drop, nor is a re-send that doesn't go through");
-        assertEquals(1, stream.backPressured());
-        assertEquals(0, stream.lapped());
-        assertEquals(0, stream.offered());
+        assertEquals(List.of(1, 1, 2), sequencesOf(publication), "a fresh publication re-offers its last record");
+        assertEquals(0, stream.held());
+        assertEquals(0, stream.dropped());
+    }
+
+    private static List<Integer> sequencesOf(final Recording publication) {
+        return publication.offers.stream()
+                .map(StreamPublisherAgentTest::sequenceOf)
+                .toList();
     }
 
     @Test
@@ -235,7 +266,7 @@ class StreamPublisherAgentTest {
 
         assertTrue(stream.dropped() > 0, "a ring of 64 lapped by 200 records");
         assertEquals(stream.dropped(), stream.lapped());
-        assertEquals(0, stream.backPressured());
+        assertEquals(0, stream.held());
     }
 
     @Test

@@ -44,7 +44,9 @@ final class ShardStream {
     private byte recordedState = StreamTransitions.NONE;
 
     // Publishing, on the publisher agent's thread; null for a stream built without (tests that only collect). It never
-    // gates the ring, so a publisher that falls behind loses records rather than holding up collection.
+    // gates the ring, so a publisher that falls behind loses records rather than holding up collection. A record the
+    // publication refuses is held in the ring and offered again next pass: one venue message can carry hundreds of
+    // fills, more than the publication's window, which the driver drains within milliseconds.
     private final LappingPoller publishPoller;
     private final UnsafeBuffer lastRecord = new UnsafeBuffer(new byte[SequencedEvent.MAX_MESSAGE_SIZE]);
     private int lastLength;
@@ -56,7 +58,7 @@ final class ShardStream {
     private volatile boolean fresh;
     // Read by the heartbeat; the publisher alone writes them.
     private final AtomicLong offered = new AtomicLong();
-    private final AtomicLong backPressured = new AtomicLong();
+    private final AtomicLong held = new AtomicLong();
 
     ShardStream(
             final int streamId,
@@ -93,34 +95,38 @@ final class ShardStream {
         // The one poller gates the ring: once the collector fails it keeps reading and drops the records, as a
         // poller that stopped would block the producer, the whole connection the stream shares.
         this.poller = ring.createPoller(this::onRecord);
-        this.publishPoller = publishing ? ring.createLappingPoller(this::onPublish) : null;
+        this.publishPoller = publishing ? ring.createControlledLappingPoller(this::onPublish) : null;
     }
 
-    private void onPublish(final long sequence, final int templateId, final UnsafeBuffer buffer, final int length) {
+    /** False holds the record for the next pass: the publication had no room for it. */
+    private boolean onPublish(final long sequence, final int templateId, final UnsafeBuffer buffer, final int length) {
+        final StreamPublication current = publication;
+        if (current != null) {
+            final long result = offer(current, buffer, length);
+            if (StreamPublication.full(result)) {
+                held.lazySet(held.get() + 1);
+                return false;
+            }
+            if (result > 0) {
+                fresh = false;
+            }
+        }
         lastRecord.putBytes(0, buffer, 0, length);
         lastLength = length;
         lastSentNanos = publishNanos;
-        final StreamPublication current = publication;
-        if (current != null && send(current, buffer, length, true)) {
-            fresh = false;
-        }
+        return true;
     }
 
-    /** True once offered; an end-of-term rotation answers the first offer with a retry, so it gets a few tries. */
-    private boolean send(
-            final StreamPublication target, final UnsafeBuffer buffer, final int length, final boolean countDrop) {
+    /** The publication's answer; an end-of-term rotation answers the first offer with a retry, so it gets a few. */
+    private long offer(final StreamPublication target, final UnsafeBuffer buffer, final int length) {
         long result = Publication.ADMIN_ACTION;
         for (int attempt = 0; attempt < OFFER_ATTEMPTS && result == Publication.ADMIN_ACTION; attempt++) {
             result = target.offer(buffer, 0, length);
         }
         if (result > 0) {
             offered.lazySet(offered.get() + 1);
-            return true;
         }
-        if (countDrop && StreamPublication.dropped(result)) {
-            backPressured.lazySet(backPressured.get() + 1);
-        }
-        return false;
+        return result;
     }
 
     private void onRecord(final long sequence, final int templateId, final UnsafeBuffer buffer, final int length) {
@@ -203,8 +209,8 @@ final class ShardStream {
         final StreamPublication current = publication;
         if (current != null && lastLength > 0 && (fresh || nowNanos - lastSentNanos >= RESEND_NANOS)) {
             // A publication nobody has joined yet takes nothing, so a fresh one keeps trying until a session joins.
-            // A re-send that doesn't go through loses nothing: the record already went out, or was counted then.
-            if (send(current, lastRecord, lastLength, false)) {
+            // A re-send that doesn't go through loses nothing: the record already went out.
+            if (offer(current, lastRecord, lastLength) > 0) {
                 fresh = false;
             }
             lastSentNanos = nowNanos;
@@ -229,17 +235,20 @@ final class ShardStream {
         return offered.get();
     }
 
-    /** Records sessions never got: offers refused for back pressure, and records the publisher was lapped past. */
+    /** Records sessions never got: those the publisher was lapped past. */
     long dropped() {
-        return backPressured() + lapped();
+        return lapped();
     }
 
-    /** Offers refused because a session's receive window was full: a session not reading. */
-    long backPressured() {
-        return backPressured.get();
+    /** Offers the publication refused for want of room, each retried on the next pass; a burst, not a loss. */
+    long held() {
+        return held.get();
     }
 
-    /** Records the publisher fell a whole ring behind on: this shard's publisher thread not keeping up. */
+    /**
+     * Records the publisher fell a whole ring behind on: its thread not keeping up, or a publication full for as long
+     * as the ring took to fill.
+     */
     long lapped() {
         return publishPoller == null ? 0 : publishPoller.lapped();
     }

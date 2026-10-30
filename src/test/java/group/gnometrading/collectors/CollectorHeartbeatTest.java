@@ -9,11 +9,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.utils.SchedulingLatencyProbe;
+import io.aeron.Publication;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import org.agrona.DirectBuffer;
 import org.junit.jupiter.api.Test;
 
 class CollectorHeartbeatTest {
@@ -132,6 +134,47 @@ class CollectorHeartbeatTest {
     }
 
     @Test
+    void aStreamThatHeldRecordsForAFullPublicationIsLoggedThoughNoneWereDropped() throws Exception {
+        ShardStream stream = kit.publishingStream(7);
+        agent.add(stream);
+        streams = List.of(stream);
+        long wall = System.currentTimeMillis() * 1_000_000;
+        heartbeat.lines(15 * SECOND, wall);
+
+        stream.publication(new StreamPublication() {
+            @Override
+            public long offer(final DirectBuffer buffer, final int offset, final int length) {
+                return Publication.BACK_PRESSURED;
+            }
+
+            @Override
+            public long position() {
+                return 0;
+            }
+
+            @Override
+            public int sessionId() {
+                return 1;
+            }
+
+            @Override
+            public void close() {}
+        });
+        StreamTestKit.publish(stream, 1);
+        stream.poll(0);
+        stream.publish(0);
+        stream.publish(0);
+        List<JsonNode> lines = parse(heartbeat.lines(30 * SECOND, wall));
+
+        assertEquals(2, lines.size(), "the process, and the hold");
+        JsonNode held = lines.get(1);
+        assertEquals("publish", held.get("kind").asText());
+        assertEquals(0, held.get("dropped").asLong());
+        assertEquals(2, held.get("held").asLong());
+        assertEquals(2, held.get("held_total").asLong());
+    }
+
+    @Test
     void aStreamThatDroppedRecordsForSessionsIsLoggedWithWhy() throws Exception {
         ShardStream stream = kit.publishingStream(7);
         agent.add(stream);
@@ -153,7 +196,7 @@ class CollectorHeartbeatTest {
         assertEquals(7, drop.get("stream_id").asInt());
         assertEquals(stream.dropped(), drop.get("dropped").asLong());
         assertEquals(stream.dropped(), drop.get("lapped_total").asLong());
-        assertEquals(0, drop.get("back_pressured_total").asLong());
+        assertEquals(0, drop.get("held_total").asLong());
         assertEquals(1, heartbeat.lines(45 * SECOND, wall).size(), "nothing dropped since: no line");
     }
 

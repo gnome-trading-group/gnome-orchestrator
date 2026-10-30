@@ -43,10 +43,10 @@ interface StreamPublication extends AutoCloseable {
     }
 
     /**
-     * Whether a failed offer lost a record a session should have had, rather than finding nobody to send it to.
-     * {@link Publication#ADMIN_ACTION} isn't one: the term rotated, and the same offer goes through at once.
+     * Whether a failed offer found the publication full, so the record must wait, rather than finding nobody to send it
+     * to. {@link Publication#ADMIN_ACTION} isn't one: the term rotated, and the same offer goes through at once.
      */
-    static boolean dropped(final long result) {
+    static boolean full(final long result) {
         return result == Publication.BACK_PRESSURED || result == Publication.MAX_POSITION_EXCEEDED;
     }
 }
