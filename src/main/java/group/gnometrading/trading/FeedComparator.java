@@ -6,7 +6,9 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.schemas.SbeMessage;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.StreamHeader;
+import group.gnometrading.schemas.book.Mbp10Encoder;
 import group.gnometrading.sequencer.LappingPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.utils.LatencyHistogram;
@@ -33,6 +35,12 @@ import org.agrona.concurrent.EpochNanoClock;
  * hasn't matched within {@link #EXPIRE_AFTER_NANOS} counts as seen on one side only: a snapshot each connection took
  * at its own time, a shard re-send dropped as a repeat, or a record one path missed.
  *
+ * <p>A venue sends to each connection on its own schedule, so the hop also carries that jitter (on some venues
+ * hundreds of milliseconds either way). The transit, arrival here less the shard's own receive stamp (which
+ * {@link ShardArrivals} keeps in {@code timestampSent}), is the shard pipeline alone: reader, publisher, Aeron and
+ * this session's ingress. It compares two hosts' wall clocks, so it carries their sync error; a negative minimum shows
+ * that error.
+ *
  * <p>Logs one {@code feed_compare} line per stream every {@link #REPORT_EVERY_NANOS} and a {@code feed_compare_total}
  * line per stream when closed. Reads both rings without holding their producers back.
  */
@@ -47,6 +55,8 @@ final class FeedComparator implements GnomeAgent {
     private static final int RECV_FROM = SbeMessage.HEADER_LENGTH + StreamHeader.TIMESTAMP_RECV_OFFSET;
     private static final int RECV_TO = RECV_FROM + Long.BYTES;
     private static final int FLAGS_AT = SbeMessage.HEADER_LENGTH + StreamHeader.FLAGS_OFFSET;
+    private static final int SENT_FROM = ShardArrivals.SENT_OFFSET;
+    private static final int SENT_TO = SENT_FROM + Long.BYTES;
     private static final long FNV_OFFSET = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
 
@@ -95,11 +105,11 @@ final class FeedComparator implements GnomeAgent {
             byStream.put(streamId, pairing);
             pairings.add(pairing);
         }
-        this.shardPoller =
-                shard.createLappingPoller((sequence, templateId, buffer, length) -> onRecord(SHARD, buffer, length));
+        this.shardPoller = shard.createLappingPoller(
+                (sequence, templateId, buffer, length) -> onRecord(SHARD, templateId, buffer, length));
         for (final SequencedRingBuffer<?> ring : direct) {
             directPollers.add(ring.createLappingPoller(
-                    (sequence, templateId, buffer, length) -> onRecord(DIRECT, buffer, length)));
+                    (sequence, templateId, buffer, length) -> onRecord(DIRECT, templateId, buffer, length)));
         }
     }
 
@@ -143,7 +153,7 @@ final class FeedComparator implements GnomeAgent {
         }
     }
 
-    private void onRecord(final int side, final DirectBuffer buffer, final int length) {
+    private void onRecord(final int side, final int templateId, final DirectBuffer buffer, final int length) {
         if (length < FLAGS_AT + 1) {
             return;
         }
@@ -158,6 +168,11 @@ final class FeedComparator implements GnomeAgent {
             return;
         }
         final long arrival = StreamHeader.timestampRecv(buffer, 0) + (side == SHARD ? wallOffsetNanos : 0);
+        if (side == SHARD && templateId == Mbp10Encoder.TEMPLATE_ID && length >= SENT_TO) {
+            final long transit = arrival - buffer.getLong(SENT_FROM, Statics.BYTE_ORDER);
+            pairing.window.transit.record(transit);
+            pairing.total.transit.record(transit);
+        }
         pairing.onRecord(
                 side,
                 identity(buffer, length),
@@ -170,11 +185,11 @@ final class FeedComparator implements GnomeAgent {
         wallOffsetNanos = clock.nanoTime() - nanoTime.getAsLong();
     }
 
-    /** FNV-1a over the record less {@code timestampRecv} and the flags byte. */
+    /** FNV-1a over the record less {@code timestampRecv}, {@code timestampSent} and the flags byte. */
     static long identity(final DirectBuffer buffer, final int length) {
         long hash = FNV_OFFSET;
         for (int i = 0; i < length; i++) {
-            if ((i >= RECV_FROM && i < RECV_TO) || i == FLAGS_AT) {
+            if ((i >= RECV_FROM && i < RECV_TO) || (i >= SENT_FROM && i < SENT_TO) || i == FLAGS_AT) {
                 continue;
             }
             hash = (hash ^ (buffer.getByte(i) & 0xFF)) * FNV_PRIME;
@@ -252,6 +267,12 @@ final class FeedComparator implements GnomeAgent {
         line.put("hop_p999_us", stats.hop.percentileMicros(0.999));
         line.put("hop_max_us", stats.hop.maxMicros());
         line.put("hop_min_us", stats.hop.minMicros());
+        line.put("transit_p50_us", stats.transit.percentileMicros(0.5));
+        line.put("transit_p90_us", stats.transit.percentileMicros(0.9));
+        line.put("transit_p99_us", stats.transit.percentileMicros(0.99));
+        line.put("transit_p999_us", stats.transit.percentileMicros(0.999));
+        line.put("transit_max_us", stats.transit.maxMicros());
+        line.put("transit_min_us", stats.transit.minMicros());
         line.put("shard_venue_lag_p50_us", stats.venueLag[SHARD].percentileMicros(0.5));
         line.put("shard_venue_lag_p99_us", stats.venueLag[SHARD].percentileMicros(0.99));
         line.put("direct_venue_lag_p50_us", stats.venueLag[DIRECT].percentileMicros(0.5));
@@ -383,6 +404,7 @@ final class FeedComparator implements GnomeAgent {
 
     private static final class Stats {
         final SignedLatency hop = new SignedLatency();
+        final SignedLatency transit = new SignedLatency();
         final LatencyHistogram[] venueLag = {new LatencyHistogram(), new LatencyHistogram()};
         final long[] only = new long[2];
         final long[] onlySnapshots = new long[2];
@@ -390,6 +412,7 @@ final class FeedComparator implements GnomeAgent {
 
         void reset() {
             hop.reset();
+            transit.reset();
             venueLag[SHARD].reset();
             venueLag[DIRECT].reset();
             only[SHARD] = 0;

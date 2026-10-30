@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.StreamHeader;
 import group.gnometrading.schemas.book.Mbp10Encoder;
 import group.gnometrading.sequencer.GlobalSequence;
@@ -20,6 +21,7 @@ class FeedComparatorTest {
 
     private static final int STREAM_ID = 425_462;
     private static final long MS = TimeUnit.MILLISECONDS.toNanos(1);
+    private static final long SHARD_TRANSIT = 700_000;
 
     private final AtomicLong clock = new AtomicLong(1_000 * MS);
     private final SequencedRingBuffer<Mbp10Schema> direct =
@@ -60,14 +62,14 @@ class FeedComparatorTest {
         direct.publishRaw(record.buffer, Mbp10Encoder.TEMPLATE_ID, record.totalMessageSize());
     }
 
-    /** As the shard path delivers it: the shard's own receive time, which arrival replaces. */
+    /** As the shard path delivers it: received by the shard {@link #SHARD_TRANSIT} before it arrives here. */
     private void viaShard(final long event, final long bid) {
         viaShard(event, bid, false, false);
     }
 
     private void viaShard(final long event, final long bid, final boolean snapshot, final boolean bad) {
         build(event, bid, snapshot, bad);
-        record.encoder.timestampRecv(1);
+        record.encoder.timestampRecv(clock.get() - SHARD_TRANSIT);
         arrivals.record(record.buffer, 0, Mbp10Encoder.TEMPLATE_ID, record.totalMessageSize());
     }
 
@@ -77,12 +79,13 @@ class FeedComparatorTest {
     }
 
     @Test
-    void theShardCopyIsStampedOnArrivalAndOtherwiseUnchanged() throws Exception {
-        final long[] seen = new long[3];
+    void theShardCopyIsStampedOnArrivalKeepsTheShardsStampAndIsTheSameRecord() throws Exception {
+        final long[] seen = new long[4];
         final var poller = arrivals.ring().createLappingPoller((sequence, templateId, buffer, length) -> {
             seen[0] = StreamHeader.timestampRecv(buffer, 0);
             seen[1] = StreamHeader.timestampEvent(buffer, 0);
             seen[2] = FeedComparator.identity(buffer, length);
+            seen[3] = buffer.getLong(ShardArrivals.SENT_OFFSET, Statics.BYTE_ORDER);
         });
         record.encoder.streamId(STREAM_ID).timestampEvent(7).timestampRecv(1).bidPrice0(42);
         clock.set(5_000 * MS);
@@ -93,6 +96,7 @@ class FeedComparatorTest {
         assertEquals(5_000 * MS, seen[0]);
         assertEquals(7, seen[1]);
         assertEquals(FeedComparator.identity(record.buffer, record.totalMessageSize()), seen[2]);
+        assertEquals(1, seen[3]);
     }
 
     @Test
@@ -105,6 +109,7 @@ class FeedComparatorTest {
 
         assertEquals(1L, window.get("matched"));
         assertEquals(2_000L, window.get("hop_p50_us"));
+        assertEquals(700L, window.get("transit_p50_us"));
         assertEquals(0L, window.get("shard_only"));
         assertEquals(0L, window.get("direct_only"));
     }
@@ -207,5 +212,6 @@ class FeedComparatorTest {
 
         assertEquals(1L, window.get("matched"));
         assertEquals(2_000L, window.get("hop_p50_us"));
+        assertEquals(0L, window.get("transit_p50_us"));
     }
 }

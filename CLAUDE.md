@@ -45,12 +45,14 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   shard's re-send is dropped only as an exact byte repeat (venues often have no sequence and millisecond stamps).
   `MarketDataLeases` reads `GET /collection/leases/{sessionId}` with the `gnome/api-keys/market-data` key (read again
   on 401/403). `market.data.compare: true` (shard sessions only) also opens the session's own venue connections for
-  its listings, which nothing trades on, and `FeedComparator` times the shard path against them: records are paired
-  by their bytes less `timestampRecv` and flags (k-th with k-th), shard arrivals are copied by `ShardArrivals` on the
-  ingress thread (monotonic stamp: the wall clock's `Instant` wasn't always optimized away there), and each minute it logs `FEED_COMPARE` lines
-  (`feed_compare` per stream: matched, one-sided after 10 s, bad, hop p50–max in µs, venue lag per path;
-  `feed_compare_host`: lapped, scheduling lateness) and `feed_compare_total` at close. Live sessions and local runs
-  still open venue connections themselves:
+  its listings, which nothing trades on, and `FeedComparator` times the shard path against them: records are paired by
+  their bytes less `timestampRecv` and flags (k-th with k-th), shard arrivals are copied by `ShardArrivals` on the
+  ingress thread (monotonic stamp: the wall clock's `Instant` wasn't always optimized away there), and each minute it
+  logs `FEED_COMPARE` lines (`feed_compare` per stream: matched, one-sided after 10 s, bad, hop p50–max in µs, which
+  includes the venue's per-connection jitter; transit = arrival less the shard's receive stamp, carried in
+  `timestampSent`, i.e. the shard pipeline alone, across two hosts' clocks; venue lag per path; `feed_compare_host`:
+  lapped, scheduling lateness) and `feed_compare_total` at close. Live sessions and local runs still open venue
+  connections themselves:
 - `trading/` also: `SessionFeeds` (the session's market data on the same feeds as a shard), `SessionExit` (graceful
   exit), `SessionFatalHandler` (every error exit), `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING ->
   RUNNING), `SessionReports` (alerts + registry PATCH), `JournalManagerAgent` and `JournalSegmentSealer`,
