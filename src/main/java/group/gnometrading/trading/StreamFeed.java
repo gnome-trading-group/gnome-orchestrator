@@ -14,6 +14,23 @@ import org.agrona.concurrent.UnsafeBuffer;
  */
 final class StreamFeed implements GatewayHealth {
 
+    /** Why a stream was last marked bad, for the control thread's log line. */
+    enum BadReason {
+        SHARD_SILENT("its shard's status stopped"),
+        SILENT("nothing arrived"),
+        IMAGE_GONE("its Aeron image went away"),
+        RECONNECTING("its shard is reconnecting to the venue"),
+        DROPS("its shard dropped records for sessions"),
+        STALLED("it fell behind its shard's publication"),
+        FLAGGED_BY_SHARD("its shard sent it flagged bad");
+
+        final String description;
+
+        BadReason(final String description) {
+            this.description = description;
+        }
+    }
+
     /** A subscription to the stream on one shard. */
     record FeedSink(Subscription subscription, ShardLink link) {}
 
@@ -45,6 +62,9 @@ final class StreamFeed implements GatewayHealth {
     volatile boolean resubscribing;
 
     private volatile boolean bad;
+    // Written before badSpells is counted, so a reader that sees the count sees at least this spell's reason.
+    private volatile BadReason badReason;
+    private volatile long badDropped;
     private final AtomicLong badSpells = new AtomicLong();
     private final AtomicLong refused = new AtomicLong();
 
@@ -57,11 +77,26 @@ final class StreamFeed implements GatewayHealth {
         return bad;
     }
 
-    void markBad() {
+    /** {@code shardDropped}: the shard's drop count for the stream when it was marked; -1 before its first status. */
+    void markBad(final BadReason reason, final long shardDropped) {
         if (!bad) {
+            badReason = reason;
+            badDropped = shardDropped;
             bad = true;
             badSpells.lazySet(badSpells.get() + 1);
         }
+    }
+
+    long badSpells() {
+        return badSpells.get();
+    }
+
+    BadReason badReason() {
+        return badReason;
+    }
+
+    long badDropped() {
+        return badDropped;
     }
 
     void markGood() {

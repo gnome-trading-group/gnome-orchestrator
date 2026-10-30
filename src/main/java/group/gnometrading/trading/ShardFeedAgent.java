@@ -215,7 +215,7 @@ final class ShardFeedAgent implements GnomeAgent {
         feed.lastEvent = StreamHeader.timestampEvent(buffer, offset);
         feed.lastSequence = StreamHeader.sequence(buffer, offset);
         if (flaggedBad(buffer, offset)) {
-            feed.markBad();
+            feed.markBad(StreamFeed.BadReason.FLAGGED_BY_SHARD, feed.statusDropped);
         } else {
             feed.markGood();
         }
@@ -290,11 +290,11 @@ final class ShardFeedAgent implements GnomeAgent {
             return 0;
         }
         final boolean stalled = stalled(feed, sink);
-        final boolean lost = stalled || lost(feed, sink);
+        final StreamFeed.BadReason lost = stalled ? StreamFeed.BadReason.STALLED : lost(feed, sink);
         feed.dropsRose = false;
         int work = 0;
-        if (lost && !feed.bad()) {
-            work = markBad(feed);
+        if (lost != null && !feed.bad()) {
+            work = markBad(feed, lost);
         }
         if (stalled) {
             resubscribe(feed);
@@ -302,12 +302,22 @@ final class ShardFeedAgent implements GnomeAgent {
         return work;
     }
 
-    private boolean lost(final StreamFeed feed, final StreamFeed.FeedSink sink) {
+    /** Why the stream can't be trusted now, or null. */
+    private StreamFeed.BadReason lost(final StreamFeed feed, final StreamFeed.FeedSink sink) {
         final ShardLink link = feed.currentLink;
-        final boolean shardSilent = link != null && link.statusSeen && now - link.lastStatusNanos > SHARD_SILENT_NANOS;
-        final boolean silent = now - feed.lastArrivalNanos > SILENT_NANOS;
-        final boolean imageGone = feed.joined && sink.subscription().imageCount() == 0;
-        return shardSilent || silent || imageGone || feed.statusReconnecting || feed.dropsRose;
+        if (link != null && link.statusSeen && now - link.lastStatusNanos > SHARD_SILENT_NANOS) {
+            return StreamFeed.BadReason.SHARD_SILENT;
+        }
+        if (now - feed.lastArrivalNanos > SILENT_NANOS) {
+            return StreamFeed.BadReason.SILENT;
+        }
+        if (feed.joined && sink.subscription().imageCount() == 0) {
+            return StreamFeed.BadReason.IMAGE_GONE;
+        }
+        if (feed.statusReconnecting) {
+            return StreamFeed.BadReason.RECONNECTING;
+        }
+        return feed.dropsRose ? StreamFeed.BadReason.DROPS : null;
     }
 
     /**
@@ -345,15 +355,15 @@ final class ShardFeedAgent implements GnomeAgent {
     }
 
     /** Its last record again, flagged bad data; nothing to repeat before the first one arrives. */
-    private int markBad(final StreamFeed feed) {
+    private int markBad(final StreamFeed feed, final StreamFeed.BadReason reason) {
         if (feed.lastLength == 0) {
-            feed.markBad();
+            feed.markBad(reason, feed.statusDropped);
             return 0;
         }
         flagged.putBytes(0, feed.last, 0, feed.lastLength);
         flagged.putByte(FLAGS_OFFSET, (byte) (flagged.getByte(FLAGS_OFFSET) | (1 << StreamHeader.BAD_DATA_BIT)));
         if (ring.tryPublishRaw(flagged, 0, feed.lastTemplateId, feed.lastLength)) {
-            feed.markBad();
+            feed.markBad(reason, feed.statusDropped);
             return 1;
         }
         return 0;

@@ -56,7 +56,7 @@ final class ShardStream {
     private volatile boolean fresh;
     // Read by the heartbeat; the publisher alone writes them.
     private final AtomicLong offered = new AtomicLong();
-    private final AtomicLong dropped = new AtomicLong();
+    private final AtomicLong backPressured = new AtomicLong();
 
     ShardStream(
             final int streamId,
@@ -118,7 +118,7 @@ final class ShardStream {
             return true;
         }
         if (countDrop && StreamPublication.dropped(result)) {
-            dropped.lazySet(dropped.get() + 1);
+            backPressured.lazySet(backPressured.get() + 1);
         }
         return false;
     }
@@ -231,7 +231,17 @@ final class ShardStream {
 
     /** Records sessions never got: offers refused for back pressure, and records the publisher was lapped past. */
     long dropped() {
-        return dropped.get() + (publishPoller == null ? 0 : publishPoller.lapped());
+        return backPressured() + lapped();
+    }
+
+    /** Offers refused because a session's receive window was full: a session not reading. */
+    long backPressured() {
+        return backPressured.get();
+    }
+
+    /** Records the publisher fell a whole ring behind on: this shard's publisher thread not keeping up. */
+    long lapped() {
+        return publishPoller == null ? 0 : publishPoller.lapped();
     }
 
     /** Bounds the minutes this stream uploads, in epoch nanos (see {@code Assignment.Streams}). Any thread. */

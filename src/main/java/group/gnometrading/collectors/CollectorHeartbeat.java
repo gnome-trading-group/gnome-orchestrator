@@ -22,8 +22,9 @@ import java.util.concurrent.TimeUnit;
  * What a shard is doing, logged every {@link #INTERVAL_SECONDS}: one {@code HEARTBEAT} line for the process, one per
  * connection, and one per stream whose state changed since the last (every stream on the first), each a JSON object
  * with a {@code kind}. A line each keeps every one under the logger's 4 KB cut however many streams the shard runs, and
- * lets a log query filter by stream or connection; logging only changes keeps a large shard's log volume flat. Every
- * stream's numbers are in the shard's status ({@link ShardStatusWriter}).
+ * lets a log query filter by stream or connection; logging only changes keeps a large shard's log volume flat. A
+ * {@code publish} line names a stream that dropped records sessions should have had since the last, and why. Every
+ * stream's numbers are in the shard's status ({@link ShardStatusWriter}), which keeps only the latest.
  *
  * <p>Runs on its own thread, so its allocation stays off the threads that read and record data.
  */
@@ -60,6 +61,7 @@ final class CollectorHeartbeat implements Runnable {
     private final List<GarbageCollectorMXBean> collectors = ManagementFactory.getGarbageCollectorMXBeans();
     private Map<Integer, Long> previousRecords = new HashMap<>();
     private Map<Integer, String> previousStates = new HashMap<>();
+    private Map<Integer, Long> previousDropped = new HashMap<>();
     private long previousNanos;
     // The latest process line, which the status repeats; set on the heartbeat's thread, read by the status writer's.
     private volatile String processLine;
@@ -93,6 +95,18 @@ final class CollectorHeartbeat implements Runnable {
         }
     }
 
+    private String publishLine(final ShardStream stream, final long newlyDropped) throws JsonProcessingException {
+        final Map<String, Object> line = new LinkedHashMap<>();
+        line.put("kind", "publish");
+        line.put("stream_id", stream.streamId());
+        line.put("name", stream.name());
+        line.put("dropped", newlyDropped);
+        line.put("offered_total", stream.offered());
+        line.put("back_pressured_total", stream.backPressured());
+        line.put("lapped_total", stream.lapped());
+        return mapper.writeValueAsString(line);
+    }
+
     /** This interval's lines, process first; {@code wallNanos} is wall-clock time, as event and receive times are. */
     List<String> lines(final long nowNanos, final long wallNanos) throws JsonProcessingException {
         final double seconds = Math.max(1, nowNanos - previousNanos) / 1e9;
@@ -103,6 +117,7 @@ final class CollectorHeartbeat implements Runnable {
         final Map<String, Integer> byState = new TreeMap<>();
         final Map<Integer, Long> records = new HashMap<>();
         final Map<Integer, String> states = new HashMap<>();
+        final Map<Integer, Long> dropped = new HashMap<>();
         final List<String> streamLines = new ArrayList<>();
         for (ShardStream stream : streams) {
             final Subject subject = stream.subject();
@@ -112,6 +127,12 @@ final class CollectorHeartbeat implements Runnable {
             final long total = stream.records();
             records.put(stream.streamId(), total);
             final long delta = Math.max(0, total - previousRecords.getOrDefault(stream.streamId(), total));
+            final long droppedNow = stream.dropped();
+            dropped.put(stream.streamId(), droppedNow);
+            final long newlyDropped = droppedNow - previousDropped.getOrDefault(stream.streamId(), 0L);
+            if (newlyDropped > 0) {
+                streamLines.add(publishLine(stream, newlyDropped));
+            }
             if (state.equals(previousStates.get(stream.streamId()))) {
                 continue;
             }
@@ -136,6 +157,7 @@ final class CollectorHeartbeat implements Runnable {
         }
         previousRecords = records;
         previousStates = states;
+        previousDropped = dropped;
 
         final List<Connection> connections = shard.connections();
         final List<String> connectionLines = new ArrayList<>(connections.size());

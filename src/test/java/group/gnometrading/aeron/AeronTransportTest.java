@@ -16,7 +16,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
@@ -238,6 +240,46 @@ class AeronTransportTest {
                     return afterRejoin.get() > 20_000;
                 },
                 "the rejoined subscriber to read live values");
+    }
+
+    @Test
+    void aSessionJoiningAPublishingShardIsNeverBackPressured() throws Exception {
+        final Aeron shard = host("shard");
+        final Aeron session = host("session");
+        final Publication publication = shard.addPublication(publication(40040, ""), STREAM_ID);
+        final UnsafeBuffer buffer = new UnsafeBuffer(new byte[64]);
+        final AtomicBoolean running = new AtomicBoolean(true);
+        final AtomicInteger offered = new AtomicInteger();
+        final AtomicInteger backPressured = new AtomicInteger();
+        // A shard offers whether or not anyone listens; one record a millisecond, like a busy book.
+        final Thread publisher = new Thread(() -> {
+            int value = 1;
+            while (running.get()) {
+                final long result = offer(publication, buffer, value++);
+                if (result > 0) {
+                    offered.incrementAndGet();
+                } else if (result == Publication.BACK_PRESSURED || result == Publication.MAX_POSITION_EXCEEDED) {
+                    backPressured.incrementAndGet();
+                }
+                LockSupport.parkNanos(1_000_000);
+            }
+        });
+        publisher.start();
+        try {
+            Thread.sleep(200);
+            final Subscription sub = session.addSubscription(subscription(0, 40040), STREAM_ID);
+            final AtomicInteger received = new AtomicInteger();
+            final long until = System.nanoTime() + 2_000_000_000L;
+            while (System.nanoTime() < until) {
+                sub.poll((buf, offset, length, header) -> received.incrementAndGet(), 100);
+            }
+            assertTrue(received.get() > 1000, "received " + received.get());
+        } finally {
+            running.set(false);
+            publisher.join();
+        }
+        // So a shard counting drops as a session joins means the session wasn't reading, not that joining costs any.
+        assertEquals(0, backPressured.get(), "offered " + offered.get());
     }
 
     @Test

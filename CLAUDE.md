@@ -36,7 +36,8 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   and re-subscribes a stalled stream after closing the old subscription (so the new one joins at the live position).
   A stream is marked bad (its last record repeated with `badData`) when its shard's status stops for 5 s, nothing
   arrives for 15 s (also never), its image goes, the shard reports it reconnecting or reports records it couldn't send
-  (`ShardStatus.dropped` rising), or it stalls behind the publication position (same Aeron session id) for 1 s. A
+  (`ShardStatus.dropped` rising), or it stalls behind the publication position (same Aeron session id) for 1 s. Each
+  bad spell is logged with its reason ("Market data: stream N marked bad: ..."; for drops, the shard's total). A
   shard's re-send is dropped only as an exact byte repeat (venues often have no sequence and millisecond stamps).
   `MarketDataLeases` reads `GET /collection/leases/{sessionId}` with the `gnome/api-keys/market-data` key (read again
   on 401/403). Live sessions and local runs still open venue connections themselves:
@@ -153,7 +154,8 @@ earlier sessions). A session already stopped before startup exits 0 without repo
     task. A failing market is quarantined and retried, a failing connection keeps retrying; neither stops the process.
   - Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`.
   - No registry heartbeat: `HEARTBEAT` log lines every 15 s (process, connection, and a stream only when its state
-    changed) plus the status above.
+    changed; a `publish` line when a stream dropped records for sessions since the last, with totals split into
+    `back_pressured` (a session not reading) and `lapped` (the shard's publisher behind)) plus the status above.
 - Market-data credentials: a shard signs Kalshi and Polymarket US in with the source's market-data account it is bound
   to by label (its item's `accounts`, source to label; `md-1` when unnamed), looked up in the registry's
   `md.source_account` as each connection opens; its key is `gnome/market-data/<source>/<label>`. A missing or retired

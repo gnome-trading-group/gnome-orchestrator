@@ -182,6 +182,8 @@ class StreamPublisherAgentTest {
         agent.doWork();
 
         assertEquals(1, stream.dropped(), "nobody listening isn't a drop, nor is a re-send that doesn't go through");
+        assertEquals(1, stream.backPressured());
+        assertEquals(0, stream.lapped());
         assertEquals(0, stream.offered());
     }
 
@@ -232,6 +234,8 @@ class StreamPublisherAgentTest {
         agent.doWork();
 
         assertTrue(stream.dropped() > 0, "a ring of 64 lapped by 200 records");
+        assertEquals(stream.dropped(), stream.lapped());
+        assertEquals(0, stream.backPressured());
     }
 
     @Test

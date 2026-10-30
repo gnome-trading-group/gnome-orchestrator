@@ -54,6 +54,7 @@ final class ShardMarketData implements TradingOrchestrator.MarketData {
     // When the control thread asked for each stream's move, to give up one that never delivers.
     private final Map<StreamFeed, Long> pendingSince = new IdentityHashMap<>();
     private final Map<StreamFeed, Long> refusedLogged = new IdentityHashMap<>();
+    private final Map<StreamFeed, Long> badSpellsLogged = new IdentityHashMap<>();
     private GnomeAgentRunner runner;
     private ScheduledExecutorService control;
     private long nextLeaseNanos;
@@ -146,6 +147,7 @@ final class ShardMarketData implements TradingOrchestrator.MarketData {
     void controlTick() {
         try {
             drainAgent();
+            logBadSpells();
             final long now = nanoTime.getAsLong();
             if (now >= nextLeaseNanos) {
                 nextLeaseNanos = now + LEASE_EVERY_NANOS;
@@ -277,6 +279,30 @@ final class ShardMarketData implements TradingOrchestrator.MarketData {
                 endpoint.privateIp(),
                 endpoint.port());
         return link;
+    }
+
+    /**
+     * Each time the ingress thread marked a stream bad, and why; several spells within one tick are logged once, with
+     * the latest reason.
+     */
+    private void logBadSpells() {
+        for (final StreamFeed feed : feeds) {
+            final long spells = feed.badSpells();
+            final long logged = badSpellsLogged.getOrDefault(feed, 0L);
+            if (spells == logged) {
+                continue;
+            }
+            badSpellsLogged.put(feed, spells);
+            final StreamFeed.BadReason reason = feed.badReason();
+            final String detail = reason == StreamFeed.BadReason.DROPS ? " (" + feed.badDropped() + " in all)" : "";
+            logger.logf(
+                    LogMessage.DEBUG,
+                    "Market data: stream %d marked bad%s: %s%s",
+                    feed.streamId,
+                    spells - logged > 1 ? " " + (spells - logged) + " times" : "",
+                    reason == null ? "unknown" : reason.description,
+                    detail);
+        }
     }
 
     /** Messages a stream couldn't take (oversized, or not a stream record): rare, so each rise is logged. */

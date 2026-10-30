@@ -11,6 +11,7 @@ import group.gnometrading.aeron.AeronProfile;
 import group.gnometrading.aeron.AeronRuntime;
 import group.gnometrading.aeron.AeronStreamIds;
 import group.gnometrading.gateways.GatewayHealth;
+import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.MessageHeaderEncoder;
@@ -23,6 +24,7 @@ import io.aeron.Publication;
 import io.aeron.Subscription;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -67,8 +69,14 @@ class ShardMarketDataTest {
     });
     private final StreamFeed feed = new StreamFeed(STREAM_ID, "market data 1");
     private final ShardFeedAgent agent = new ShardFeedAgent(ring, List.of(feed), clock::get);
+    private final List<String> logs = new CopyOnWriteArrayList<>();
     private final ShardMarketData marketData = new ShardMarketData(
-            new NullLogger(),
+            new NullLogger() {
+                @Override
+                public void logf(final LogMessage message, final String format, final Object... args) {
+                    logs.add(String.format(format, args));
+                }
+            },
             session,
             "localhost",
             lease::get,
@@ -235,6 +243,7 @@ class ShardMarketDataTest {
         assertEquals(7, last(0), "the last record again");
         assertEquals(1, last(2), "flagged bad data");
         assertTrue(feed.isReconnecting());
+        assertEquals(StreamFeed.BadReason.SHARD_SILENT, feed.badReason());
         assertEquals(1, feed.bookResyncs());
 
         status(statusA, streamA, 0, 0, false);
@@ -257,6 +266,13 @@ class ShardMarketDataTest {
         pump(() -> feed.statusDropped == 6, "a higher count");
         after(ShardFeedAgent.CHECK_EVERY_NANOS);
         assertTrue(feed.isReconnecting());
+        assertEquals(StreamFeed.BadReason.DROPS, feed.badReason());
+        assertEquals(6, feed.badDropped());
+        marketData.controlTick();
+        assertTrue(
+                logs.contains("Market data: stream " + STREAM_ID
+                        + " marked bad: its shard dropped records for sessions (6 in all)"),
+                logs.toString());
 
         send(streamA, 2);
         pump(() -> last(0) == 2, "the next record");
@@ -273,6 +289,7 @@ class ShardMarketDataTest {
         after(ShardFeedAgent.CHECK_EVERY_NANOS);
 
         assertTrue(feed.isReconnecting());
+        assertEquals(StreamFeed.BadReason.RECONNECTING, feed.badReason());
     }
 
     @Test
@@ -286,6 +303,7 @@ class ShardMarketDataTest {
         after(2 * SECOND);
 
         assertTrue(feed.isReconnecting(), "nothing has arrived since it subscribed");
+        assertEquals(StreamFeed.BadReason.SILENT, feed.badReason());
     }
 
     @Test
@@ -325,6 +343,7 @@ class ShardMarketDataTest {
             after(ShardFeedAgent.CHECK_EVERY_NANOS);
             after(ShardFeedAgent.STALLED_NANOS + ShardFeedAgent.CHECK_EVERY_NANOS);
             assertTrue(feed.isReconnecting(), "stalled behind the shard");
+            assertEquals(StreamFeed.BadReason.STALLED, feed.badReason());
 
             pump(() -> !feed.resubscribing && feed.current != null, "a new subscription");
             status(statusA, streamA, streamA.position(), 0, false);

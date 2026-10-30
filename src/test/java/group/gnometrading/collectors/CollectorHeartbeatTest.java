@@ -130,6 +130,32 @@ class CollectorHeartbeatTest {
     }
 
     @Test
+    void aStreamThatDroppedRecordsForSessionsIsLoggedWithWhy() throws Exception {
+        ShardStream stream = kit.publishingStream(7);
+        agent.add(stream);
+        streams = List.of(stream);
+        long wall = System.currentTimeMillis() * 1_000_000;
+        heartbeat.lines(15 * SECOND, wall);
+
+        // The publisher reads only after the ring of 64 has gone round three times.
+        for (int i = 0; i < 200; i++) {
+            StreamTestKit.publish(stream, 1);
+            stream.poll(0);
+        }
+        stream.publish(0);
+        List<JsonNode> lines = parse(heartbeat.lines(30 * SECOND, wall));
+
+        assertEquals(2, lines.size(), "the process, and the drop; the stream's state didn't change");
+        JsonNode drop = lines.get(1);
+        assertEquals("publish", drop.get("kind").asText());
+        assertEquals(7, drop.get("stream_id").asInt());
+        assertEquals(stream.dropped(), drop.get("dropped").asLong());
+        assertEquals(stream.dropped(), drop.get("lapped_total").asLong());
+        assertEquals(0, drop.get("back_pressured_total").asLong());
+        assertEquals(1, heartbeat.lines(45 * SECOND, wall).size(), "nothing dropped since: no line");
+    }
+
+    @Test
     void aFailedStreamShowsWhy() throws Exception {
         ShardStream stream = kit.stream(9, (sequence, templateId, buffer, length) -> {
             throw new IllegalStateException("bad record");
