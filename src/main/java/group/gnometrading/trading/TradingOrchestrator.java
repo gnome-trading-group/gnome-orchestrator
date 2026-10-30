@@ -10,6 +10,7 @@ import group.gnometrading.account.VenueAccount;
 import group.gnometrading.aeron.AeronProfile;
 import group.gnometrading.aeron.AeronRuntime;
 import group.gnometrading.aeron.HostAddress;
+import group.gnometrading.aeron.MarketDataIdle;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Orchestrator;
@@ -718,6 +719,7 @@ public class TradingOrchestrator extends Orchestrator {
         AeronRuntime aeron = AeronRuntime.launch(
                 "session",
                 AgentRuntimeInstaller.pinsHotAgents(properties) ? AeronProfile.LATENCY : AeronProfile.STANDARD,
+                MarketDataIdle.from(properties),
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
         String sessionId = properties.getStringProperty("session.id");
         MarketDataLeases client = new MarketDataLeases(

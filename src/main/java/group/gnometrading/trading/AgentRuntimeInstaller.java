@@ -1,5 +1,7 @@
 package group.gnometrading.trading;
 
+import group.gnometrading.aeron.MarketDataIdle;
+import group.gnometrading.aeron.MarketDataPathAgent;
 import group.gnometrading.concurrent.AgentRuntime;
 import group.gnometrading.concurrent.CoreAllocator;
 import group.gnometrading.concurrent.GnomeAgent;
@@ -52,16 +54,18 @@ public final class AgentRuntimeInstaller {
     public static void install(Properties properties, Logger logger, int listingCount) {
         String profile = profile(properties);
         AgentRuntime.Listener listener = new LoggingListener(logger);
+        MarketDataIdle idle = MarketDataIdle.from(properties);
 
         if (STANDARD.equals(profile)) {
-            installStandard(logger);
+            installStandard(logger, idle);
             return;
         }
         if (!LOW_LATENCY.equals(profile)) {
             throw new IllegalArgumentException("Unknown latency.profile: " + profile);
         }
         if (!pinsHotAgents(properties)) {
-            AgentRuntime.install(ThreadPinner.NONE, CoreAllocator.NONE, IdlePolicy.lowLatency(), listener);
+            AgentRuntime.install(
+                    ThreadPinner.NONE, CoreAllocator.NONE, withMarketDataIdle(IdlePolicy.lowLatency(), idle), listener);
             logger.logf(LogMessage.DEBUG, "Latency profile low_latency without CPU affinity: no pinning, no spinning");
             return;
         }
@@ -74,7 +78,10 @@ public final class AgentRuntimeInstaller {
         ThreadPinner pinner = NativeThreadPinner.load(linux);
 
         AgentRuntime.install(
-                pinner, new IsolatedCoreAllocator(isolated, housekeeping), IdlePolicy.lowLatency(), listener);
+                pinner,
+                new IsolatedCoreAllocator(isolated, housekeeping),
+                withMarketDataIdle(IdlePolicy.lowLatency(), idle),
+                listener);
         logger.logf(
                 LogMessage.DEBUG,
                 "Latency profile low_latency: isolated cores %s, housekeeping cores %s, native pinning %s",
@@ -99,9 +106,23 @@ public final class AgentRuntimeInstaller {
      * must never spin, such as collectors on a fractional Fargate CPU, where a spinning thread exhausts the CPU quota
      * and the throttled task stalls every thread for tens of milliseconds.
      */
-    public static void installStandard(Logger logger) {
-        AgentRuntime.install(ThreadPinner.NONE, CoreAllocator.NONE, IdlePolicy.standard(), new LoggingListener(logger));
-        logger.logf(LogMessage.DEBUG, "Latency profile standard: no pinning, idle agents back off");
+    public static void installStandard(Logger logger, MarketDataIdle idle) {
+        AgentRuntime.install(
+                ThreadPinner.NONE,
+                CoreAllocator.NONE,
+                withMarketDataIdle(IdlePolicy.standard(), idle),
+                new LoggingListener(logger));
+        logger.logf(
+                LogMessage.DEBUG,
+                "Latency profile standard: no pinning, idle agents back off (market data parks at most %d µs)",
+                idle.maxParkNanos() / 1_000);
+    }
+
+    /** {@code base}, except that a market-data agent without a core of its own backs off as {@code idle}. */
+    static IdlePolicy withMarketDataIdle(IdlePolicy base, MarketDataIdle idle) {
+        return (agent, placement) -> agent instanceof MarketDataPathAgent && !placement.dedicated()
+                ? idle.agentStrategy()
+                : base.idleStrategyFor(agent, placement);
     }
 
     /**

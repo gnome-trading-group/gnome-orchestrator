@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import group.gnometrading.aeron.MarketDataPathAgent;
 import group.gnometrading.concurrent.AgentRuntime;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.ThreadProfile;
@@ -33,6 +34,18 @@ class AgentRuntimeInstallerTest {
     };
 
     private static final GnomeAgent BACKGROUND = () -> 0;
+
+    private static final MarketDataPathAgent MARKET_DATA = new MarketDataPathAgent() {
+        @Override
+        public int doWork() {
+            return 0;
+        }
+
+        @Override
+        public ThreadProfile threadProfile() {
+            return ThreadProfile.HOT_PATH;
+        }
+    };
 
     private final Logger logger = mock(Logger.class);
 
@@ -97,5 +110,20 @@ class AgentRuntimeInstallerTest {
         assertEquals(10, AgentRuntimeInstaller.expectedHotThreads("paper", 3));
         assertEquals(5, AgentRuntimeInstaller.expectedHotThreads("live", 1));
         assertEquals(10, AgentRuntimeInstaller.expectedHotThreads("live", 2));
+    }
+
+    @Test
+    void marketDataAgentsParkNoLongerThanConfigured() throws Exception {
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/market-data-idle.properties"), logger, 1);
+
+        assertTrue(AgentRuntime.attach(MARKET_DATA).toString().contains("maxParkPeriodNs=50000"));
+        assertTrue(AgentRuntime.attach(HOT).toString().contains("maxParkPeriodNs=1000000"));
+    }
+
+    @Test
+    void marketDataAgentsParkUpToAMillisecondByDefault() throws Exception {
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/standard.properties"), logger, 1);
+
+        assertTrue(AgentRuntime.attach(MARKET_DATA).toString().contains("maxParkPeriodNs=1000000"));
     }
 }

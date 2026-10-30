@@ -5,7 +5,6 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import java.io.File;
 import org.agrona.ErrorHandler;
-import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.BusySpinIdleStrategy;
 
 /**
@@ -29,6 +28,12 @@ public final class AeronRuntime implements AutoCloseable {
      * clearing what a previous run left there, and connects a client to it.
      */
     public static AeronRuntime launch(final String name, final AeronProfile profile, final ErrorHandler errors) {
+        return launch(name, profile, MarketDataIdle.DEFAULT, errors);
+    }
+
+    /** As {@link #launch(String, AeronProfile, ErrorHandler)}, its threads parking at most as long as {@code idle}. */
+    public static AeronRuntime launch(
+            final String name, final AeronProfile profile, final MarketDataIdle idle, final ErrorHandler errors) {
         final MediaDriver.Context context = new MediaDriver.Context()
                 .aeronDirectoryName(directoryFor(name))
                 .dirDeleteOnStart(true)
@@ -40,9 +45,9 @@ public final class AeronRuntime implements AutoCloseable {
         if (profile.dedicated()) {
             context.threadingMode(ThreadingMode.SHARED_NETWORK)
                     .sharedNetworkIdleStrategy(new BusySpinIdleStrategy())
-                    .conductorIdleStrategy(backoff());
+                    .conductorIdleStrategy(idle.driverStrategy());
         } else {
-            context.threadingMode(ThreadingMode.SHARED).sharedIdleStrategy(backoff());
+            context.threadingMode(ThreadingMode.SHARED).sharedIdleStrategy(idle.driverStrategy());
         }
         final MediaDriver driver = MediaDriver.launchEmbedded(context);
         try {
@@ -77,9 +82,5 @@ public final class AeronRuntime implements AutoCloseable {
         final File parent =
                 SHARED_MEMORY.isDirectory() ? SHARED_MEMORY : new File(System.getProperty("java.io.tmpdir"));
         return new File(parent, "aeron-" + name).getAbsolutePath();
-    }
-
-    private static BackoffIdleStrategy backoff() {
-        return new BackoffIdleStrategy(1, 1, 1_000, 1_000_000);
     }
 }

@@ -1,6 +1,6 @@
 package group.gnometrading.collectors;
 
-import group.gnometrading.concurrent.GnomeAgent;
+import group.gnometrading.aeron.MarketDataPathAgent;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.gateways.feed.SubjectState;
@@ -23,7 +23,7 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <p>Never blocks collection: the reader doesn't gate the rings, and a record no session can take is dropped and
  * counted. Every stream the runtime starts is read here, leased or not.
  */
-final class StreamPublisherAgent implements GnomeAgent {
+final class StreamPublisherAgent implements MarketDataPathAgent {
 
     static final long STATUS_EVERY_NANOS = TimeUnit.SECONDS.toNanos(1);
     static final long RETIRE_GRACE_NANOS = MarketDataCollectorAgent.RETIRE_GRACE_NANOS;

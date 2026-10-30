@@ -1,6 +1,7 @@
 package group.gnometrading.testing;
 
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.aeron.MarketDataIdle;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Named;
@@ -88,7 +89,7 @@ public class MarketDataWriterOrchestrator extends Orchestrator {
     public final void configure() {
         install(new SecurityMasterModule(), new AwsModule());
         final Logger logger = getInstance(Logger.class);
-        AgentRuntimeInstaller.installStandard(logger);
+        AgentRuntimeInstaller.installStandard(logger, MarketDataIdle.DEFAULT);
         final MarketDataWriter writer = getInstance(MarketDataWriter.class);
         final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         final Stream stream = getInstance(Stream.class);
