@@ -17,9 +17,10 @@ class StreamPublisherAgentTest {
 
     private static final long SECOND = 1_000_000_000L;
 
-    /** Records what it is offered; answers with {@code result} while that is negative. */
+    /** Records what it is offered, and which offers were re-sends; answers with {@code result} while that is negative. */
     private static final class Recording implements StreamPublication {
         final List<byte[]> offers = new ArrayList<>();
+        final List<Boolean> resent = new ArrayList<>();
         long result = 1;
         long position = 4_096;
         // Answers these first, then {@link #result}: an end-of-term rotation, say.
@@ -27,9 +28,19 @@ class StreamPublisherAgentTest {
 
         @Override
         public long offer(final DirectBuffer buffer, final int offset, final int length) {
+            return record(buffer, offset, length, false);
+        }
+
+        @Override
+        public long resend(final DirectBuffer buffer, final int offset, final int length) {
+            return record(buffer, offset, length, true);
+        }
+
+        private long record(final DirectBuffer buffer, final int offset, final int length, final boolean resend) {
             final byte[] copy = new byte[length];
             buffer.getBytes(offset, copy);
             offers.add(copy);
+            resent.add(resend);
             return first.isEmpty() ? result : first.poll();
         }
 
@@ -159,6 +170,7 @@ class StreamPublisherAgentTest {
                 publication.offers.stream()
                         .map(StreamPublisherAgentTest::sequenceOf)
                         .toList());
+        assertEquals(List.of(false, true), publication.resent, "only the re-send is marked");
 
         book(stream, 4);
         now += 1;
@@ -208,6 +220,7 @@ class StreamPublisherAgentTest {
         agent.doWork();
 
         assertEquals(List.of(1, 1, 2), sequencesOf(publication), "a fresh publication re-offers its last record");
+        assertEquals(List.of(false, true, false), publication.resent);
         assertEquals(0, stream.held());
         assertEquals(0, stream.dropped());
     }

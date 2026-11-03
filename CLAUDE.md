@@ -42,7 +42,9 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   arrives for 15 s (also never), its image goes, the shard reports it reconnecting or reports records it couldn't send
   (`ShardStatus.dropped` rising), or it stalls behind the publication position (same Aeron session id) for 1 s. Each
   bad spell is logged with its reason ("Market data: stream N marked bad: ..."; for drops, the shard's total). A
-  shard's re-send is dropped only as an exact byte repeat (venues often have no sequence and millisecond stamps).
+  shard's re-send is marked in the Aeron frame's reserved value (`AeronReservedValues.RESENT`) and dropped only when
+  it repeats the last record passed on byte for byte; unmarked repeats always pass (one venue message can carry
+  several identical fills, which share every byte).
   The market-data path's threads (shard publisher and driver, session driver and `ShardFeedAgent`, i.e. the
   `MarketDataPathAgent`s and both `AeronRuntime`s) park at most `MarketDataIdle` when idle: each park delays a record
   that arrives during it, so on a quiet stream the parks add up along the path. Shards use
@@ -67,7 +69,7 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 - `collectors/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
   records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
   `ShardStream` + `MarketDataCollectorAgent` (minute files), `StreamPublisherAgent` (drains every ring a second time,
-  offers leased streams' records, re-sends a quiet stream's last record every 5 s, sends the core SBE `ShardStatus`
+  offers leased streams' records, re-sends a quiet stream's last record every 5 s (marked `RESENT`), sends the core SBE `ShardStatus`
   every 1 s; reads the rings through a controlled `LappingPoller`, so it never gates collection: a record its
   publication has no room for (one venue message can carry hundreds of fills, past the 128 KB window) waits in the
   ring, with the stream's later records, for the next pass; one the ring laps first is dropped and counted, and

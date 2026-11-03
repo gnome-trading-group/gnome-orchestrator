@@ -148,6 +148,11 @@ class CollectorHeartbeatTest {
             }
 
             @Override
+            public long resend(final DirectBuffer buffer, final int offset, final int length) {
+                return Publication.BACK_PRESSURED;
+            }
+
+            @Override
             public long position() {
                 return 0;
             }

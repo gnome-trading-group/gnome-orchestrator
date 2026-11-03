@@ -1,5 +1,6 @@
 package group.gnometrading.collectors;
 
+import group.gnometrading.aeron.AeronReservedValues;
 import io.aeron.Publication;
 import org.agrona.DirectBuffer;
 
@@ -8,6 +9,9 @@ interface StreamPublication extends AutoCloseable {
 
     /** As {@link Publication#offer(DirectBuffer, int, int)}: the new position, or a negative reason it wasn't sent. */
     long offer(DirectBuffer buffer, int offset, int length);
+
+    /** As {@link #offer}, marked {@link AeronReservedValues#RESENT}: a record sessions may already have. */
+    long resend(DirectBuffer buffer, int offset, int length);
 
     /** As {@link Publication#position()}: how far it has sent, which sessions compare their own position with. */
     long position();
@@ -23,6 +27,11 @@ interface StreamPublication extends AutoCloseable {
             @Override
             public long offer(final DirectBuffer buffer, final int offset, final int length) {
                 return publication.offer(buffer, offset, length);
+            }
+
+            @Override
+            public long resend(final DirectBuffer buffer, final int offset, final int length) {
+                return publication.offer(buffer, offset, length, AeronReservedValues.RESENT_SUPPLIER);
             }
 
             @Override

@@ -141,6 +141,11 @@ class ShardRuntimeTest {
         }
 
         @Override
+        public long resend(final org.agrona.DirectBuffer buffer, final int offset, final int length) {
+            return 1;
+        }
+
+        @Override
         public long position() {
             return 0;
         }

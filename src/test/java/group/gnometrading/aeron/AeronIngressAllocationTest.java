@@ -109,7 +109,7 @@ class AeronIngressAllocationTest {
 
     /** Each message into the ring as it came, its template id read from the SBE header. */
     private static AeronIngressAgent.Sink toRing(final SequencedRingBuffer<?> ring) {
-        return (buffer, offset, length) -> ring.tryPublishRaw(
+        return (buffer, offset, length, reservedValue) -> ring.tryPublishRaw(
                 buffer,
                 offset,
                 buffer.getShort(offset + MessageHeaderDecoder.templateIdEncodingOffset(), ByteOrder.LITTLE_ENDIAN)

@@ -102,7 +102,7 @@ final class ShardStream {
     private boolean onPublish(final long sequence, final int templateId, final UnsafeBuffer buffer, final int length) {
         final StreamPublication current = publication;
         if (current != null) {
-            final long result = offer(current, buffer, length);
+            final long result = offer(current, buffer, length, false);
             if (StreamPublication.full(result)) {
                 held.lazySet(held.get() + 1);
                 return false;
@@ -118,10 +118,11 @@ final class ShardStream {
     }
 
     /** The publication's answer; an end-of-term rotation answers the first offer with a retry, so it gets a few. */
-    private long offer(final StreamPublication target, final UnsafeBuffer buffer, final int length) {
+    private long offer(
+            final StreamPublication target, final UnsafeBuffer buffer, final int length, final boolean resend) {
         long result = Publication.ADMIN_ACTION;
         for (int attempt = 0; attempt < OFFER_ATTEMPTS && result == Publication.ADMIN_ACTION; attempt++) {
-            result = target.offer(buffer, 0, length);
+            result = resend ? target.resend(buffer, 0, length) : target.offer(buffer, 0, length);
         }
         if (result > 0) {
             offered.lazySet(offered.get() + 1);
@@ -209,8 +210,9 @@ final class ShardStream {
         final StreamPublication current = publication;
         if (current != null && lastLength > 0 && (fresh || nowNanos - lastSentNanos >= RESEND_NANOS)) {
             // A publication nobody has joined yet takes nothing, so a fresh one keeps trying until a session joins.
-            // A re-send that doesn't go through loses nothing: the record already went out.
-            if (offer(current, lastRecord, lastLength) > 0) {
+            // A re-send that doesn't go through loses nothing: the record already went out. It is marked so a session
+            // that has it drops it, while one that just joined takes it as its book.
+            if (offer(current, lastRecord, lastLength, true) > 0) {
                 fresh = false;
             }
             lastSentNanos = nowNanos;

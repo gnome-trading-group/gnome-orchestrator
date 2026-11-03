@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.aeron.AeronChannels;
 import group.gnometrading.aeron.AeronProfile;
+import group.gnometrading.aeron.AeronReservedValues;
 import group.gnometrading.aeron.AeronRuntime;
 import group.gnometrading.aeron.AeronStreamIds;
 import group.gnometrading.gateways.GatewayHealth;
@@ -159,6 +160,23 @@ class ShardMarketDataTest {
         pump(() -> offer(publication, sequence, sequence * 10, sequence) > 0, "offer " + sequence);
     }
 
+    /** As the shard re-sends a stream's last record: marked in the frame's reserved value. */
+    private void resend(final Publication publication, final long sequence) throws Exception {
+        pump(
+                () -> {
+                    record.encoder
+                            .streamId(STREAM_ID)
+                            .timestampEvent(sequence * 10)
+                            .timestampRecv(sequence * 10)
+                            .sequence(sequence)
+                            .bidPrice0(sequence);
+                    return publication.offer(
+                                    record.buffer, 0, record.totalMessageSize(), AeronReservedValues.RESENT_SUPPLIER)
+                            > 0;
+                },
+                "re-send " + sequence);
+    }
+
     private void sendFlagged(final Publication publication, final long sequence) throws Exception {
         record.encoder.flags().badData(true);
         try {
@@ -207,13 +225,37 @@ class ShardMarketDataTest {
 
         send(streamA, 1);
         send(streamA, 2);
-        send(streamA, 2);
+        resend(streamA, 2);
         send(streamA, 3);
         pump(() -> seen.size() >= 3, "three records");
         after(0);
 
         assertEquals(List.of(1L, 2L, 3L), seen.stream().map(r -> r[0]).toList());
         assertFalse(feed.isReconnecting());
+    }
+
+    @Test
+    void identicalRecordsTheShardDidntMarkAsResentAllReachTheStrategy() throws Exception {
+        join();
+
+        send(streamA, 1);
+        send(streamA, 2);
+        send(streamA, 2);
+        send(streamA, 2);
+        send(streamA, 3);
+        pump(() -> seen.size() >= 5, "five records");
+
+        assertEquals(List.of(1L, 2L, 2L, 2L, 3L), seen.stream().map(r -> r[0]).toList());
+    }
+
+    @Test
+    void aResendOfARecordTheSessionNeverGotIsItsBook() throws Exception {
+        join();
+
+        resend(streamA, 4);
+        pump(() -> seen.size() == 1, "the re-sent record");
+
+        assertEquals(4, last(0));
     }
 
     @Test

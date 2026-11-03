@@ -1,6 +1,7 @@
 package group.gnometrading.trading;
 
 import group.gnometrading.aeron.AeronIngressAgent;
+import group.gnometrading.aeron.AeronReservedValues;
 import group.gnometrading.aeron.MarketDataPathAgent;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.schemas.MessageHeaderDecoder;
@@ -29,7 +30,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  * stopped polling, for the control thread to close, through {@link #toControl()}.
  *
  * <ul>
- *   <li>A shard re-sends a quiet stream's last record; an exact repeat of the last record passed on is dropped.
+ *   <li>A shard re-sends a quiet stream's last record, marked {@link AeronReservedValues#RESENT}; a marked exact
+ *       repeat of the last record passed on is dropped. Unmarked repeats are real: one venue message can carry
+ *       several identical fills.
  *   <li>During a move, the first clean record from the new shard switches the stream to it.
  *   <li>Every {@link #CHECK_EVERY_NANOS} each stream is checked, and one that can't be trusted to be delivering is
  *       marked bad: its last record goes into the buffer again flagged {@code badData}, so the OMS refuses new orders
@@ -144,7 +147,7 @@ final class ShardFeedAgent implements MarketDataPathAgent {
                 cancelPending(cancel.feed());
             } else if (command instanceof Watch watch) {
                 final ShardLink link = watch.link();
-                ingress.add(link.status, (buffer, offset, length) -> {
+                ingress.add(link.status, (buffer, offset, length, reservedValue) -> {
                     link.onStatus(buffer, offset, length, byStream, now);
                     return true;
                 });
@@ -162,7 +165,10 @@ final class ShardFeedAgent implements MarketDataPathAgent {
             handOver(new Close(sink.subscription()));
             return;
         }
-        ingress.add(sink.subscription(), (buffer, offset, length) -> onRecord(feed, sink, buffer, offset, length));
+        ingress.add(
+                sink.subscription(),
+                (buffer, offset, length, reservedValue) ->
+                        onRecord(feed, sink, buffer, offset, length, reservedValue == AeronReservedValues.RESENT));
         if (install.asPending()) {
             if (feed.pending != null) {
                 stopReading(feed.pending.subscription());
@@ -198,7 +204,8 @@ final class ShardFeedAgent implements MarketDataPathAgent {
             final StreamFeed.FeedSink sink,
             final DirectBuffer buffer,
             final int offset,
-            final int length) {
+            final int length,
+            final boolean resent) {
         if (!isStreamRecord(buffer, offset, length)) {
             feed.refuse();
             return true;
@@ -213,7 +220,7 @@ final class ShardFeedAgent implements MarketDataPathAgent {
         }
         feed.lastArrivalNanos = now;
         feed.joined = true;
-        if (!feed.bad() && isRepeat(feed, buffer, offset, length)) {
+        if (isResentRepeat(feed, resent, buffer, offset, length)) {
             return true;
         }
         final int templateId = buffer.getShort(offset + TEMPLATE_ID_OFFSET, ByteOrder.LITTLE_ENDIAN) & 0xFFFF;
@@ -251,12 +258,18 @@ final class ShardFeedAgent implements MarketDataPathAgent {
     }
 
     /**
-     * Whether it is the last record again: a shard's re-send repeats it byte for byte. Venues often have no sequence
-     * and stamp in milliseconds, so two real updates can share both; only the whole record tells them apart.
+     * Whether a re-send is the last record again, byte for byte, while the stream is good. A re-send the session never
+     * got the original of (it joined after) isn't, and is passed on as its book; on a bad stream it clears the mark.
      */
-    private static boolean isRepeat(
-            final StreamFeed feed, final DirectBuffer buffer, final int offset, final int length) {
-        if (length != feed.lastLength
+    private static boolean isResentRepeat(
+            final StreamFeed feed,
+            final boolean resent,
+            final DirectBuffer buffer,
+            final int offset,
+            final int length) {
+        if (!resent
+                || feed.bad()
+                || length != feed.lastLength
                 || StreamHeader.timestampEvent(buffer, offset) != feed.lastEvent
                 || StreamHeader.sequence(buffer, offset) != feed.lastSequence) {
             return false;
