@@ -1,8 +1,8 @@
 package group.gnometrading.orchestrator;
 
-import group.gnometrading.collectors.ShardOrchestrator;
-import group.gnometrading.di.Orchestrator;
-import group.gnometrading.trading.TradingOrchestrator;
+import group.gnometrading.orchestrator.di.Orchestrator;
+import group.gnometrading.orchestrator.session.SessionOrchestrator;
+import group.gnometrading.orchestrator.shard.ShardOrchestrator;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.stream.Collectors;
@@ -16,7 +16,7 @@ public final class Main {
 
     /** The processes this jar runs. */
     public enum Role {
-        SESSION(TradingOrchestrator.class),
+        SESSION(SessionOrchestrator.class),
         SHARD(ShardOrchestrator.class);
 
         private final Class<? extends Orchestrator> type;

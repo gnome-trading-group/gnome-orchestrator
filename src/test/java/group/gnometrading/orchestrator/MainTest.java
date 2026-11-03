@@ -4,15 +4,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import group.gnometrading.collectors.ShardOrchestrator;
-import group.gnometrading.trading.TradingOrchestrator;
+import group.gnometrading.orchestrator.session.SessionOrchestrator;
+import group.gnometrading.orchestrator.shard.ShardOrchestrator;
 import org.junit.jupiter.api.Test;
 
 class MainTest {
 
     @Test
     void eachRoleNamesItsProcess() {
-        assertEquals(TradingOrchestrator.class, Main.Role.of("session").type());
+        assertEquals(SessionOrchestrator.class, Main.Role.of("session").type());
         assertEquals(ShardOrchestrator.class, Main.Role.of("shard").type());
     }
 

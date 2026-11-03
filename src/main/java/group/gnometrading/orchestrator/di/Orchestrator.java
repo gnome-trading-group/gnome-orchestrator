@@ -1,0 +1,230 @@
+package group.gnometrading.orchestrator.di;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.IntStream;
+
+public abstract class Orchestrator implements AutoCloseable {
+
+    protected final Map<String, Object> singletonCache;
+    protected final Map<String, Method> providers;
+    protected final Map<String, Object> providerInstances;
+    final Set<Class<? extends Module>> installedModules;
+    protected String[] cliArgs;
+    private final AtomicBoolean closed = new AtomicBoolean();
+
+    public Orchestrator() {
+        this.singletonCache = new HashMap<>();
+        this.providers = new HashMap<>();
+        this.providerInstances = new HashMap<>();
+        this.installedModules = new HashSet<>();
+        this.cliArgs = null;
+        initialize();
+    }
+
+    private void initialize() {
+        Method[] methods = this.getClass().getMethods();
+        for (Method method : methods) {
+            if (method.isAnnotationPresent(Provides.class)) {
+                String qualifier = getQualifier(method);
+                this.providers.put(qualifier, method);
+                this.providerInstances.put(qualifier, this);
+            }
+        }
+    }
+
+    private String getQualifier(Method method) {
+        if (method.isAnnotationPresent(Named.class)) {
+            return method.getReturnType().getName() + "@"
+                    + method.getAnnotation(Named.class).value();
+        }
+        return method.getReturnType().getName();
+    }
+
+    private String getParameterName(Executable executable, int index) {
+        var annotations = executable.getParameterAnnotations()[index];
+        for (var annotation : annotations) {
+            if (annotation instanceof Named) {
+                return ((Named) annotation).value();
+            }
+        }
+        return null;
+    }
+
+    private Object[] getParameters(Executable executable) {
+        var parameterTypes = executable.getParameterTypes();
+        return IntStream.range(0, parameterTypes.length)
+                .mapToObj(index -> getInstance(parameterTypes[index], getParameterName(executable, index)))
+                .toArray();
+    }
+
+    private <T> T callConstructor(Class<T> type, Constructor<?> constructor, String qualifier) {
+        try {
+            constructor.setAccessible(true);
+            var params = getParameters(constructor);
+            T instance = type.cast(constructor.newInstance(params));
+            if (constructor.isAnnotationPresent(Singleton.class)) {
+                singletonCache.put(qualifier, instance);
+            }
+            return instance;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create instance for class: " + type.getName(), e);
+        }
+    }
+
+    protected final <T> T getInstance(Class<T> type) {
+        return getInstance(type, null);
+    }
+
+    protected final <T> T getInstance(Class<T> type, String name) {
+        String qualifier = name != null ? type.getName() + "@" + name : type.getName();
+        if (singletonCache.containsKey(qualifier)) {
+            return type.cast(singletonCache.get(qualifier));
+        }
+
+        if (providers.containsKey(qualifier)) {
+            Method provider = providers.get(qualifier);
+            Object owner = providerInstances.get(qualifier);
+            try {
+                provider.setAccessible(true);
+                var params = getParameters(provider);
+                T instance = type.cast(provider.invoke(owner, params));
+                if (provider.isAnnotationPresent(Singleton.class)) {
+                    singletonCache.put(qualifier, instance);
+                }
+                return instance;
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to invoke provider for class: " + type.getName(), e);
+            }
+        }
+
+        try {
+            var constructors = type.getConstructors();
+            for (var constructor : constructors) {
+                if (constructor.isAnnotationPresent(Inject.class)) {
+                    return callConstructor(type, constructor, qualifier);
+                }
+            }
+
+            // Fallback to default constructor if no @Inject
+            var defaultConstructor = type.getDeclaredConstructor();
+            return callConstructor(type, defaultConstructor, qualifier);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create instance for class: " + type.getName(), e);
+        }
+    }
+
+    /**
+     * Create a child orchestrator that inherits all the bindings of the parent.
+     *
+     * @param orchestratorClass the child orchestrator class
+     * @param <T> the child orchestrator type
+     * @return the child orchestrator instance
+     */
+    protected <T extends Orchestrator> T createChildOrchestrator(Class<T> orchestratorClass) {
+        return createChildOrchestrator(orchestratorClass, Collections.emptyMap());
+    }
+
+    /**
+     * Create a child orchestrator that inherits all the bindings of the parent, with additional
+     * instance overrides injected into the child's singleton cache before {@code configure()} runs.
+     *
+     * <p>Use this overload when a child orchestrator needs a different binding for a type already
+     * provided by the parent. For example, passing a per-listing {@code Listing} instance so each
+     * inbound gateway child orchestrator gets its own listing.
+     *
+     * @param orchestratorClass the child orchestrator class
+     * @param overrides type-to-instance map; entries are put into the child's singleton cache,
+     *     overwriting any inherited value for the same type
+     * @param <T> the child orchestrator type
+     * @return the child orchestrator instance
+     */
+    protected <T extends Orchestrator> T createChildOrchestrator(
+            Class<T> orchestratorClass, Map<Class<?>, Object> overrides) {
+        try {
+            T child = orchestratorClass.getDeclaredConstructor().newInstance();
+            child.providers.putAll(this.providers);
+            child.providerInstances.putAll(this.providerInstances);
+            child.singletonCache.putAll(this.singletonCache);
+            child.installedModules.addAll(this.installedModules);
+            child.cliArgs = this.cliArgs;
+
+            for (Map.Entry<Class<?>, Object> entry : overrides.entrySet()) {
+                child.singletonCache.put(entry.getKey().getName(), entry.getValue());
+            }
+
+            child.configure();
+
+            return child;
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to create child orchestrator for class: " + orchestratorClass.getName(), e);
+        }
+    }
+
+    protected final void install(Module... modules) {
+        for (Module module : modules) {
+            installModule(module);
+        }
+    }
+
+    private void installModule(Module module) {
+        Class<? extends Module> moduleClass = module.getClass();
+        if (installedModules.contains(moduleClass)) {
+            return;
+        }
+        installedModules.add(moduleClass);
+        for (Module dependency : module.includes()) {
+            installModule(dependency);
+        }
+        for (Method method : moduleClass.getMethods()) {
+            if (method.isAnnotationPresent(Provides.class)) {
+                String qualifier = getQualifier(method);
+                if (!providers.containsKey(qualifier)) {
+                    providers.put(qualifier, method);
+                    providerInstances.put(qualifier, module);
+                }
+            }
+        }
+    }
+
+    @Provides
+    @Named("CLI_ARGS")
+    public final String[] provideCliArgs() {
+        return this.cliArgs;
+    }
+
+    public void configure() {
+        /* Default NO-OP */
+    }
+
+    /**
+     * Stops what {@link #configure()} started. Idempotent, so an embedding process (gnomepy runs the orchestrator
+     * in-process) can close it explicitly before exiting while a JVM shutdown hook still covers plain Java runs.
+     */
+    @Override
+    public final void close() {
+        if (closed.compareAndSet(false, true)) {
+            onClose();
+        }
+    }
+
+    protected void onClose() {
+        /* Default NO-OP */
+    }
+
+    /** Configures an orchestrator of {@code type} and returns it running, so the caller can {@link #close()} it. */
+    public static Orchestrator start(Class<? extends Orchestrator> type, String[] args) throws Exception {
+        Orchestrator orchestrator = type.getDeclaredConstructor().newInstance();
+        orchestrator.cliArgs = args;
+        orchestrator.configure();
+        return orchestrator;
+    }
+}

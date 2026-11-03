@@ -2,7 +2,7 @@
 
 gnome-orchestrator is the Java process a strategy session runs on its own EC2 instance: one JVM that wires the
 session's market data gateways, the strategy, gnome-oms and the venue order gateways (gnome-gateways) over
-sequenced ring buffers. The same jar also runs the market data shards (`collectors/ShardOrchestrator`) on ECS.
+sequenced ring buffers. The same jar also runs the market data shards (`shard/ShardOrchestrator`) on ECS.
 Nobody starts a session by hand: the registry's `strategy-sessions/launch` launcher starts the EC2 instance, whose user
 data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd unit.
 
@@ -10,7 +10,7 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 
 - Build with Maven, never Gradle. Needs GitHub Packages credentials in `~/.m2/settings.xml` (internal deps).
 - `mvn clean package` builds the shaded jar `target/gnome-orchestrator-<version>.jar`.
-- `mvn test` runs the unit tests. One class: `mvn test -Dtest=group.gnometrading.trading.SessionExitTest` (always
+- `mvn test` runs the unit tests. One class: `mvn test -Dtest=group.gnometrading.orchestrator.session.lifecycle.SessionExitTest` (always
   the full class name).
 - `mvn spotless:apply` fixes formatting. Spotless (palantir-java-format) and checkstyle both run at `validate` and
   fail the build, so run it before committing.
@@ -27,13 +27,20 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 
 ## Layout
 
-- `orchestrator/Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`;
+Everything is under `group.gnometrading.orchestrator`, laid out by process: `session/` and `shard/` are separate
+programs that share only the layers below them (`aeron/`, `runtime/`, `aws/`, `credentials/`, `di/`), so neither
+uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforces it.
+
+- `Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`;
   also the jar's `Main-Class`), or `Main.start(role, args)` from gnomepy's runner. Callers
   name a role, never a class, so classes can move; a new process is a new `Main.Role`. `start-session.sh` takes the
   role from `ORCHESTRATOR_ROLE` (default `session`).
-- `trading/TradingOrchestrator` - the session process: listings, buffers, OMS, strategy, gateways, ledger, risk
-  sync, journal, heartbeat, and the close order of all of them (`closeAgents`).
-- `trading/` market data: every session reads its streams from shards, live ones from on-demand PRODUCTION shards,
+- `session/SessionOrchestrator` - the session process: listings, the OMS, positions, ledger (with startup recovery)
+  and risk sync, wired from the pieces beside it: `SessionBuffers` (every ring buffer on the session sequence and its
+  journal source), `SessionStrategy` (python or java strategy), `SessionAgents` (start order, close order, heartbeat),
+  `marketdata/SessionMarketData`, `orders/SessionOrders` (simulated exchange or venue gateway per listing, the router,
+  rate limiters, bound venue accounts) and `journal/SessionJournal`.
+- `session/marketdata/`: every session reads its streams from shards, live ones from on-demand PRODUCTION shards,
   paper ones from RESEARCH shards. The launcher leases them (`MARKET_DATA_API_URL` set); a local run names one shard
   instead (`market.data.local.shard`, `MarketDataLeases.local`); a session with neither fails at start. A shard outage
   marks the book bad and the OMS refuses orders on it; the session doesn't exit. `ShardFeedAgent` (HOT_PATH) is the only writer of the journaled strategy buffer and of which subscription
@@ -56,12 +63,13 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   hotter, past its credits). Low-latency sessions spin their Aeron network thread and pin the ingress agent anyway.
   `MarketDataLeases` reads `GET /collection/leases/{sessionId}` with the `gnome/api-keys/market-data` key (read again
   on 401/403.
-- `trading/` also: `SessionExit` (graceful
-  exit), `SessionFatalHandler` (every error exit), `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING ->
-  RUNNING), `SessionReports` (alerts + registry PATCH), `JournalManagerAgent` and `JournalSegmentSealer`,
-  `AgentRuntimeInstaller` (latency profile / CPU pinning), `PaperTradingOutboundGateway`, `ListingRouter`
-  (multi-listing only), `recovery/StartupRecovery`.
-- `collectors/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
+- `session/lifecycle/`: `SessionExit` (graceful exit), `SessionFatalHandler` (every error exit),
+  `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING -> RUNNING), `SessionReports` (alerts + registry PATCH).
+- `session/journal/`: `JournalManagerAgent`, `JournalSegmentSealer`, `JournalSource`.
+- `session/orders/`: live outbound orchestrators (Kalshi, Polymarket Intl, Polymarket US), `OrderEntryHttpClients`,
+  `PaperTradingOutboundGateway`, `ListingRouter` (multi-listing only).
+- `session/recovery/`: `StartupRecovery`.
+- `shard/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
   records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
   `ShardStream` + `MarketDataCollectorAgent` (minute files), `StreamPublisherAgent` (drains every ring a second time,
   offers leased streams' records, re-sends a quiet stream's last record every 5 s (marked `RESENT`), sends the core SBE `ShardStatus`
@@ -71,7 +79,7 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   sessions see the count),
   `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler), `ShardIdentity`, `ShardAccounts`,
   `CollectorHealth`.
-- `feeds/` - `FeedVenues` (per `md.source.adapter`: the venue's `FEED` from gnome-gateways `venues/`, and its
+- `shard/feeds/` - `FeedVenues` (per `md.source.adapter`: the venue's `FEED` from gnome-gateways `venues/`, and its
   protocol built with the credentials this process loads, and its REST probe), `FeedSources` (adds a registry source,
   sized by its capacity columns), `WebSocketFeedOpener`, `Assignment` / `DynamoAssignment` (the shard's item in the
   reconciler's `collection-shards` table, us-east-1).
@@ -85,11 +93,14 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   position), never journaled. `AeronTransportTest`
   pins the Aeron behaviour the design relies on: re-run it on every Aeron upgrade (a lagging subscriber stalls
   silently rather than losing its image; a fixed receive port can't serve two shards).
-- `gateways/` - live outbound orchestrators (Kalshi, Polymarket Intl, Polymarket US), credentials,
-  `GatewayErrorHandler`, `GatewayRunners` (order gateways), `GatewayHealth`.
-- `shared/` - DI modules: `PropertiesModule`, `AwsModule`, `RiskModule`, `SecurityMasterModule`, `SecretCache`.
+- `runtime/` - what every process runs on: `AgentRuntimeInstaller` (latency profile / CPU pinning), `ProcessExit`,
+  `GatewayErrorHandler`, `GatewayRunners` (order gateways), `GatewayHealth`, `HealthCheckServer`, `DaemonThreads`,
+  `AgentUtils`, `LatencyHistogram`, `SchedulingLatencyProbe`.
+- `credentials/` - venue keys as stored in Secrets Manager (`KalshiCredentials`, `PolymarketIntlCredentials`,
+  `PolymarketUsCredentials`), read by sessions' order entry and shards' feeds.
+- `aws/` - DI modules: `PropertiesModule`, `AwsModule`, `RiskModule`, `SecurityMasterModule`, `SecretCache`.
 - `di/` - the in-house DI container (`Orchestrator`, `@Provides`, `@Singleton`, `@Named`, child orchestrators).
-- `src/test/.../feeds/FeedLiveCheck` - manual check of live markets through the shards' feeds (`-Dmarkets`,
+- `src/test/.../shard/feeds/FeedLiveCheck` - manual check of live markets through the shards' feeds (`-Dmarkets`,
   `-Daccount`, `-Draw`, `-Ddrop`).
 - `src/main/resources/orchestrator.{dev,prod}.properties` - per-stage defaults.
 - `ami/` - Image Builder inputs: `scripts/install-runtime.sh`, `scripts/tune-kernel.sh`, `files/run-strategy.sh`
@@ -108,9 +119,9 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   and the launcher rejects per-session overrides the session's version does not list. Mode-keyed settings
   (`risk.<mode>.*`) must exist for both `live` and `paper`; a missing one fails startup on purpose.
 - Exact replay: strategy market data plus every trading buffer (intents, OMS orders, exec reports, metrics) share one
-  session `GlobalSequence`, and every buffer on it must be journaled. `verifyJournalCoverage` fails startup for a
+  session `GlobalSequence`, and every buffer on it must be journaled. `SessionJournal.verifyCoverage` fails startup for a
   buffer with no `JournalSource`, even with the journal off. Create pollers before the producers start.
-- Close order matters: a producer blocks on a full ring whose reader has closed. Keep `closeAgents` ordered
+- Close order matters: a producer blocks on a full ring whose reader has closed. Keep `SessionAgents.close` ordered
   market data -> strategy -> OMS -> gateways -> ledger -> journal -> heartbeat.
 - JVM flags live only in gnomepy (`gnomepy/java/_jvm.py`, `STRATEGY_JVM_ARGS`); `start-session.sh` reads them from
   there. Never add JVM flags to scripts, units or Dockerfiles here.

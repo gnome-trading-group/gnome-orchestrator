@@ -1,0 +1,63 @@
+package group.gnometrading.orchestrator.aws;
+
+import group.gnometrading.orchestrator.di.Module;
+import group.gnometrading.orchestrator.di.Named;
+import group.gnometrading.orchestrator.di.Provides;
+import group.gnometrading.orchestrator.di.Singleton;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+
+public class AwsModule extends Module {
+
+    @Provides
+    @Named("AWS_PROFILE")
+    public final String provideAwsProfileName() {
+        return System.getenv("AWS_PROFILE");
+    }
+
+    @Provides
+    public final Region provideAwsRegion() {
+        return Region.of(System.getenv().getOrDefault("AWS_REGION", "us-east-1"));
+    }
+
+    @Provides
+    @Singleton
+    public final S3Client provideS3Client(@Named("AWS_PROFILE") String awsProfile, Region awsRegion) {
+        var builder = S3Client.builder().region(awsRegion).crossRegionAccessEnabled(true);
+        if (awsProfile != null && !awsProfile.isEmpty()) {
+            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
+        }
+        return builder.build();
+    }
+
+    @Provides
+    @Singleton
+    public final DynamoDbClient provideDynamoDbClient(@Named("AWS_PROFILE") String awsProfile, Region awsRegion) {
+        var builder = DynamoDbClient.builder().region(awsRegion);
+        if (awsProfile != null && !awsProfile.isEmpty()) {
+            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
+        }
+        return builder.build();
+    }
+
+    @Provides
+    @Singleton
+    public final SecretsManagerClient provideSecretsManagerClient(
+            @Named("AWS_PROFILE") String awsProfile, Region awsRegion) {
+        var builder = SecretsManagerClient.builder().region(awsRegion);
+        if (awsProfile != null && !awsProfile.isEmpty()) {
+            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
+        }
+        return builder.build();
+    }
+
+    /** An orchestrator that creates gateways must build this before its children, so they share it. */
+    @Provides
+    @Singleton
+    public final SecretCache provideSecretCache(SecretsManagerClient secretsManager) {
+        return new SecretCache(secretsManager);
+    }
+}
