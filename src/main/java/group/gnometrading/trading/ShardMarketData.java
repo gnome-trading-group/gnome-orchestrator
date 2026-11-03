@@ -20,8 +20,8 @@ import java.util.function.LongSupplier;
 import org.agrona.ErrorHandler;
 
 /**
- * A session's market data read from collector shards over Aeron, in place of its own venue connections. The launcher
- * leases the session's streams; this waits until every one is live on a shard and subscribes. From then on, on a
+ * A session's market data, read from collector shards over Aeron. The launcher leases the session's streams; this
+ * waits until every one is live on a shard and subscribes. From then on, on a
  * control thread, it does what blocks on the media driver for {@link ShardFeedAgent}, which reads the records on its
  * own thread: closing what the agent stopped reading, subscribing a stalled stream again (after its old subscription is
  * closed, so the new one joins at the live position), and following the lease: a stream moving to another shard (a

@@ -126,14 +126,14 @@ public final class AgentRuntimeInstaller {
     }
 
     /**
-     * Hot agents per session: each listing's socket reader plus its outbound side (the simulated exchange in
-     * paper, writer and reader in live), the strategy and the OMS, and the mux and router once there is more than
-     * one listing.
+     * Hot agents per session: each listing's outbound side (the simulated exchange in paper, writer and reader in
+     * live), the strategy and the OMS, the shard ingress agent and the media driver's network thread, and the router
+     * once there is more than one listing.
      */
     static int expectedHotThreads(String mode, int listingCount) {
-        int perListing = "live".equals(mode) ? 3 : 2;
-        int multiListing = listingCount > 1 ? 2 : 0;
-        return perListing * listingCount + 2 + multiListing;
+        int perListing = "live".equals(mode) ? 2 : 1;
+        int router = listingCount > 1 ? 1 : 0;
+        return perListing * listingCount + 4 + router;
     }
 
     private static String profile(Properties properties) {

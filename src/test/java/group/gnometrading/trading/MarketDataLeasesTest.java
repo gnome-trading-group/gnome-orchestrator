@@ -3,6 +3,7 @@ package group.gnometrading.trading;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -122,5 +123,25 @@ class MarketDataLeasesTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void aLocalRunsLeaseHasEveryStreamLiveOnTheOneShard() {
+        MarketDataLeases.Lease lease = MarketDataLeases.local("collector:40000", new int[] {6, 9});
+
+        assertEquals("ACTIVE", lease.status());
+        for (int streamId : new int[] {6, 9}) {
+            MarketDataLeases.LeasedStream stream = lease.stream(streamId);
+            assertTrue(stream.live());
+            assertEquals(new MarketDataLeases.Endpoint("collector", 40000), stream.endpoint());
+            assertNull(stream.next());
+        }
+    }
+
+    @Test
+    void aLocalShardWithoutAPortIsRefused() {
+        IllegalArgumentException error =
+                assertThrows(IllegalArgumentException.class, () -> MarketDataLeases.local("collector", new int[] {6}));
+        assertTrue(error.getMessage().contains("host:port"), error.getMessage());
     }
 }

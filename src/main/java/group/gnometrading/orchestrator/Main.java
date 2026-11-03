@@ -2,7 +2,6 @@ package group.gnometrading.orchestrator;
 
 import group.gnometrading.collectors.ShardOrchestrator;
 import group.gnometrading.di.Orchestrator;
-import group.gnometrading.testing.MarketDataWriterOrchestrator;
 import group.gnometrading.trading.TradingOrchestrator;
 import java.util.Arrays;
 import java.util.Locale;
@@ -18,8 +17,7 @@ public final class Main {
     /** The processes this jar runs. */
     public enum Role {
         SESSION(TradingOrchestrator.class),
-        SHARD(ShardOrchestrator.class),
-        MARKET_DATA_WRITER(MarketDataWriterOrchestrator.class);
+        SHARD(ShardOrchestrator.class);
 
         private final Class<? extends Orchestrator> type;
 
@@ -27,7 +25,7 @@ public final class Main {
             this.type = type;
         }
 
-        /** {@code session}, {@code shard} or {@code market-data-writer}. */
+        /** {@code session} or {@code shard}. */
         public String argument() {
             return name().toLowerCase(Locale.ROOT).replace('_', '-');
         }

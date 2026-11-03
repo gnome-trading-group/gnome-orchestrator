@@ -19,6 +19,8 @@ import java.util.List;
 public final class MarketDataLeases {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
+    /** The shard id a local run's compose collector runs as. */
+    static final String LOCAL_SHARD = "local";
 
     /** Where a shard listens for sessions joining its streams. */
     public record Endpoint(String privateIp, int port) {}
@@ -46,6 +48,24 @@ public final class MarketDataLeases {
             }
             return null;
         }
+    }
+
+    /**
+     * A local run's stand-in for a lease: every stream LIVE on the one shard at {@code hostPort} ({@code host:port},
+     * its control endpoint), which must publish them.
+     */
+    public static Lease local(final String hostPort, final int[] streamIds) {
+        final int colon = hostPort.lastIndexOf(':');
+        if (colon <= 0 || colon == hostPort.length() - 1) {
+            throw new IllegalArgumentException("market.data.local.shard must be host:port, got " + hostPort);
+        }
+        final Endpoint endpoint =
+                new Endpoint(hostPort.substring(0, colon), Integer.parseInt(hostPort.substring(colon + 1)));
+        final List<LeasedStream> streams = new ArrayList<>(streamIds.length);
+        for (final int streamId : streamIds) {
+            streams.add(new LeasedStream(streamId, "LIVE", LOCAL_SHARD, endpoint, null));
+        }
+        return new Lease(LOCAL_SHARD, "ACTIVE", List.copyOf(streams));
     }
 
     /** The API key, read once and kept until the API refuses it (a rotation). */

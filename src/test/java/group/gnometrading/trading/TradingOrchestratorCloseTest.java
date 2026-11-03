@@ -6,7 +6,6 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.GatewayHealth;
 import group.gnometrading.logging.NullLogger;
-import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
@@ -18,27 +17,21 @@ import org.junit.jupiter.api.Timeout;
 
 /**
  * A producer waits while the buffer it writes to is full, so the session must never close a reader before what feeds
- * it. Closing the strategy before its market data used to leave the multiplexer waiting forever on the strategy's full
- * buffer: the close never finished, and the ledger's final write never ran.
+ * it. Closing the strategy before its market data used to leave the market data's writer waiting forever on the
+ * strategy's full buffer: the close never finished, and the ledger's final write never ran.
  */
 class TradingOrchestratorCloseTest {
 
     @Test
     @Timeout(30)
-    void aMultiListingSessionClosesWhileItsMarketDataIsStillArriving() throws Exception {
-        final SequencedRingBuffer<Mbp10Schema> listingA =
+    void aSessionClosesWhileItsMarketDataIsStillArriving() throws Exception {
+        // As the session builds it: the strategy's buffer at its default size, written by the market data and read by
+        // the strategy and by the OMS (its price writer).
+        final SequencedRingBuffer<Mbp10Schema> strategyMd =
                 new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
-        final SequencedRingBuffer<Mbp10Schema> listingB =
-                new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
-        // As the session builds it: the strategy's buffer at its default size, read by the strategy and by the OMS
-        // (its price writer).
-        final SequencedRingBuffer<?> strategyMd = new SequencedRingBuffer<>(Intent::new, new GlobalSequence());
-        final MarketDataMultiplexer mux = new MarketDataMultiplexer(List.of(listingA, listingB), strategyMd);
         final GnomeAgentRunner strategy = start(polling("strategy", strategyMd.createPoller((s, t, b, l) -> {})));
         final GnomeAgentRunner oms = start(polling("oms", strategyMd.createPoller((s, t, b, l) -> {})));
-        final GnomeAgentRunner feedA = start(new Feed(listingA));
-        final GnomeAgentRunner feedB = start(new Feed(listingB));
-        final GnomeAgentRunner muxRunner = start(mux);
+        final GnomeAgentRunner feed = start(new Feed(strategyMd));
         // The order writers send their cancels as they close, one REST call at a time: seconds, during which a busy
         // feed fills the strategy's buffer many times over.
         final GnomeAgentRunner slowOrderWriter = start(new SlowToClose());
@@ -55,12 +48,11 @@ class TradingOrchestratorCloseTest {
 
             @Override
             public void close() throws Exception {
-                feedA.close();
-                feedB.close();
+                feed.close();
             }
         };
         final TradingOrchestrator.AgentRunners started = new TradingOrchestrator.AgentRunners(
-                marketData, strategy, oms, List.of(slowOrderWriter), muxRunner, null, null, null);
+                marketData, strategy, oms, List.of(slowOrderWriter), null, null, null);
         final Thread closing =
                 new Thread(() -> TradingOrchestrator.closeAgents(started, List.of(), null, null, new NullLogger()));
         closing.setDaemon(true);
@@ -98,7 +90,7 @@ class TradingOrchestratorCloseTest {
         };
     }
 
-    /** A listing's market data, about a book a millisecond: a busy feed. */
+    /** The session's market data, about a book a millisecond: a busy stream. */
     private static final class Feed implements GnomeAgent {
         private final SequencedRingBuffer<Mbp10Schema> ring;
 

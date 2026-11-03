@@ -52,7 +52,7 @@ class WebSocketFeedOpenerTest {
                         new NullLogger(),
                         new Properties("orchestrator.dev.properties"),
                         null,
-                        MarketDataCredentials.SESSION,
+                        source -> "test/" + source,
                         () -> 0),
                 ConnectLimiter.UNLIMITED,
                 RateBudget.UNLIMITED,

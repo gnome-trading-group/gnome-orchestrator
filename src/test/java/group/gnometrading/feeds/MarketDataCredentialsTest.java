@@ -21,12 +21,6 @@ class MarketDataCredentialsTest {
     }
 
     @Test
-    void sessionsKeepThePerExchangeKey() {
-        assertEquals("gnome/market-data/kalshi", MarketDataCredentials.SESSION.secretFor("KALSHI"));
-        assertEquals("gnome/market-data/polymarket-us", MarketDataCredentials.SESSION.secretFor("POLYMARKET_US"));
-    }
-
-    @Test
     void aShardUsesTheAccountItIsBoundToAndMd1ForASourceNotNamed() {
         when(securityMaster.getSourceAccount("KALSHI", "md-2")).thenReturn(account("KALSHI", "md-2", "ACTIVE"));
         when(securityMaster.getSourceAccount("POLYMARKET_US", "md-1"))

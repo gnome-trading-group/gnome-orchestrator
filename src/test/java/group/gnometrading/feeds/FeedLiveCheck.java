@@ -47,14 +47,15 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 
 /**
- * Reads live markets through the feeds a shard and a session use, for {@code -Dseconds}, and reports what each
+ * Reads live markets through the feeds a shard uses, for {@code -Dseconds}, and reports what each
  * published (book updates, trades, whether the last book is sane), its market's state and resyncs, what the REST probe
  * found, and any reconnect or error logged. Read-only. Pick markets with
  * {@code -Dmarkets=HYPERLIQUID:ETH,KALSHI:KXBTC-26:yes,...} as {@code SOURCE:exchangeSecurityId}; capacities come from
  * the registry's sources; dev properties, so Kalshi is its demo.
  *
  * <p>{@code -DmaxPerConnection=n} stands in for a capacity the registry stage doesn't have yet (default 50).
- * {@code -Draw=<dir>} writes every connection's frames, one per line. {@code -Ddrop=N} makes every connection lose
+ * {@code -Daccount=<label>} signs in with that market-data account (default {@code md-1}). {@code -Draw=<dir>} writes
+ * every connection's frames, one per line. {@code -Ddrop=N} makes every connection lose
  * its Nth text frame after connecting, once, to see the gap path (flagged books, resync, fresh snapshot) live.
  */
 public final class FeedLiveCheck {
@@ -81,7 +82,9 @@ public final class FeedLiveCheck {
                         logger,
                         session.get(Properties.class),
                         session.get(SecretCache.class),
-                        MarketDataCredentials.SESSION,
+                        MarketDataCredentials.forShard(
+                                securityMaster,
+                                source -> System.getProperty("account", MarketDataCredentials.DEFAULT_LABEL)),
                         new SystemEpochNanoClock()),
                 false,
                 (status, cause) -> System.out.println("#### gave up on a connection: " + cause),

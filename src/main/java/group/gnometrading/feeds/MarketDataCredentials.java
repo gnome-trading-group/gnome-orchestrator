@@ -2,22 +2,17 @@ package group.gnometrading.feeds;
 
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.md.SourceAccount;
-import java.util.Locale;
 import java.util.function.UnaryOperator;
 
 /**
- * Which Secrets Manager secret a source's market-data connections sign in with. A shard collects with one of the
- * source's dedicated market-data accounts, the label it is bound to; a session still uses the per-exchange key until
- * it reads its data from shards (collection-sharding decision 8).
+ * Which Secrets Manager secret a source's market-data connections sign in with: a shard collects with one of the
+ * source's dedicated market-data accounts, the label it is bound to.
  */
 @FunctionalInterface
 public interface MarketDataCredentials {
 
     /** A shard's account per source when it isn't told otherwise. */
     String DEFAULT_LABEL = "md-1";
-
-    /** Sessions: one key per exchange, {@code gnome/market-data/<exchange>}. */
-    MarketDataCredentials SESSION = sourceCode -> "gnome/market-data/" + secretSuffix(sourceCode);
 
     /** The secret for {@code sourceCode}'s connections; throws if it has none it may use. */
     String secretFor(String sourceCode);
@@ -40,9 +35,5 @@ public interface MarketDataCredentials {
             }
             return account.secretName();
         };
-    }
-
-    private static String secretSuffix(final String sourceCode) {
-        return sourceCode.toLowerCase(Locale.ROOT).replace('_', '-');
     }
 }

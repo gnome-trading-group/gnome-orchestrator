@@ -16,9 +16,6 @@ import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.di.Orchestrator;
 import group.gnometrading.di.Provides;
 import group.gnometrading.di.Singleton;
-import group.gnometrading.feeds.FeedVenues;
-import group.gnometrading.feeds.MarketDataCredentials;
-import group.gnometrading.feeds.WebSocketFeedOpener;
 import group.gnometrading.gateways.GatewayHealth;
 import group.gnometrading.gateways.GatewayRunners;
 import group.gnometrading.gateways.ProcessExit;
@@ -77,7 +74,6 @@ import group.gnometrading.strategies.StrategyFactory;
 import group.gnometrading.trading.recovery.SessionNotRunnableException;
 import group.gnometrading.trading.recovery.StartupRecovery;
 import group.gnometrading.utils.CauseChain;
-import group.gnometrading.utils.SchedulingLatencyProbe;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -118,10 +114,9 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
  *   <li>{@code strategy.id} — registry strategy ID used for PnL and risk scoping
  * </ul>
  *
- * <p>Single-listing sessions wire buffers directly — no mux/demux agents are created. Multi-listing
- * sessions insert a {@link MarketDataMultiplexer} on the inbound side and an {@link ListingRouter}
- * on the outbound side so the strategy and OMS always see single buffers regardless of the number
- * of exchanges.
+ * <p>Market data comes from collector shards ({@link ShardMarketData}), every stream into the one buffer the strategy
+ * reads. Multi-listing sessions insert a {@link ListingRouter} on the outbound side so the OMS always sees single
+ * buffers regardless of the number of exchanges.
  *
  * <p>Configure via the {@code listings} property (JSON array of listing IDs, e.g. {@code [1,2,3]}).
  */
@@ -238,15 +233,15 @@ public class TradingOrchestrator extends Orchestrator {
         AgentRuntimeInstaller.install(properties, logger, listings.size());
 
         // One total order over everything the strategy saw and did, so a journal replays the session exactly. Every
-        // buffer on it is journaled. With several listings, each listing's own market data buffer stays on a sequence
-        // of its own: the multiplexer copies it into the strategy's buffer, and that copy is the one journaled.
+        // buffer on it is journaled.
         GlobalSequence sessionSequence = new GlobalSequence();
         Map<SequencedRingBuffer<?>, JournalSource> journalSources = new IdentityHashMap<>();
 
-        SessionMarketData sessionMarketData =
-                sessionMarketData(logger, properties, securityMaster, listings, streams, sessionSequence);
-        MarketData marketData = sessionMarketData.marketData();
-        List<SequencedRingBuffer<?>> perListingMdBuffers = sessionMarketData.perListing();
+        SequencedRingBuffer<?> strategyMdBuffer = new SequencedRingBuffer<>(Mbp10Schema::new, sessionSequence);
+        ShardMarketData marketData =
+                createShardMarketData(logger, properties, listings, streams, dataStreams(properties), strategyMdBuffer);
+        // Every listing's market data arrives in the one buffer, which each simulated exchange reads too.
+        List<SequencedRingBuffer<?>> perListingMdBuffers = Collections.nCopies(listings.size(), strategyMdBuffer);
         SharedPositionBuffer sharedBuffer = new SharedPositionBuffer(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(sharedBuffer);
         String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
@@ -288,8 +283,6 @@ public class TradingOrchestrator extends Orchestrator {
                 new SequencedRingBuffer<>(MetricRow::new, sessionSequence);
         journalSources.put(strategyMetricBuffer, JournalSource.STRATEGY_METRIC);
 
-        SequencedRingBuffer<?> strategyMdBuffer = sessionMarketData.strategyBuffer();
-        MarketDataMultiplexer muxAgent = sessionMarketData.mux();
         journalSources.put(strategyMdBuffer, JournalSource.STRATEGY_MARKET_DATA);
 
         PriceWriter priceWriter = new PriceWriter(priceBuffer, priceSlotRegistry, streams, strategyMdBuffer);
@@ -364,7 +357,6 @@ public class TradingOrchestrator extends Orchestrator {
                 marketData,
                 omsAgent,
                 outboundAgents,
-                muxAgent,
                 routerAgent,
                 strategy,
                 ledgerAgent,
@@ -407,12 +399,10 @@ public class TradingOrchestrator extends Orchestrator {
             final GnomeAgentRunner journalRunner,
             final GnomeAgentRunner heartbeatRunner,
             final Logger logger) {
-        // Market data first, its gateways before the multiplexer that copies them, so none of it is still arriving
-        // once the strategy stops reading. Closed after the strategy, a busy feed filled the strategy's buffer while
-        // the
-        // OMS and the gateways closed, and the multiplexer then waited on it for good.
+        // Market data first, so none of it is still arriving once the strategy stops reading: closed after the
+        // strategy, a busy stream filled the strategy's buffer while the OMS and the gateways closed, and its writer
+        // then waited on it for good.
         closeQuietly(started.marketData(), "market data", logger);
-        closeQuietly(started.mux(), logger);
         closeQuietly(started.strategy(), logger);
         closeQuietly(started.oms(), logger);
         closeQuietly(started.router(), logger);
@@ -493,7 +483,6 @@ public class TradingOrchestrator extends Orchestrator {
         for (GnomeAgentRunner runner : new GnomeAgentRunner[] {
             started.strategy(),
             started.oms(),
-            started.mux(),
             started.router(),
             started.ledger(),
             started.riskSync(),
@@ -619,46 +608,6 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
-    /**
-     * Where the session's market data comes from and the buffer the strategy reads it in. From shards, every stream
-     * goes straight into that one buffer. From its own feeds, a lone listing's ring is that buffer; with
-     * several, a multiplexer copies each listing's ring into it.
-     */
-    private record SessionMarketData(
-            MarketData marketData,
-            List<SequencedRingBuffer<?>> perListing,
-            SequencedRingBuffer<?> strategyBuffer,
-            MarketDataMultiplexer mux) {}
-
-    private SessionMarketData sessionMarketData(
-            Logger logger,
-            Properties properties,
-            SecurityMaster securityMaster,
-            List<Listing> listings,
-            StreamDirectory streams,
-            GlobalSequence sessionSequence) {
-        if (readsShards(properties)) {
-            SequencedRingBuffer<?> buffer = new SequencedRingBuffer<>(Mbp10Schema::new, sessionSequence);
-            ShardArrivals arrivals = compares(properties) ? new ShardArrivals(System::nanoTime) : null;
-            ShardMarketData shards = createShardMarketData(
-                    logger, properties, listings, streams, dataStreams(properties), buffer, arrivals);
-            MarketData marketData = arrivals == null
-                    ? shards
-                    : comparedMarketData(logger, properties, securityMaster, listings, streams, shards, arrivals);
-            return new SessionMarketData(marketData, Collections.nCopies(listings.size(), buffer), buffer, null);
-        }
-        if (compares(properties)) {
-            throw new IllegalArgumentException("market.data.compare needs the session's market data from shards");
-        }
-        SessionFeeds feeds = createMarketData(logger, properties, securityMaster, listings, sessionSequence);
-        List<SequencedRingBuffer<?>> rings = feeds.rings();
-        if (listings.size() == 1) {
-            return new SessionMarketData(feeds, rings, rings.get(0), null);
-        }
-        SequencedRingBuffer<?> merged = new SequencedRingBuffer<>(Intent::new, sessionSequence);
-        return new SessionMarketData(feeds, rings, merged, new MarketDataMultiplexer(rings, merged));
-    }
-
     /** The book streams of the session's listings, and the data-only streams it reads, which its market data names. */
     private static StreamDirectory sessionStreams(
             SecurityMaster securityMaster, List<Listing> listings, int[] dataStreams) {
@@ -678,33 +627,13 @@ public class TradingOrchestrator extends Orchestrator {
         }
     }
 
-    /**
-     * Whether the session reads its market data from shards rather than opening venue connections: paper sessions the
-     * launcher leased streams for (it passes the market-data API). Live sessions still open their own; a local run has
-     * no lease.
-     */
-    static boolean readsShards(Properties properties) {
-        return "paper".equals(properties.getStringProperty("mode"))
-                && properties.hasProperty("session.id")
-                && properties.hasProperty("market.data.api.url");
-    }
-
-    /**
-     * {@code market.data.compare}: also open the session's own venue connections for its listings, which nothing trades
-     * on, and time the shard path against them ({@link FeedComparator}).
-     */
-    static boolean compares(Properties properties) {
-        return properties.hasProperty("market.data.compare") && properties.getBooleanProperty("market.data.compare");
-    }
-
     private ShardMarketData createShardMarketData(
             Logger logger,
             Properties properties,
             List<Listing> listings,
             StreamDirectory streams,
             int[] dataStreams,
-            SequencedRingBuffer<?> buffer,
-            ShardArrivals arrivals) {
+            SequencedRingBuffer<?> buffer) {
         List<StreamFeed> feeds = new ArrayList<>();
         List<GatewayHealth> health = new ArrayList<>();
         for (Listing listing : listings) {
@@ -721,60 +650,41 @@ public class TradingOrchestrator extends Orchestrator {
                 AgentRuntimeInstaller.pinsHotAgents(properties) ? AeronProfile.LATENCY : AeronProfile.STANDARD,
                 MarketDataIdle.from(properties),
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
-        String sessionId = properties.getStringProperty("session.id");
-        MarketDataLeases client = new MarketDataLeases(
-                HttpClient.newHttpClient(),
-                URI.create(properties.getStringProperty("market.data.api.url")),
-                marketDataApiKey(properties.getStringProperty("market.data.api.key.secret")),
-                MAPPER);
         long startTimeout = properties.getLongProperty("market.data.start.timeout.seconds");
         return new ShardMarketData(
                 logger,
                 aeron,
                 HostAddress.privateIp(),
-                () -> client.get(sessionId),
+                leaseSource(properties, feeds),
                 feeds,
                 health,
-                new ShardFeedAgent(buffer, feeds, System::nanoTime, arrivals),
+                new ShardFeedAgent(buffer, feeds, System::nanoTime),
                 TimeUnit.SECONDS.toNanos(startTimeout),
                 System::nanoTime);
     }
 
-    private ComparedMarketData comparedMarketData(
-            Logger logger,
-            Properties properties,
-            SecurityMaster securityMaster,
-            List<Listing> listings,
-            StreamDirectory streams,
-            ShardMarketData shards,
-            ShardArrivals arrivals) {
-        EpochNanoClock clock = getInstance(EpochNanoClock.class);
-        SessionFeeds direct = new SessionFeeds(
-                logger,
-                securityMaster,
-                new FeedVenues.Context(
-                        logger, properties, getInstance(SecretCache.class), MarketDataCredentials.SESSION, clock),
-                listings,
-                null,
-                false,
-                (status, cause) -> logger.logf(
-                        LogMessage.UNKNOWN_ERROR,
-                        "Market data compare: a direct connection failed: %s",
-                        CauseChain.of(cause)),
-                clock,
-                WebSocketFeedOpener.Clients.TLS);
-        int[] streamIds =
-                listings.stream().mapToInt(l -> streams.streamId(l.listingId())).toArray();
-        FeedComparator comparator = new FeedComparator(
-                logger,
-                clock,
-                System::nanoTime,
-                streamIds,
-                direct.rings(),
-                arrivals.ring(),
-                SchedulingLatencyProbe.start(TimeUnit.MILLISECONDS.toNanos(1)),
-                MAPPER);
-        return new ComparedMarketData(shards, direct, comparator);
+    /**
+     * Where the session's streams are published: its lease from the market-data API (the launcher leased them), or for
+     * a local run, {@code market.data.local.shard} ({@code host:port}), one shard publishing them all.
+     */
+    private static ShardMarketData.LeaseSource leaseSource(Properties properties, List<StreamFeed> feeds) {
+        if (properties.hasProperty("session.id") && properties.hasProperty("market.data.api.url")) {
+            String sessionId = properties.getStringProperty("session.id");
+            MarketDataLeases client = new MarketDataLeases(
+                    HttpClient.newHttpClient(),
+                    URI.create(properties.getStringProperty("market.data.api.url")),
+                    marketDataApiKey(properties.getStringProperty("market.data.api.key.secret")),
+                    MAPPER);
+            return () -> client.get(sessionId);
+        }
+        if (properties.hasProperty("market.data.local.shard")) {
+            MarketDataLeases.Lease lease = MarketDataLeases.local(
+                    properties.getStringProperty("market.data.local.shard"),
+                    feeds.stream().mapToInt(feed -> feed.streamId).toArray());
+            return () -> lease;
+        }
+        throw new IllegalArgumentException("The session's market data comes from shards: it needs a lease (session.id"
+                + " and market.data.api.url, set by the launcher) or market.data.local.shard for a local run");
     }
 
     /** The market-data API key from its Secrets Manager copy, which lives in us-east-1 only; read again after a rotation. */
@@ -801,27 +711,6 @@ public class TradingOrchestrator extends Orchestrator {
                 key.set(null);
             }
         };
-    }
-
-    /** A lone listing's market data is what the strategy reads, so it goes straight onto the session sequence. */
-    private SessionFeeds createMarketData(
-            Logger logger,
-            Properties properties,
-            SecurityMaster securityMaster,
-            List<Listing> listings,
-            GlobalSequence sessionSequence) {
-        EpochNanoClock clock = getInstance(EpochNanoClock.class);
-        return new SessionFeeds(
-                logger,
-                securityMaster,
-                new FeedVenues.Context(
-                        logger, properties, getInstance(SecretCache.class), MarketDataCredentials.SESSION, clock),
-                listings,
-                listings.size() == 1 ? sessionSequence : null,
-                AgentRuntimeInstaller.pinsHotAgents(properties),
-                fatalHandler != null ? fatalHandler : ProcessExit.SYSTEM,
-                clock,
-                WebSocketFeedOpener.Clients.TLS);
     }
 
     /**
@@ -925,7 +814,6 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner strategy,
             GnomeAgentRunner oms,
             List<GnomeAgentRunner> outboundAgents,
-            GnomeAgentRunner mux,
             GnomeAgentRunner router,
             GnomeAgentRunner ledger,
             GnomeAgentRunner riskSync) {}
@@ -934,7 +822,6 @@ public class TradingOrchestrator extends Orchestrator {
             MarketData marketData,
             OmsAgent omsAgent,
             List<GnomeAgent> outboundAgents,
-            MarketDataMultiplexer muxAgent,
             ListingRouter routerAgent,
             StrategyAgent strategy,
             LedgerAgent ledgerAgent,
@@ -964,11 +851,6 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner.startOnThread(runner);
             outboundRunners.add(runner);
         }
-        GnomeAgentRunner muxRunner = null;
-        if (muxAgent != null) {
-            muxRunner = new GnomeAgentRunner(muxAgent, errorHandler);
-            GnomeAgentRunner.startOnThread(muxRunner);
-        }
         GnomeAgentRunner routerRunner = null;
         if (routerAgent != null) {
             routerRunner = new GnomeAgentRunner(routerAgent, errorHandler);
@@ -982,14 +864,7 @@ public class TradingOrchestrator extends Orchestrator {
             GnomeAgentRunner.startOnThread(ledgerRunner);
         }
         return new AgentRunners(
-                marketData,
-                strategyRunner,
-                omsRunner,
-                outboundRunners,
-                muxRunner,
-                routerRunner,
-                ledgerRunner,
-                riskSyncRunner);
+                marketData, strategyRunner, omsRunner, outboundRunners, routerRunner, ledgerRunner, riskSyncRunner);
     }
 
     private static void closeQuietly(GnomeAgentRunner runner, Logger logger) {

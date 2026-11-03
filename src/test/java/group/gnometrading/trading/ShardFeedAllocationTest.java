@@ -55,8 +55,7 @@ class ShardFeedAllocationTest {
             final SequencedPoller strategy =
                     ring.createPoller((seq, templateId, buffer, length) -> strategySeen.lazySet(seq));
             final StreamFeed feed = new StreamFeed(STREAM_ID, "market data 1");
-            final ShardFeedAgent agent =
-                    new ShardFeedAgent(ring, List.of(feed), System::nanoTime, new ShardArrivals(System::nanoTime));
+            final ShardFeedAgent agent = new ShardFeedAgent(ring, List.of(feed), System::nanoTime);
             final ShardMarketData marketData = new ShardMarketData(
                     new NullLogger(),
                     session,

@@ -21,26 +21,10 @@ services:
       - ./market-data:/app/market-data
     shm_size: '4gb'
 
-  testing:
-    build:
-      context: .
-      secrets:
-        - maven_settings
-    image: gnome-orchestrator:latest
-    privileged: true
-    container_name: gnome-orchestrator-testing
-    environment:
-      LISTING: 1
-      ORCHESTRATOR_ROLE: market-data-writer
-      STAGE: dev
-      OUTPUT: /app/market-data/output.bin
-    volumes:
-      - ~/.aws/:/root/.aws:ro
-      - ./market-data:/app/market-data
-    shm_size: '4gb'
-
-  # A paper session run exactly as on EC2, minus the EC2 wrapper. Uses the jar built from this checkout unless
-  # ORCHESTRATOR_VERSION is set; `docker compose stop strategy` sends the same SIGTERM an instance stop does.
+  # A paper session run exactly as on EC2, minus the EC2 wrapper and the lease: it reads its streams from the
+  # `collector` service, whose `local` shard item must collect and publish them (see CLAUDE.md). Uses the jar built
+  # from this checkout unless ORCHESTRATOR_VERSION is set; `docker compose stop strategy` sends the same SIGTERM an
+  # instance stop does.
   strategy:
     build:
       context: .
@@ -48,6 +32,8 @@ services:
         - maven_settings
     image: gnome-orchestrator:latest
     container_name: gnome-orchestrator-strategy
+    depends_on:
+      - collector
     stop_grace_period: 60s
     environment:
       STAGE: dev
@@ -61,6 +47,7 @@ services:
       STRATEGY_ARGS_JSON: '{"interval_seconds": 3, "size": 10, "max_position": 3}'
       RESEARCH_COMMIT: main
       LATENCY_PROFILE: standard
+      MARKET_DATA_LOCAL_SHARD: collector:40000
       # The listing simulates with its exchange's registry parameters as recorded by then, with fees zeroed.
       SIMULATION_JSON: '{"as_of": "2026-10-16T00:00:00Z", "listings": {"6": {"fee_model": {"type": "static", "taker_fee": 0, "maker_fee": 0}}}}'
     volumes:

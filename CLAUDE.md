@@ -17,23 +17,26 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 - `*LiveSmoke`, `*Probe`, `*LiveCheck`, `*CrossCheck` under `src/test` are manual checks against real venues (run
   by hand with `-D` flags documented in each class). Surefire skips them; never wire them into `mvn test`.
 - Local runs (Docker, same install script as the AMI; needs `~/.m2/settings.xml` and `~/.aws` with a `dev`
-  profile): `docker compose up --build strategy` (paper session), `collector`, or `testing`.
+  profile): `docker compose up --build strategy` (a paper session; starts `collector` too) or `collector` alone.
   `docker compose stop strategy` sends the same SIGTERM an instance stop does. The `collector` service is shard
   `local`: put its item in the dev `collection-shards` table first (`shard_id` `local`, numeric `generation`,
-  `streams` as packed big-endian int32s, see `DynamoAssignment.pack`).
+  `streams` and `publish` as packed big-endian int32s, see `DynamoAssignment.pack`). `strategy` has no lease: its
+  `MARKET_DATA_LOCAL_SHARD=collector:40000` stands in for one, so its listings' book streams must be in both lists.
 - CDK: `cd cdk && npm ci && npx cdk synth` (needs an npm token for `@gnome-trading-group` packages). Deploys only
   happen through the pipeline; do not `cdk deploy` by hand.
 
 ## Layout
 
-- `orchestrator/Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`,
-  `market-data-writer`; also the jar's `Main-Class`), or `Main.start(role, args)` from gnomepy's runner. Callers
+- `orchestrator/Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`;
+  also the jar's `Main-Class`), or `Main.start(role, args)` from gnomepy's runner. Callers
   name a role, never a class, so classes can move; a new process is a new `Main.Role`. `start-session.sh` takes the
   role from `ORCHESTRATOR_ROLE` (default `session`).
 - `trading/TradingOrchestrator` - the session process: listings, buffers, OMS, strategy, gateways, ledger, risk
   sync, journal, heartbeat, and the close order of all of them (`closeAgents`).
-- `trading/` market data: a paper session the launcher leased streams for (`MARKET_DATA_API_URL` set) reads them from
-  shards. `ShardFeedAgent` (HOT_PATH) is the only writer of the journaled strategy buffer and of which subscription
+- `trading/` market data: every session reads its streams from shards, live ones from on-demand PRODUCTION shards,
+  paper ones from RESEARCH shards. The launcher leases them (`MARKET_DATA_API_URL` set); a local run names one shard
+  instead (`market.data.local.shard`, `MarketDataLeases.local`); a session with neither fails at start. A shard outage
+  marks the book bad and the OMS refuses orders on it; the session doesn't exit. `ShardFeedAgent` (HOT_PATH) is the only writer of the journaled strategy buffer and of which subscription
   each stream reads; `ShardMarketData`'s control thread makes and closes subscriptions (they block on the driver),
   waits up to `market.data.start.timeout.seconds` for the lease to be live, polls it every 10 s, follows moves (switch
   on the new shard's first clean record; a move that doesn't deliver in 60 s, or the lease stops naming, is given up)
@@ -52,20 +55,12 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   `market.data.idle.max.park.micros` (1000; a session's config may lower it, but at 50 a t3.small runs ~15 points
   hotter, past its credits). Low-latency sessions spin their Aeron network thread and pin the ingress agent anyway.
   `MarketDataLeases` reads `GET /collection/leases/{sessionId}` with the `gnome/api-keys/market-data` key (read again
-  on 401/403). `market.data.compare: true` (shard sessions only) also opens the session's own venue connections for
-  its listings, which nothing trades on, and `FeedComparator` times the shard path against them: records are paired by
-  their bytes less `timestampRecv` and flags (k-th with k-th), shard arrivals are copied by `ShardArrivals` on the
-  ingress thread (monotonic stamp: the wall clock's `Instant` wasn't always optimized away there), and each minute it
-  logs `FEED_COMPARE` lines (`feed_compare` per stream: matched, one-sided after 10 s, bad, hop p50–max in µs, which
-  includes the venue's per-connection jitter; transit = arrival less the shard's receive stamp, carried in
-  `timestampSent`, i.e. the shard pipeline alone, across two hosts' clocks; venue lag per path; `feed_compare_host`:
-  lapped, scheduling lateness) and `feed_compare_total` at close. Live sessions and local runs still open venue
-  connections themselves:
-- `trading/` also: `SessionFeeds` (the session's market data on the same feeds as a shard), `SessionExit` (graceful
+  on 401/403.
+- `trading/` also: `SessionExit` (graceful
   exit), `SessionFatalHandler` (every error exit), `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING ->
   RUNNING), `SessionReports` (alerts + registry PATCH), `JournalManagerAgent` and `JournalSegmentSealer`,
-  `AgentRuntimeInstaller` (latency profile / CPU pinning), `PaperTradingOutboundGateway`, `MarketDataMultiplexer` /
-  `ListingRouter` (multi-listing only), `recovery/StartupRecovery`.
+  `AgentRuntimeInstaller` (latency profile / CPU pinning), `PaperTradingOutboundGateway`, `ListingRouter`
+  (multi-listing only), `recovery/StartupRecovery`.
 - `collectors/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
   records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
   `ShardStream` + `MarketDataCollectorAgent` (minute files), `StreamPublisherAgent` (drains every ring a second time,
@@ -94,8 +89,8 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   `GatewayErrorHandler`, `GatewayRunners` (order gateways), `GatewayHealth`.
 - `shared/` - DI modules: `PropertiesModule`, `AwsModule`, `RiskModule`, `SecurityMasterModule`, `SecretCache`.
 - `di/` - the in-house DI container (`Orchestrator`, `@Provides`, `@Singleton`, `@Named`, child orchestrators).
-- `testing/MarketDataWriterOrchestrator` - local tool that writes a listing's market data to a file.
-- `src/test/.../feeds/FeedLiveCheck` - manual check of live markets through the feeds (`-Dmarkets`, `-Draw`, `-Ddrop`).
+- `src/test/.../feeds/FeedLiveCheck` - manual check of live markets through the shards' feeds (`-Dmarkets`,
+  `-Daccount`, `-Draw`, `-Ddrop`).
 - `src/main/resources/orchestrator.{dev,prod}.properties` - per-stage defaults.
 - `ami/` - Image Builder inputs: `scripts/install-runtime.sh`, `scripts/tune-kernel.sh`, `files/run-strategy.sh`
   (EC2 wrapper), `files/start-session.sh` (shared with Docker), systemd units, `files/journal-shipper.py` (+ test).

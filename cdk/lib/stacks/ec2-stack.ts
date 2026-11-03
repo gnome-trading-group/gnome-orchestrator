@@ -58,11 +58,11 @@ export class Ec2Stack extends cdk.Stack {
       ],
     });
     // Any region: instances fall back to us-east-1 for secrets that are not replicated to their own region. Every
-    // session reads the market-data keys and the gnomepy token; only a live one reads its account's trading key.
+    // session reads the gnomepy token; only a live one reads its account's trading key. None reads a venue's
+    // market-data key: sessions get market data from shards.
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
       resources: [
-        `arn:aws:secretsmanager:*:${this.account}:secret:gnome/market-data/*`,
         `arn:aws:secretsmanager:*:${this.account}:secret:gnomepy/*`,
         // The market-data API key, to read the session's lease; its one copy is in us-east-1.
         `arn:aws:secretsmanager:us-east-1:${this.account}:secret:gnome/api-keys/market-data-*`,

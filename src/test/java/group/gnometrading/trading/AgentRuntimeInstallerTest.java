@@ -106,10 +106,10 @@ class AgentRuntimeInstallerTest {
 
     @Test
     void testExpectedHotThreads() {
-        assertEquals(4, AgentRuntimeInstaller.expectedHotThreads("paper", 1));
-        assertEquals(10, AgentRuntimeInstaller.expectedHotThreads("paper", 3));
-        assertEquals(5, AgentRuntimeInstaller.expectedHotThreads("live", 1));
-        assertEquals(10, AgentRuntimeInstaller.expectedHotThreads("live", 2));
+        assertEquals(5, AgentRuntimeInstaller.expectedHotThreads("paper", 1));
+        assertEquals(8, AgentRuntimeInstaller.expectedHotThreads("paper", 3));
+        assertEquals(6, AgentRuntimeInstaller.expectedHotThreads("live", 1));
+        assertEquals(9, AgentRuntimeInstaller.expectedHotThreads("live", 2));
     }
 
     @Test
