@@ -4,7 +4,7 @@ import group.gnometrading.gateways.feed.SubjectTable;
 import group.gnometrading.gateways.feed.VenueFeed;
 import group.gnometrading.gateways.feed.VenueProtocol;
 import group.gnometrading.gateways.feed.probe.BookProbeClient;
-import group.gnometrading.gateways.feed.transport.WebSocketChannel;
+import group.gnometrading.gateways.transport.WebSocketChannel;
 import group.gnometrading.gateways.venues.hyperliquid.HyperliquidProtocol;
 import group.gnometrading.gateways.venues.hyperliquid.HyperliquidVenue;
 import group.gnometrading.gateways.venues.kalshi.KalshiBookProbe;

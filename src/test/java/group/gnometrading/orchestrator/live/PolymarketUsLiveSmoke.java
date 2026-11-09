@@ -1,11 +1,11 @@
-package group.gnometrading.orchestrator.session.orders;
+package group.gnometrading.orchestrator.live;
 
 import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.orders.OrderContext;
-import group.gnometrading.gateways.orders.OutboundGateway;
+import group.gnometrading.gateways.outbound.OutboundGateway;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
 import group.gnometrading.gateways.venues.polymarket.us.PolymarketUsAuthSigner;
@@ -25,6 +25,7 @@ import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.orchestrator.credentials.PolymarketUsCredentials;
 import group.gnometrading.orchestrator.runtime.GatewayRunners;
+import group.gnometrading.orchestrator.session.orders.OrderEntryHttpClients;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ExecType;

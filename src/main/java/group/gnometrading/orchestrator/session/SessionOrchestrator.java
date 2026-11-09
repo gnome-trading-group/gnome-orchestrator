@@ -28,6 +28,7 @@ import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.oms.state.PooledOrderStateManager;
+import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aws.AwsModule;
 import group.gnometrading.orchestrator.aws.RegistryEndpoint;
 import group.gnometrading.orchestrator.aws.RiskModule;
@@ -89,6 +90,7 @@ public class SessionOrchestrator extends Orchestrator {
     // Set once configure() has started them; read by onClose(), which may run on a shutdown hook thread.
     private volatile SessionAgents agents;
     private volatile SessionOrders orders;
+    private volatile AeronRuntime aeron;
     private volatile SessionJournal journal = SessionJournal.OFF;
     private volatile GnomeAgentRunner heartbeatRunner;
     private volatile Logger logger;
@@ -169,8 +171,7 @@ public class SessionOrchestrator extends Orchestrator {
         AgentRuntimeInstaller.install(properties, logger, listings.size());
 
         SessionBuffers buffers = SessionBuffers.create(listings.size());
-        ShardMarketData marketData =
-                SessionMarketData.create(logger, properties, listings, streams, dataStreams, buffers.marketData());
+        ShardMarketData marketData = startAeron(logger, properties, listings, streams, dataStreams, buffers);
 
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(64));
         String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
@@ -217,7 +218,8 @@ public class SessionOrchestrator extends Orchestrator {
                 nanoClock,
                 () -> getInstance(RegistryConnection.class),
                 fatalHandler,
-                this::createChildOrchestrator);
+                this::createChildOrchestrator,
+                this.aeron);
         SessionOrders.Wiring outbound = orders.wire(
                 listings,
                 streams,
@@ -285,6 +287,7 @@ public class SessionOrchestrator extends Orchestrator {
                 logger,
                 errorHandler);
         this.agents = started;
+        awaitGateways(properties);
         // Only a session reports to the registry; a local run has nothing to report to.
         if (sessionId != null) {
             this.heartbeatRunner = started.startHeartbeat(
@@ -307,6 +310,30 @@ public class SessionOrchestrator extends Orchestrator {
     }
 
     // Both lines are the only evidence an operator stop shut down cleanly rather than being cut off at the timeout.
+    /** The session's Aeron runtime, shared by its market data and its order-gateway link, and its market data on it. */
+    private ShardMarketData startAeron(
+            Logger logger,
+            Properties properties,
+            List<Listing> listings,
+            StreamDirectory streams,
+            int[] dataStreams,
+            SessionBuffers buffers) {
+        this.aeron = SessionMarketData.aeron(logger, properties);
+        return SessionMarketData.create(
+                logger, properties, this.aeron, listings, streams, dataStreams, buffers.marketData());
+    }
+
+    /** Until every order gateway the session trades through has welcomed it; none without gateways. */
+    private void awaitGateways(Properties properties) {
+        try {
+            orders.awaitGateways(
+                    TimeUnit.SECONDS.toNanos(properties.getLongProperty("order.gateway.start.timeout.seconds")));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted waiting for the order gateways", e);
+        }
+    }
+
     @Override
     protected final void onClose() {
         SessionFatalHandler fatal = this.fatalHandler;
@@ -320,6 +347,13 @@ public class SessionOrchestrator extends Orchestrator {
         logger.logf(LogMessage.DEBUG, "Shutting down: closing agents");
         final long start = System.nanoTime();
         SessionAgents.close(started, orders.venueGateways(), journal.runner(), heartbeatRunner, logger);
+        try {
+            orders.close();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        // Last: the gateway link's cancels on shutdown go over it after market data has closed.
+        this.aeron.close();
         logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
     }
 

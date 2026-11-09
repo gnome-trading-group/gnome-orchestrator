@@ -1,4 +1,4 @@
-package group.gnometrading.orchestrator.session.orders;
+package group.gnometrading.orchestrator.live;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -7,7 +7,7 @@ import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.orders.OrderContext;
-import group.gnometrading.gateways.orders.OutboundGateway;
+import group.gnometrading.gateways.outbound.OutboundGateway;
 import group.gnometrading.gateways.venues.polymarket.intl.PolymarketIntlAuthHeaders;
 import group.gnometrading.gateways.venues.polymarket.intl.PolymarketIntlMarketInfo;
 import group.gnometrading.gateways.venues.polymarket.intl.PolymarketIntlOrderSigner;

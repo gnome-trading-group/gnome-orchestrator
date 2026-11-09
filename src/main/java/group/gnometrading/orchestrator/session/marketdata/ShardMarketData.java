@@ -334,6 +334,5 @@ public final class ShardMarketData implements MarketData {
         if (runner != null) {
             runner.close();
         }
-        aeron.close();
     }
 }

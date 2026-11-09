@@ -1,4 +1,4 @@
-package group.gnometrading.orchestrator.session.orders;
+package group.gnometrading.orchestrator.live;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,13 +14,13 @@ import group.gnometrading.gateways.feed.StreamOutput;
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.gateways.feed.SubjectTable;
 import group.gnometrading.gateways.feed.book.Projection;
-import group.gnometrading.gateways.feed.transport.WebSocketChannel;
-import group.gnometrading.gateways.feed.transport.WebSocketTransport;
 import group.gnometrading.gateways.orders.OrderContext;
-import group.gnometrading.gateways.orders.OutboundGateway;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
+import group.gnometrading.gateways.outbound.OutboundGateway;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
+import group.gnometrading.gateways.transport.WebSocketChannel;
+import group.gnometrading.gateways.transport.WebSocketTransport;
 import group.gnometrading.gateways.venues.kalshi.KalshiAuthSigner;
 import group.gnometrading.gateways.venues.kalshi.KalshiOutboundReader;
 import group.gnometrading.gateways.venues.kalshi.KalshiOutboundWriter;
@@ -37,6 +37,7 @@ import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.orchestrator.credentials.KalshiCredentials;
 import group.gnometrading.orchestrator.runtime.GatewayRunners;
+import group.gnometrading.orchestrator.session.orders.OrderEntryHttpClients;
 import group.gnometrading.orchestrator.shard.feeds.WebSocketFeedOpener;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
@@ -101,8 +102,13 @@ import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueReques
  *       and prints the raw user_order and fill messages next to the execution reports the reader publishes.
  * </ul>
  *
- * <p>Credentials are read from Secrets Manager and never printed. Orders refuse to run against any host that isn't
- * Kalshi's demo environment.
+ * <p>{@code -Dmode=prod-rest} and {@code -Dmode=prod-reconnect} trade the real account in {@code -Dsecret} (default
+ * {@code gnome/accounts/steady-heron-01/trading}) on {@code -Dprod.ticker}, and only with {@code -Dprod.confirm=yes}: one
+ * post-only bid for 1 contract at $0.01, cancelled; {@code prod-reconnect} cancels it while the reader's socket is down.
+ * {@code -Dlose.submits=1} throws away the submit's answer, so the resend and lookup settle it.
+ *
+ * <p>Credentials are read from Secrets Manager and never printed. Every other order mode refuses to run against any
+ * host that isn't Kalshi's demo environment.
  */
 public final class KalshiLiveSmoke {
 
@@ -111,6 +117,8 @@ public final class KalshiLiveSmoke {
     private static final String DEMO_API = "https://external-api.demo.kalshi.co";
     private static final String DEMO_WS_HOST = "wss://external-api-ws.demo.kalshi.co";
     private static final String DEMO_HOST_SUFFIX = ".demo.kalshi.co";
+    // The production order modes use the hosts a production session does (orchestrator.prod.properties).
+    private static final String PROD_WS_HOST = "wss://external-api-ws.kalshi.com";
     private static final String MARKET_WS_PATH = "/trade-api/ws/v2";
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -136,6 +144,11 @@ public final class KalshiLiveSmoke {
                                         profile,
                                         System.getProperty("demo.secret", "gnome/exchange-credentials/kalshi-demo")),
                         System.getProperty("demo.ticker"));
+            } else if (mode.equals("prod-rest") || mode.equals("prod-reconnect")) {
+                runProduction(
+                        credentials(profile, System.getProperty("secret", "gnome/accounts/steady-heron-01/trading")),
+                        System.getProperty("prod.ticker"),
+                        mode.equals("prod-reconnect"));
             } else if (mode.equals("ratelimit")) {
                 final String keyFile = System.getProperty("demo.keyFile");
                 runRateLimit(
@@ -347,6 +360,38 @@ public final class KalshiLiveSmoke {
         yes.close();
         no.close();
         raw.abort();
+    }
+
+    // ========== Production: one post-only 1-cent bid ==========
+
+    private static void runProduction(final KalshiCredentials creds, final String ticker, final boolean reconnect)
+            throws Exception {
+        if (!"yes".equals(System.getProperty("prod.confirm")) || ticker == null) {
+            throw new IllegalArgumentException("-Dprod.ticker and -Dprod.confirm=yes are required to trade production");
+        }
+        final Stack yes = new Stack(creds, listing(1, ticker + ":yes"), "YES", null, PROD_API, PROD_WS_HOST);
+        Thread.sleep(3_000); // connected and subscribed before anything is sent
+
+        yes.sendLimit(
+                51,
+                Side.Bid,
+                "0.01",
+                "1.00",
+                TimeInForce.GOOD_TILL_CANCELED,
+                true,
+                "rest a post-only bid at 1c",
+                6_000);
+        if (reconnect) {
+            System.out.println("\n==== the reader's socket goes down");
+            yes.reader.disconnect();
+            yes.sendCancel(51, "while it's down, cancel through the writer");
+            System.out.println("\n==== the reader reconnects and catches up");
+            yes.reader.connect();
+            Thread.sleep(6_000);
+        } else {
+            yes.sendCancel(51, "cancel it");
+        }
+        yes.close();
     }
 
     // ========== Rate limit (demo) ==========
@@ -776,6 +821,17 @@ public final class KalshiLiveSmoke {
                 final String name,
                 final VenueRateLimiter rateLimiter)
                 throws Exception {
+            this(creds, listing, name, rateLimiter, demoUrl(DEMO_API), demoUrl(DEMO_WS_HOST));
+        }
+
+        Stack(
+                final KalshiCredentials creds,
+                final Listing listing,
+                final String name,
+                final VenueRateLimiter rateLimiter,
+                final String apiBase,
+                final String wsHost)
+                throws Exception {
             this.name = name;
             this.sessionTag =
                     "smoke" + Long.toString(System.currentTimeMillis(), Character.MAX_RADIX) + name.toLowerCase();
@@ -792,7 +848,7 @@ public final class KalshiLiveSmoke {
             GnomeAgentRunner.startOnThread(this.reportsRunner);
 
             final WebSocketClient ws = new WebSocketClientBuilder()
-                    .withURI(new URI(DEMO_WS_HOST + MARKET_WS_PATH))
+                    .withURI(new URI(wsHost + MARKET_WS_PATH))
                     .withSocketFactory(new NativeSSLSocketFactory())
                     .withReadBufferSize(1 << 16)
                     .build();
@@ -810,7 +866,7 @@ public final class KalshiLiveSmoke {
                     rateLimiter == null
                             ? new LoggingHttpClient(name + "-catchup")
                             : OrderEntryHttpClients.create(rateLimiter),
-                    requireDemo(new URI(DEMO_API).getHost()),
+                    new URI(apiBase).getHost(),
                     // No registry here; Kalshi reports the fees it charged on every fill.
                     FeeTimeline.EMPTY);
             this.reader = reader;
@@ -821,7 +877,7 @@ public final class KalshiLiveSmoke {
                     writerReportQueue,
                     releasedOrderQueue,
                     rateLimiter == null ? new LoggingHttpClient(name) : OrderEntryHttpClients.create(rateLimiter),
-                    requireDemo(new URI(DEMO_API).getHost()),
+                    new URI(apiBase).getHost(),
                     new KalshiAuthSigner(creds.apiKey(), creds.privateKey()),
                     nanoClock,
                     listing,
@@ -1266,6 +1322,12 @@ public final class KalshiLiveSmoke {
                 new Security(3, exchangeSecurityId, null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 exchangeSecurityId,
                 exchangeSecurityId);
+    }
+
+    /** {@code url}, once it's checked to be Kalshi's demo environment. */
+    private static String demoUrl(final String url) {
+        requireDemo(url);
+        return url;
     }
 
     private static String requireDemo(final String hostOrUrl) {

@@ -3,7 +3,7 @@ package group.gnometrading.orchestrator.shard;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.gateways.feed.SubjectState;
-import group.gnometrading.orchestrator.aeron.MarketDataPathAgent;
+import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.schemas.MessageHeaderEncoder;
 import group.gnometrading.schemas.ShardStatusEncoder;
 import java.util.ArrayList;
@@ -24,7 +24,7 @@ import org.agrona.concurrent.UnsafeBuffer;
  * ring for the next pass, and the stream's later records behind it; one the ring laps first is dropped and counted.
  * Every stream the runtime starts is read here, leased or not.
  */
-final class StreamPublisherAgent implements MarketDataPathAgent {
+final class StreamPublisherAgent implements AeronPathAgent {
 
     static final long STATUS_EVERY_NANOS = TimeUnit.SECONDS.toNanos(1);
     static final long RETIRE_GRACE_NANOS = MarketDataCollectorAgent.RETIRE_GRACE_NANOS;

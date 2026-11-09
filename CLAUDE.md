@@ -14,8 +14,9 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   the full class name).
 - `mvn spotless:apply` fixes formatting. Spotless (palantir-java-format) and checkstyle both run at `validate` and
   fail the build, so run it before committing.
-- `*LiveSmoke`, `*Probe`, `*LiveCheck`, `*CrossCheck` under `src/test` are manual checks against real venues (run
-  by hand with `-D` flags documented in each class). Surefire skips them; never wire them into `mvn test`.
+- `*LiveSmoke` (test package `live/`), `*Probe` (`live/probes/`), `*LiveCheck`, `*CrossCheck` under `src/test` are
+  manual checks against real venues (run by hand with `-D` flags documented in each class). Surefire skips them; never
+  wire them into `mvn test`.
 - Local runs (Docker, same install script as the AMI; needs `~/.m2/settings.xml` and `~/.aws` with a `dev`
   profile): `docker compose up --build strategy` (a paper session; starts `collector` too) or `collector` alone.
   `docker compose stop strategy` sends the same SIGTERM an instance stop does. The `collector` service is shard
@@ -31,7 +32,7 @@ Everything is under `group.gnometrading.orchestrator`, laid out by process: `ses
 programs that share only the layers below them (`aeron/`, `runtime/`, `aws/`, `credentials/`, `di/`), so neither
 uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforces it.
 
-- `Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`;
+- `Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`, `gateway`;
   also the jar's `Main-Class`), or `Main.start(role, args)` from gnomepy's runner. Callers
   name a role, never a class, so classes can move; a new process is a new `Main.Role`. `start-session.sh` takes the
   role from `ORCHESTRATOR_ROLE` (default `session`).
@@ -56,7 +57,7 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   it repeats the last record passed on byte for byte; unmarked repeats always pass (one venue message can carry
   several identical fills, which share every byte).
   The market-data path's threads (shard publisher and driver, session driver and `ShardFeedAgent`, i.e. the
-  `MarketDataPathAgent`s and both `AeronRuntime`s) park at most `MarketDataIdle` when idle: each park delays a record
+  `AeronPathAgent`s and both `AeronRuntime`s) park at most `AeronPathIdle` when idle: each park delays a record
   that arrives during it, so on a quiet stream the parks add up along the path. Shards use
   `shard.market.data.idle.max.park.micros` (50: saves every subscriber ~1–1.5 ms for ~7% of the host's CPU); sessions
   `market.data.idle.max.park.micros` (1000; a session's config may lower it, but at 50 a t3.small runs ~15 points
@@ -67,7 +68,14 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING -> RUNNING), `SessionReports` (alerts + registry PATCH).
 - `session/journal/`: `JournalManagerAgent`, `JournalSegmentSealer`, `JournalSource`.
 - `session/orders/`: live outbound orchestrators (Kalshi, Polymarket Intl, Polymarket US), `OrderEntryHttpClients`,
-  `PaperTradingOutboundGateway`, `ListingRouter` (multi-listing only).
+  `PaperTradingOutboundGateway`, `ListingRouter` (multi-listing only). With `order.gateway.enabled` (live only, off by
+  default) the session's orders go through order gateways instead: one `GatewayLink` per venue (`live:<exchange>:main`,
+  found in `service-endpoints`, or `order.gateway.local=<ip>:<port>`), opened by `GatewayLinks` on a control thread, and
+  one `GatewayClient` agent reading the OMS's orders and writing its reports (no router). A NEW on a link not ready is
+  rejected `GATEWAY_UNAVAILABLE`; cancels wait for the link; a gateway's `OrderStatus` becomes the reports the OMS lacks;
+  startup waits `order.gateway.start.timeout.seconds` for every welcome. The slot is the registry's `session_seq`.
+  Per-listing venue lookups for startup recovery are still built in the session. The session's `AeronRuntime` is
+  launched by `SessionOrchestrator` (shared by market data and the links) and closed last.
 - `session/recovery/`: `StartupRecovery`.
 - `shard/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
   records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
@@ -83,8 +91,60 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   protocol built with the credentials this process loads, and its REST probe), `FeedSources` (adds a registry source,
   sized by its capacity columns), `WebSocketFeedOpener`, `Assignment` / `DynamoAssignment` (the shard's item in the
   reconciler's `collection-shards` table, us-east-1).
+- `gateway/` - the order gateway (`Main gateway`, `GATEWAY_KEY` `live:<exchange>:<instance>`): one process per venue
+  holding that venue's accounts (registry `venue-accounts/gateway`) for every live session. Layered, and `LayoutTest`
+  enforces it: `core/` is what every thread shares (`GatewaySession`, `SessionTable`, `GatewayMessage`, `ReplayRing`,
+  `OrderTotals`, `GatewayStatus`, `JournalRecorder`, `AccountLink`) and uses none of the rest; `accounts/` (accounts,
+  their lanes' admissions and liveness, `GatewaySettings`), `transport/` (ingress, egress, `OrderStatuses`,
+  `GatewayRejects`), `control/` (`GatewayControl`, `HelloPages` + `Hello`, `SessionRegistry`, `SessionsFile`) and
+  `journal/` (`GatewayJournal`, `OwnershipLog`) each use only `core/`; the root (`OrderGatewayOrchestrator`,
+  `GatewayRestart`, `Watchdog`) assembles them. A session the gateway forgot (unlinked 10 min) that says hello again
+  within the same epoch carries on its report numbering from its hello's `lastReportSeq`.
+  - `OrderGatewayOrchestrator` builds a `GatewayAccount` per account through `VenueAccounts` (gnome-gateways'
+    `AccountLane`, `AccountReader` + `AccountConnection`, and on Polymarket Intl `PolymarketIntlHeartbeats`, beating only
+    while the lane's passes move, `LaneLiveness`), sized by `gateway.max.orders` and `gateway.lane.connections`.
+  - Sessions reach it over Aeron on `gateway.ingress.port` (40010). `GatewayIngress` tells the sender by the image's
+    Aeron session id (core orders carry no session), turns orders into lane commands or refuses them straight back
+    (`GatewayRejects`); `GatewayEgress` numbers each session's reports into its `ReplayRing` (`gateway.replay.reports`)
+    and sends them with the number as the frame's reserved value, at that session's pace, plus a 100 ms heartbeat;
+    `GatewayControl` checks hellos against the registry (`SessionRegistry`, a 10-minute fallback cache), loads the
+    listings they name, opens reply publications, sends the welcome and replay, cancels a silent or deaf session's
+    orders (lane `CANCEL_SESSION`) and asks it to hello again, evicts a session that sends something unreadable
+    (refused 5 min), keeps the state (STARTING/READY/DEGRADED) and writes `order-gateway#<key>` to `service-endpoints`
+    every 15 s. SIGTERM is a planned stop: every session's orders cancelled and a goodbye sent before anything closes.
+  - Each account's budget is shared fairly: an accepted hello introduces the session to its lane (`LaneCommand.SESSION`)
+    with its strategy's `rate_weight` (registry) and its `order.gateway.max.queue.ms` (50), and a forgotten session
+    gives its place up (`SESSION_ENDED`). A hello past `AccountLane.MAX_SESSIONS` (1,024) on one account is refused
+    `SESSION_CAP`. Each lane's decisions go to the journal as `AdmissionRecord`s (sources 16+) through
+    `LaneAdmissions`, which also counts them; every minute the gateway logs per account what was sent, how long
+    cancels and orders waited (p99, max), what was held, refused or dropped, how long the venue took to answer orders
+    and cancels and how many it never answered, how often every lane connection was in use, and any venue 429s
+    (`VENUE_RATE_LIMITED`). It also logs, when any rose, what ingress and egress dropped (orders from unlinked
+    images, session messages for a full control ring, reports for no session, orders untracked so missing from a
+    resync).
+  - Idle parks on the Aeron path: `gateway.idle.max.park.micros` (50). A lane or connector, ingress or egress failure
+    exits the process; so does `Watchdog` when ingress, egress, a lane or a reader (unless paused for a reconnect) makes
+    no progress for `gateway.watchdog.stall.millis` (3000). `/health` on :8080 fails when a lane stops.
+  - `GatewayJournal` (when `journal.enabled`): ingress, egress and each lane record into their own ring on one global
+    sequence, read through lapping pollers into a `skipsLost` `JournalWriter` under
+    `<journal.directory>/gateway-<key>/<start millis>/`; each record is the session's slot (8 bytes LE, 0 if unlinked)
+    then the message. A lap is written as a gap and logged `GATEWAY_JOURNAL_GAP`. Nothing ships it yet.
+  - Restart (`GatewayRestart`, before any thread starts): under `gateway.state.directory/<key>/`, each account's
+    `OwnershipLog` (memory-mapped, CRC-checked records written by the lane before each send: ADD, VENUE_ID, END; a torn
+    tail counts as never written; rewritten with the open orders when `gateway.ownership.log.mb` fills) gives back its
+    open orders, handed unsent to the lane and to the reader (whose first catch-up reaches back to the oldest), and
+    `SessionsFile` the sessions accepted (whose slot, cod timeout, registry record for the fallback cache). A recovered
+    session's first hello gets a welcome then one `OrderStatus` per order (`OrderStatuses` sums its ring), never the
+    reports themselves, and is reconciled: an order it lists that the log never had is reported REJECTED, one it is
+    cancelling is cancelled again, one it doesn't list is cancelled (`GATEWAY_UNATTRIBUTED_EVENTS`). A session not back
+    within 10 s of READY plus its cod timeout has its orders cancelled. A hello past its replay ring gets statuses too.
+  - Tests: `GatewayFixture` (test scope, from gnome-gateways' test jar) runs a whole gateway in process on a fake
+    venue; `session/orders/GatewayInProcessTest` drives sessions through it, restart included.
+  - Idle stop: `gateway.idle.minutes` with no session and no working order, and no `wanted_at` since, exits into the
+    planned stop. 0 (the default) never stops, until something also keeps ECS from starting it again.
 - `aeron/` - the Aeron layer shards, sessions and order gateways share:
-  `AeronRuntime` (embedded media driver + client per process, `AeronProfile` per host kind), `AeronChannels`
+  `AeronRuntime` (embedded media driver + client per process, `AeronProfile` per host kind), `AeronPathIdle` (how long
+  Aeron-path agents and drivers park; `AeronPathAgent` marks them), `AeronChannels`
   (shard MDC publications with `fc=max`, per-shard tagged wildcard receive ports), `AeronPorts` (split of UDP
   40000-40999; mirrors gnome-shared-cdk `AERON_PORT_MAP`), `AeronStreamIds` (market data = `stream_id`, >= 2^30
   reserved), `AeronIngressAgent` (one thread polls every subscription into sinks, zero allocation; a sink with no room

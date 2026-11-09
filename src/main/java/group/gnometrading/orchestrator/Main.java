@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator;
 
 import group.gnometrading.orchestrator.di.Orchestrator;
+import group.gnometrading.orchestrator.gateway.OrderGatewayOrchestrator;
 import group.gnometrading.orchestrator.session.SessionOrchestrator;
 import group.gnometrading.orchestrator.shard.ShardOrchestrator;
 import java.util.Arrays;
@@ -17,7 +18,8 @@ public final class Main {
     /** The processes this jar runs. */
     public enum Role {
         SESSION(SessionOrchestrator.class),
-        SHARD(ShardOrchestrator.class);
+        SHARD(ShardOrchestrator.class),
+        GATEWAY(OrderGatewayOrchestrator.class);
 
         private final Class<? extends Orchestrator> type;
 
@@ -25,7 +27,7 @@ public final class Main {
             this.type = type;
         }
 
-        /** {@code session} or {@code shard}. */
+        /** {@code session}, {@code shard} or {@code gateway}. */
         public String argument() {
             return name().toLowerCase(Locale.ROOT).replace('_', '-');
         }

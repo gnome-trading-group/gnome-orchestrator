@@ -14,11 +14,11 @@ import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
+import group.gnometrading.orchestrator.aeron.AeronPathIdle;
 import group.gnometrading.orchestrator.aeron.AeronPorts;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
-import group.gnometrading.orchestrator.aeron.MarketDataIdle;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.AwsModule;
@@ -146,7 +146,7 @@ public class ShardOrchestrator extends Orchestrator {
         final Logger logger = getInstance(Logger.class);
         // Before any agent thread starts. Shards run on fractional Fargate CPUs, where anything spinning burns the
         // quota and the throttled task delays every socket read, inflating receive timestamps.
-        AgentRuntimeInstaller.installStandard(logger, MarketDataIdle.forShard(getInstance(Properties.class)));
+        AgentRuntimeInstaller.installStandard(logger, AeronPathIdle.forShard(getInstance(Properties.class)));
         final SchedulingLatencyProbe latencyProbe =
                 SchedulingLatencyProbe.start(getInstance(Long.class, "LATENCY_PROBE_INTERVAL_NANOS"));
 
@@ -206,7 +206,7 @@ public class ShardOrchestrator extends Orchestrator {
         final AeronRuntime aeron = AeronRuntime.launch(
                 "shard",
                 AeronProfile.STANDARD,
-                MarketDataIdle.forShard(properties),
+                AeronPathIdle.forShard(properties),
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
         final AtomicReference<ShardRuntime> runtimeRef = new AtomicReference<>();
         final StreamPublisherAgent publisher = publisher(aeron, identity, runtimeRef);

@@ -9,7 +9,7 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
-import group.gnometrading.orchestrator.aeron.MarketDataPathAgent;
+import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.resources.Properties;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.NoOpIdleStrategy;
@@ -35,7 +35,7 @@ class AgentRuntimeInstallerTest {
 
     private static final GnomeAgent BACKGROUND = () -> 0;
 
-    private static final MarketDataPathAgent MARKET_DATA = new MarketDataPathAgent() {
+    private static final AeronPathAgent MARKET_DATA = new AeronPathAgent() {
         @Override
         public int doWork() {
             return 0;

@@ -1,0 +1,44 @@
+package group.gnometrading.orchestrator.gateway;
+
+import group.gnometrading.gateways.orders.recovery.VenueOrder;
+import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
+import group.gnometrading.sm.Listing;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+/** A venue's orders held in memory, by the id execution reports carry: what a test says the venue has. */
+public final class FakeOrderQuery implements VenueOrderQuery {
+
+    public final Map<String, VenueOrder> orders = new ConcurrentHashMap<>();
+    public final List<String> cancelled = new CopyOnWriteArrayList<>();
+
+    @Override
+    public List<VenueOrder> listOpenOrders(final Listing listing) {
+        return this.orders.values().stream().filter(order -> !order.terminal()).toList();
+    }
+
+    @Override
+    public Optional<VenueOrder> getOrder(
+            final Listing listing, final String exchangeOrderId, final long createdAfterMs) {
+        return Optional.ofNullable(this.orders.get(exchangeOrderId));
+    }
+
+    /** Ends the order where it stands, as a venue taking the cancel would. */
+    @Override
+    public boolean cancel(final Listing listing, final VenueOrder order) {
+        this.cancelled.add(order.exchangeOrderId());
+        this.orders.put(
+                order.exchangeOrderId(),
+                new VenueOrder(
+                        order.exchangeOrderId(),
+                        order.venueId(),
+                        order.filledQty(),
+                        order.filledNotional(),
+                        order.fees(),
+                        true));
+        return true;
+    }
+}

@@ -4,7 +4,7 @@ import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.networking.http.HTTPClient;
 
 /** HTTP clients for exchanges' REST order entry. */
-final class OrderEntryHttpClients {
+public final class OrderEntryHttpClients {
 
     // Order lookups list up to a few hundred orders, which runs to hundreds of KB.
     private static final int READ_BUFFER_BYTES = 1 << 20;
@@ -23,7 +23,7 @@ final class OrderEntryHttpClients {
     private OrderEntryHttpClients() {}
 
     /** Every request waits its turn on {@code rateLimiter}, which the account's other clients share. */
-    static HTTPClient create(final VenueRateLimiter rateLimiter) {
+    public static HTTPClient create(final VenueRateLimiter rateLimiter) {
         return HTTPClient.builder()
                 .withRequestGate(rateLimiter)
                 .captureHeaders(rateLimiter.capturedHeaders())

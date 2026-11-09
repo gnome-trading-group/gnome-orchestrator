@@ -6,10 +6,10 @@ import group.gnometrading.SecurityMaster;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.md.StreamDirectory;
+import group.gnometrading.orchestrator.aeron.AeronPathIdle;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.HostAddress;
-import group.gnometrading.orchestrator.aeron.MarketDataIdle;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.resources.Properties;
@@ -50,10 +50,23 @@ public final class SessionMarketData {
         }
     }
 
-    /** Every listing's book stream and every data-only stream, read from shards into {@code buffer}. */
+    /**
+     * The session's media driver and client: one per host, shared by its market data and its order-gateway link, so
+     * started and closed by the session itself.
+     */
+    public static AeronRuntime aeron(Logger logger, Properties properties) {
+        return AeronRuntime.launch(
+                "session",
+                AgentRuntimeInstaller.pinsHotAgents(properties) ? AeronProfile.LATENCY : AeronProfile.STANDARD,
+                AeronPathIdle.from(properties),
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
+    }
+
+    /** Every listing's book stream and every data-only stream, read from shards over {@code aeron} into {@code buffer}. */
     public static ShardMarketData create(
             Logger logger,
             Properties properties,
+            AeronRuntime aeron,
             List<Listing> listings,
             StreamDirectory streams,
             int[] dataStreams,
@@ -69,11 +82,6 @@ public final class SessionMarketData {
         for (int streamId : dataStreams) {
             feeds.add(new StreamFeed(streamId, "stream " + streamId));
         }
-        AeronRuntime aeron = AeronRuntime.launch(
-                "session",
-                AgentRuntimeInstaller.pinsHotAgents(properties) ? AeronProfile.LATENCY : AeronProfile.STANDARD,
-                MarketDataIdle.from(properties),
-                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
         long startTimeout = properties.getLongProperty("market.data.start.timeout.seconds");
         return new ShardMarketData(
                 logger,

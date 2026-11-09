@@ -28,12 +28,12 @@ public final class AeronRuntime implements AutoCloseable {
      * clearing what a previous run left there, and connects a client to it.
      */
     public static AeronRuntime launch(final String name, final AeronProfile profile, final ErrorHandler errors) {
-        return launch(name, profile, MarketDataIdle.DEFAULT, errors);
+        return launch(name, profile, AeronPathIdle.DEFAULT, errors);
     }
 
     /** As {@link #launch(String, AeronProfile, ErrorHandler)}, its threads parking at most as long as {@code idle}. */
     public static AeronRuntime launch(
-            final String name, final AeronProfile profile, final MarketDataIdle idle, final ErrorHandler errors) {
+            final String name, final AeronProfile profile, final AeronPathIdle idle, final ErrorHandler errors) {
         final MediaDriver.Context context = new MediaDriver.Context()
                 .aeronDirectoryName(directoryFor(name))
                 .dirDeleteOnStart(true)

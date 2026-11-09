@@ -1,5 +1,7 @@
 package group.gnometrading.orchestrator.session.orders;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.account.SessionAccounts;
@@ -10,7 +12,12 @@ import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.md.StreamDirectory;
+import group.gnometrading.orchestrator.aeron.AeronRuntime;
+import group.gnometrading.orchestrator.aeron.HostAddress;
+import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
+import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.SessionTag;
+import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.GatewayRunners;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.orchestrator.session.journal.JournalSource;
@@ -26,14 +33,26 @@ import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
 import group.gnometrading.simulation.latency.LatencySeeds;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.fee.FeeTimeline;
+import group.gnometrading.strings.ViewString;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemNanoClock;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
 /**
  * A session's order entry: per listing, the simulated exchange (paper) or the venue's order gateway (live), and with
@@ -74,6 +93,10 @@ public final class SessionOrders {
     // The live venue gateways' reader and supervisor threads; their order writers are among the session's agents.
     private final List<GatewayRunners> venueGateways = new ArrayList<>();
     private SessionAccounts sessionAccounts;
+    private final AeronRuntime aeron;
+    private GatewayLinks gatewayLinks;
+    private ScheduledExecutorService gatewayControl;
+    private List<GatewayLink> links = List.of();
 
     /**
      * @param exit how a live gateway ends the session; null for a local run, which can't trade live
@@ -85,7 +108,8 @@ public final class SessionOrders {
             EpochNanoClock clock,
             Supplier<RegistryConnection> registry,
             ProcessExit exit,
-            Gateways gateways) {
+            Gateways gateways,
+            AeronRuntime aeron) {
         this.logger = logger;
         this.properties = properties;
         this.securityMaster = securityMaster;
@@ -93,6 +117,7 @@ public final class SessionOrders {
         this.registry = registry;
         this.exit = exit;
         this.gateways = gateways;
+        this.aeron = aeron;
         this.rateLimiters = new VenueRateLimiters(logger, SystemNanoClock.INSTANCE, SystemEpochClock.INSTANCE);
     }
 
@@ -131,6 +156,9 @@ public final class SessionOrders {
             SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
             RoutedBuffers routedBuffers,
             Map<Integer, VenueOrderQuery> venueQueries) {
+        if (gatewayEnabled()) {
+            return wireGateway(listings, orderOutboundBuffer, omsExecReportBuffer, venueQueries);
+        }
         List<GnomeAgent> agents = new ArrayList<>(listings.size());
         if (routedBuffers == null) {
             agents.add(gateway(
@@ -152,6 +180,160 @@ public final class SessionOrders {
         return new Wiring(
                 agents,
                 new ListingRouter(orderOutboundBuffer, perListingOutBufs, perExchangeExecBufs, omsExecReportBuffer));
+    }
+
+    /** Whether the session's live orders go through order gateways rather than its own per-listing gateways. */
+    private boolean gatewayEnabled() {
+        return "live".equals(properties.getStringProperty("mode"))
+                && properties.getBooleanProperty("order.gateway.enabled");
+    }
+
+    /**
+     * Every listing's orders through its venue's order gateway: one link per venue, read and written by one
+     * {@link GatewayClient} straight from the OMS's buffers, with no router. Each listing's venue lookup is still built
+     * here, for startup recovery.
+     */
+    private Wiring wireGateway(
+            List<Listing> listings,
+            SequencedRingBuffer<Intent> orderOutboundBuffer,
+            SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
+            Map<Integer, VenueOrderQuery> venueQueries) {
+        String sessionId = properties.getStringProperty("session.id");
+        Map<Integer, List<long[]>> byExchange = new LinkedHashMap<>();
+        Map<Integer, String> codes = new HashMap<>();
+        for (Listing listing : listings) {
+            int exchangeId = listing.exchange().exchangeId();
+            byExchange
+                    .computeIfAbsent(exchangeId, id -> new ArrayList<>())
+                    .add(new long[] {exchangeId, listing.security().securityId()});
+            codes.put(exchangeId, listing.exchange().exchangeCode().toLowerCase(Locale.ROOT));
+            venueQueries.put(listing.listingId(), outbound(listing).createVenueOrderQuery());
+        }
+        List<GatewayLink> links = new ArrayList<>();
+        for (Map.Entry<Integer, List<long[]>> exchange : byExchange.entrySet()) {
+            links.add(new GatewayLink(
+                    "live:" + codes.get(exchange.getKey()) + ":main",
+                    exchange.getKey(),
+                    sessionAccounts().forExchange(exchange.getKey()).accountId(),
+                    exchange.getValue(),
+                    properties.getIntProperty("order.gateway.pending.messages")));
+        }
+        this.links = links;
+        GatewayClient client = new GatewayClient(
+                links,
+                orderOutboundBuffer,
+                omsExecReportBuffer,
+                new GatewayClient.Identity(
+                        sessionSeq(sessionId),
+                        sessionId,
+                        properties.getIntProperty("strategy.id"),
+                        properties.getIntProperty("order.gateway.cod.timeout.ms"),
+                        properties.getIntProperty("order.gateway.max.queue.ms")),
+                properties.getIntProperty("order.gateway.max.orders"),
+                System::nanoTime,
+                clock);
+        String local = properties.hasProperty("order.gateway.local")
+                ? properties.getStringProperty("order.gateway.local").trim()
+                : "";
+        this.gatewayLinks = new GatewayLinks(
+                logger,
+                aeron.aeron(),
+                local.isEmpty() ? HostAddress.privateIp() : "127.0.0.1",
+                links,
+                local.isEmpty() ? endpointsResolver() : localResolver(local),
+                System::nanoTime);
+        this.gatewayControl = DaemonThreads.scheduler("gateway-links");
+        this.gatewayControl.scheduleWithFixedDelay(gatewayLinks, 0, 100, TimeUnit.MILLISECONDS);
+        logger.logf(LogMessage.DEBUG, "Orders go through %d order gateway(s)", links.size());
+        return new Wiring(List.of(client), null);
+    }
+
+    /** Each listing's own venue orchestrator, built for its venue order lookup only; it sends nothing. */
+    private DefaultOutboundOrchestrator outbound(Listing listing) {
+        return gateways.create(
+                DefaultOutboundOrchestrator.findOutboundOrchestrator(listing),
+                Map.of(
+                        Listing.class,
+                        listing,
+                        VenueRateLimiters.class,
+                        rateLimiters,
+                        FeeTimeline.class,
+                        securityMaster.getFeeTimeline(listing.listingId()),
+                        VenueAccount.class,
+                        sessionAccounts().forExchange(listing.exchange().exchangeId()),
+                        ProcessExit.class,
+                        exit));
+    }
+
+    /** The session's slot at every gateway: its registry {@code session_seq}, never reused. */
+    private long sessionSeq(String sessionId) {
+        ByteBuffer body = registry.get()
+                .get(new ViewString(
+                        "/api/strategy-sessions?sessionId=" + URLEncoder.encode(sessionId, StandardCharsets.UTF_8)));
+        byte[] bytes = new byte[body.remaining()];
+        body.get(bytes);
+        try {
+            JsonNode rows = new ObjectMapper().readTree(bytes);
+            long seq = rows.isEmpty() ? 0 : rows.get(0).path("session_seq").asLong();
+            if (seq <= 0) {
+                throw new IllegalStateException("The registry has no session_seq for session " + sessionId);
+            }
+            return seq;
+        } catch (IOException e) {
+            throw new UncheckedIOException("Unreadable session " + sessionId, e);
+        }
+    }
+
+    /** Where gateways advertise themselves: the service-endpoints table, ready ones only. */
+    private static GatewayLinks.Resolver endpointsResolver() {
+        ServiceEndpoints endpoints = new ServiceEndpoints(DynamoDbClient.builder()
+                .region(Region.of(ServiceEndpoints.REGION))
+                .build());
+        return key -> {
+            ServiceEndpoint endpoint = endpoints.get(
+                    ServiceEndpoint.Kind.ORDER_GATEWAY, key, TimeUnit.MILLISECONDS.toNanos(System.currentTimeMillis()));
+            return endpoint == null || !("READY".equals(endpoint.state()) || "DEGRADED".equals(endpoint.state()))
+                    ? null
+                    : new GatewayLinks.Endpoint(endpoint.privateIp(), endpoint.port());
+        };
+    }
+
+    /** A local run: one gateway at {@code ip:port}, whatever the key. */
+    private static GatewayLinks.Resolver localResolver(String address) {
+        int colon = address.lastIndexOf(':');
+        GatewayLinks.Endpoint endpoint =
+                new GatewayLinks.Endpoint(address.substring(0, colon), Integer.parseInt(address.substring(colon + 1)));
+        return key -> endpoint;
+    }
+
+    /**
+     * Waits until every order gateway link is ready, so the strategy's first orders aren't refused as the session
+     * starts. Without gateways there is nothing to wait for.
+     *
+     * @throws IllegalStateException if they aren't ready in time: a live session that can't reach its gateway can't
+     *     trade
+     */
+    public void awaitGateways(long timeoutNanos) throws InterruptedException {
+        long deadline = System.nanoTime() + timeoutNanos;
+        while (!links.stream().allMatch(link -> link.state == GatewayLink.READY)) {
+            if (System.nanoTime() - deadline > 0) {
+                throw new IllegalStateException("Order gateways not ready: "
+                        + links.stream()
+                                .filter(link -> link.state != GatewayLink.READY)
+                                .map(link -> link.gatewayKey)
+                                .toList());
+            }
+            Thread.sleep(50);
+        }
+    }
+
+    /** Closes the gateway links, after the agent that uses them has stopped. */
+    public void close() throws InterruptedException {
+        if (gatewayControl != null) {
+            gatewayControl.shutdownNow();
+            gatewayControl.awaitTermination(5, TimeUnit.SECONDS);
+            gatewayLinks.close();
+        }
     }
 
     /** The live venue gateways' reader and supervisor threads, closed after the agents and watched by the heartbeat. */

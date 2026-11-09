@@ -1,4 +1,4 @@
-package group.gnometrading.orchestrator.session.orders;
+package group.gnometrading.orchestrator.live.probes;
 
 import group.gnometrading.gateways.venues.polymarket.us.PolymarketUsAuthSigner;
 import group.gnometrading.orchestrator.credentials.PolymarketUsCredentials;
@@ -15,8 +15,7 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 
 /**
- * Phase 0 checks of the Polymarket US retail API, before any gateway code: what its REST answers and private
- * WebSocket actually carry. Credentials come from the dev secret and are never printed.
+ * Checks of the Polymarket US retail API: what its REST answers and private WebSocket actually carry. Credentials come from the dev secret and are never printed.
  *
  * <p>Modes ({@code -Dmode}): {@code get} prints {@code -Dpath}; {@code post} sends {@code -Dbody} to {@code -Dpath};
  * {@code ws} subscribes the private socket to {@code -Dslug} for {@code -Dseconds}.

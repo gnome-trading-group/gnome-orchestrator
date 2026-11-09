@@ -47,6 +47,24 @@ public final class AeronChannels {
                 + "|control-mode=dynamic|tags=" + tag;
     }
 
+    /**
+     * An order gateway's ingress: the gateway subscribes on its fixed port, and each session publishes to it. Both
+     * sides name the term length, as the publisher's sizes the gateway's image of it.
+     */
+    public static String gatewayIngress(final String gatewayIp, final int port) {
+        return "aeron:udp?endpoint=" + gatewayIp + ":" + port + "|term-length=" + GATEWAY_TERM_LENGTH + "|mtu=" + MTU;
+    }
+
+    /** The gateway's replies to one session, sent to the port the session's reply subscription was given. */
+    public static String gatewayReply(final String sessionIp, final int port) {
+        return "aeron:udp?endpoint=" + sessionIp + ":" + port + "|term-length=" + GATEWAY_TERM_LENGTH + "|mtu=" + MTU;
+    }
+
+    /** A session's subscription to its gateway's replies, on a port the driver picks from its receive range. */
+    public static String gatewayReplySubscription(final String sessionIp) {
+        return "aeron:udp?endpoint=" + sessionIp + ":0";
+    }
+
     /** Another stream on the receive port of the subscription created with {@code tag}. */
     public static String tagged(final long tag) {
         return "aeron:udp?tags=" + tag;

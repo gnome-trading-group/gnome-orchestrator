@@ -43,6 +43,28 @@ public final class HostAddress {
         }
     }
 
+    /** An IPv4 address as one int, its first octet in the high byte, as a session's hello carries its address. */
+    public static int pack(final String ipv4) {
+        final String[] octets = ipv4.split("\\.");
+        if (octets.length != 4) {
+            throw new IllegalArgumentException("Not an IPv4 address: " + ipv4);
+        }
+        int packed = 0;
+        for (final String octet : octets) {
+            final int value = Integer.parseInt(octet);
+            if (value < 0 || value > 255) {
+                throw new IllegalArgumentException("Not an IPv4 address: " + ipv4);
+            }
+            packed = (packed << 8) | value;
+        }
+        return packed;
+    }
+
+    public static String unpack(final int packed) {
+        return ((packed >>> 24) & 0xFF) + "." + ((packed >>> 16) & 0xFF) + "." + ((packed >>> 8) & 0xFF) + "."
+                + (packed & 0xFF);
+    }
+
     private static String send(final HttpClient http, final HttpRequest.Builder request) throws Exception {
         final HttpResponse<String> response =
                 http.send(request.timeout(TIMEOUT).build(), HttpResponse.BodyHandlers.ofString());

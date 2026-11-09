@@ -2,8 +2,8 @@ package group.gnometrading.orchestrator.session.marketdata;
 
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.orchestrator.aeron.AeronIngressAgent;
+import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.orchestrator.aeron.AeronReservedValues;
-import group.gnometrading.orchestrator.aeron.MarketDataPathAgent;
 import group.gnometrading.schemas.MessageHeaderDecoder;
 import group.gnometrading.schemas.MessageSchema;
 import group.gnometrading.schemas.StreamHeader;
@@ -43,7 +43,7 @@ import org.agrona.concurrent.UnsafeBuffer;
  *       image's position with the publication's, and fixed by subscribing again, which joins at the live position.
  * </ul>
  */
-public final class ShardFeedAgent implements MarketDataPathAgent {
+public final class ShardFeedAgent implements AeronPathAgent {
 
     static final long CHECK_EVERY_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
     static final long SHARD_SILENT_NANOS = TimeUnit.SECONDS.toNanos(5);

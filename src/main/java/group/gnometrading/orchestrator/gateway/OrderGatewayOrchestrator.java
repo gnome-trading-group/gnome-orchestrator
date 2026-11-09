@@ -1,0 +1,633 @@
+package group.gnometrading.orchestrator.gateway;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import group.gnometrading.RegistryConnection;
+import group.gnometrading.SecurityMaster;
+import group.gnometrading.account.GatewayAccounts;
+import group.gnometrading.account.VenueAccount;
+import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
+import group.gnometrading.concurrent.GnomeAgent;
+import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.gateways.account.reader.AccountReport;
+import group.gnometrading.logging.AsyncLogger;
+import group.gnometrading.logging.LogMessage;
+import group.gnometrading.logging.Logger;
+import group.gnometrading.orchestrator.aeron.AeronChannels;
+import group.gnometrading.orchestrator.aeron.AeronPathIdle;
+import group.gnometrading.orchestrator.aeron.AeronProfile;
+import group.gnometrading.orchestrator.aeron.AeronRuntime;
+import group.gnometrading.orchestrator.aeron.AeronStreamIds;
+import group.gnometrading.orchestrator.aeron.HostAddress;
+import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
+import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
+import group.gnometrading.orchestrator.aws.AwsModule;
+import group.gnometrading.orchestrator.aws.SecretCache;
+import group.gnometrading.orchestrator.aws.SecurityMasterModule;
+import group.gnometrading.orchestrator.di.Named;
+import group.gnometrading.orchestrator.di.Orchestrator;
+import group.gnometrading.orchestrator.di.Provides;
+import group.gnometrading.orchestrator.di.Singleton;
+import group.gnometrading.orchestrator.gateway.accounts.GatewayAccount;
+import group.gnometrading.orchestrator.gateway.accounts.GatewaySettings;
+import group.gnometrading.orchestrator.gateway.accounts.LaneAdmissions;
+import group.gnometrading.orchestrator.gateway.accounts.LaneLiveness;
+import group.gnometrading.orchestrator.gateway.accounts.VenueAccounts;
+import group.gnometrading.orchestrator.gateway.control.GatewayControl;
+import group.gnometrading.orchestrator.gateway.control.SessionRegistry;
+import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
+import group.gnometrading.orchestrator.gateway.core.GatewaySession;
+import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
+import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
+import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
+import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
+import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
+import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
+import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
+import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
+import group.gnometrading.orchestrator.runtime.DaemonThreads;
+import group.gnometrading.orchestrator.runtime.HealthCheckServer;
+import group.gnometrading.orchestrator.runtime.ProcessExit;
+import group.gnometrading.resources.Properties;
+import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.fee.FeeTimeline;
+import group.gnometrading.strings.ViewString;
+import group.gnometrading.utils.CauseChain;
+import io.aeron.Subscription;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.InetAddress;
+import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.agrona.ErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.EpochNanoClock;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.SystemEpochNanoClock;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+
+/**
+ * An order gateway ({@code GATEWAY_KEY}): one process per venue holding that venue's trading accounts for every live
+ * session, so the accounts are traded from one place. Builds and starts each account the registry assigned it, then
+ * takes sessions over Aeron on its ingress port: {@link GatewayIngress} in, {@link GatewayEgress} out, and
+ * {@link GatewayControl} for hellos, liveness and its endpoint record. On SIGTERM it stops as planned: every session's
+ * orders cancelled and a goodbye sent before anything closes.
+ */
+public class OrderGatewayOrchestrator extends Orchestrator {
+
+    private static final int HEALTH_PORT = 8080;
+    private static final int CONTROL_QUEUE = 1024;
+    private static final int REJECT_QUEUE = 4096;
+    // Of ECS's stop timeout: this long for the lanes to empty after every order is cancelled.
+    private static final long STOP_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
+    private static final long CONTROL_STALL_NANOS = TimeUnit.MINUTES.toNanos(1);
+
+    @Provides
+    public final EpochNanoClock provideEpochNanoClock() {
+        return new SystemEpochNanoClock();
+    }
+
+    @Provides
+    public final EpochClock provideEpochClock() {
+        return SystemEpochClock.INSTANCE;
+    }
+
+    @Provides
+    @Singleton
+    public final Logger provideLogger(final EpochNanoClock clock) {
+        return new AsyncLogger(clock);
+    }
+
+    /** The service-endpoints table, in the control plane's one region wherever the gateway runs. */
+    @Provides
+    @Singleton
+    @Named("ENDPOINTS")
+    public final DynamoDbClient provideEndpointsDynamo(@Named("AWS_PROFILE") final String awsProfile) {
+        final var builder = DynamoDbClient.builder().region(Region.of(ServiceEndpoints.REGION));
+        if (awsProfile != null && !awsProfile.isEmpty()) {
+            builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
+        }
+        return builder.build();
+    }
+
+    @Override
+    public final void configure() {
+        install(new SecurityMasterModule(), new AwsModule());
+        final Logger logger = getInstance(Logger.class);
+        final Properties properties = getInstance(Properties.class);
+        final AeronPathIdle idle = AeronPathIdle.forGateway(properties);
+        AgentRuntimeInstaller.installStandard(logger, idle);
+
+        final GatewaySettings settings = GatewaySettings.of(properties);
+        final ProcessExit exit = exit(logger);
+        final List<GatewayAccount> accounts = buildAccounts(settings, properties, logger, exit);
+        final String ip = HostAddress.privateIp();
+        if (ip == null) {
+            throw new IllegalStateException("No private IP for sessions to reach this gateway on");
+        }
+        final int port = properties.getIntProperty("gateway.ingress.port");
+        final AeronRuntime aeron = AeronRuntime.launch(
+                "gateway",
+                AeronProfile.GATEWAY,
+                idle,
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
+        final Subscription ingressSubscription =
+                aeron.aeron().addSubscription(AeronChannels.gatewayIngress(ip, port), AeronStreamIds.GATEWAY_INGRESS);
+
+        final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
+        final GatewayStatus status = new GatewayStatus(wallClock.nanoTime());
+        final SessionTable sessions = new SessionTable();
+        final ManyToOneRingBuffer<GatewayMessage> toControl =
+                new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, CONTROL_QUEUE);
+        final ManyToOneRingBuffer<GatewayMessage> toEgress =
+                new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, CONTROL_QUEUE);
+        final ManyToOneRingBuffer<AccountReport> rejects =
+                new ManyToOneRingBuffer<>(AccountReport[]::new, AccountReport::new, REJECT_QUEUE);
+        final List<ManyToOneRingBuffer<AccountReport>> reportRings = new ArrayList<>();
+        final Map<Integer, AccountLink> links = new HashMap<>();
+        for (final GatewayAccount account : accounts) {
+            reportRings.add(account.reports());
+            links.put(account.accountId(), account);
+        }
+        reportRings.add(rejects);
+
+        final GatewayJournal journal = journal(logger, properties, settings, wallClock, accounts.size());
+        final List<LaneAdmissions> admissions = admissions(accounts, journal);
+        final GatewayIngress ingress = new GatewayIngress(
+                ingressSubscription,
+                sessions,
+                status,
+                new GatewayRejects(rejects, wallClock),
+                toControl,
+                System::nanoTime,
+                journal == null ? JournalRecorder.NONE : journal.ingress());
+        final GatewayEgress egress = new GatewayEgress(
+                sessions,
+                status,
+                reportRings,
+                toEgress,
+                System::nanoTime,
+                wallClock,
+                journal == null ? JournalRecorder.NONE : journal.egress());
+        final SessionRegistry registry =
+                new SessionRegistry(SessionRegistry.over(getInstance(RegistryConnection.class)));
+        final GatewayControl.Listings listings = listings(getInstance(SecurityMaster.class));
+        final GatewayRestart.Result restart = restart(logger, properties, settings, accounts, listings, registry);
+        final GatewayControl control = new GatewayControl(
+                logger,
+                sessions,
+                status,
+                links,
+                toControl,
+                toEgress,
+                registry,
+                listings,
+                GatewayControl.Replies.over(aeron.aeron()),
+                advertiser(logger, settings, properties, ip, port),
+                System::nanoTime,
+                properties.getIntProperty("gateway.replay.reports"),
+                idle(properties, settings),
+                new GatewayControl.Restart(
+                        restart.sessionsFile(),
+                        restart.sessions(),
+                        GatewayControl.Restart.HELLO_GRACE_NANOS,
+                        restart.loaded()));
+
+        for (final GatewayAccount account : accounts) {
+            account.start();
+            logger.logf(
+                    LogMessage.DEBUG,
+                    "Gateway %s: started %s (%s)",
+                    settings.key(),
+                    account.name(),
+                    account.account().label());
+        }
+        final GnomeAgentRunner journalRunner = journal == null
+                ? null
+                : start(
+                        journal,
+                        error -> logger.logf(
+                                LogMessage.UNKNOWN_ERROR, "Gateway journal failed: %s", CauseChain.of(error)));
+        final GnomeAgentRunner egressRunner = start(egress, fatal(logger, exit, "egress"));
+        final GnomeAgentRunner ingressRunner = start(ingress, fatal(logger, exit, "ingress"));
+        final GnomeAgentRunner controlRunner = start(
+                control,
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway control failed: %s", CauseChain.of(error)));
+        logger.logf(LogMessage.DEBUG, "Gateway %s: taking sessions on %s:%d", settings.key(), ip, port);
+        reportAdmissions(logger, accounts, admissions);
+        reportDrops(logger, ingress, egress, sessions);
+        final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, controlRunner, accounts)
+                .start();
+
+        Runtime.getRuntime()
+                .addShutdownHook(new Thread(
+                        () -> {
+                            // Threads are about to stop on purpose.
+                            watchdog.interrupt();
+                            stop(logger, control, controlRunner, ingressRunner, egressRunner, accounts, aeron);
+                            restart.logs().forEach(OwnershipLog::close);
+                            if (journalRunner != null) {
+                                close(logger, journalRunner);
+                                try {
+                                    journal.close();
+                                } catch (Exception e) {
+                                    logger.logf(
+                                            LogMessage.UNKNOWN_ERROR,
+                                            "Failed to close the journal: %s",
+                                            CauseChain.of(e));
+                                }
+                            }
+                        },
+                        "gateway-shutdown"));
+        serveHealth(accounts);
+    }
+
+    /** Each lane's decisions, journaled when the journal is on; set before any lane starts. */
+    private static List<LaneAdmissions> admissions(final List<GatewayAccount> accounts, final GatewayJournal journal) {
+        final List<LaneAdmissions> admissions = new ArrayList<>();
+        for (int i = 0; i < accounts.size(); i++) {
+            final GatewayAccount account = accounts.get(i);
+            final JournalRecorder recorder = journal == null ? JournalRecorder.NONE : journal.lane(i);
+            final LaneAdmissions lane = new LaneAdmissions(account.accountId(), recorder, System::nanoTime);
+            account.lane().admissions(lane);
+            admissions.add(lane);
+        }
+        return admissions;
+    }
+
+    /**
+     * Each minute, per account: what its lane sent and how long requests waited for the budget, and the venue's 429s,
+     * which the budget exists to prevent.
+     */
+    private static void reportAdmissions(
+            final Logger logger, final List<GatewayAccount> accounts, final List<LaneAdmissions> admissions) {
+        final long[] refusalsSeen = new long[accounts.size()];
+        DaemonThreads.scheduler("gateway-admissions")
+                .scheduleAtFixedRate(
+                        () -> {
+                            final long now = System.nanoTime();
+                            for (int i = 0; i < accounts.size(); i++) {
+                                final GatewayAccount account = accounts.get(i);
+                                final String minute = admissions.get(i).lastMinute(now);
+                                final long refusals = account.venueRefusals();
+                                if (refusals != refusalsSeen[i]) {
+                                    logger.logf(
+                                            LogMessage.VENUE_RATE_LIMITED,
+                                            "Gateway %s: the venue answered 429 %d times in the last minute (%d in all)",
+                                            account.name(),
+                                            refusals - refusalsSeen[i],
+                                            refusals);
+                                    refusalsSeen[i] = refusals;
+                                }
+                                if (minute != null) {
+                                    logger.logf(LogMessage.DEBUG, "Gateway %s: %s", account.name(), minute);
+                                }
+                            }
+                        },
+                        1,
+                        1,
+                        TimeUnit.MINUTES);
+    }
+
+    /**
+     * Each minute, anything the gateway dropped since the last: none of it should happen, and each is invisible to
+     * the sessions it would have reached.
+     */
+    private static void reportDrops(
+            final Logger logger,
+            final GatewayIngress ingress,
+            final GatewayEgress egress,
+            final SessionTable sessions) {
+        final long[] seen = new long[6];
+        DaemonThreads.scheduler("gateway-drops")
+                .scheduleAtFixedRate(
+                        () -> {
+                            long untracked = 0;
+                            for (final GatewaySession session : sessions.all()) {
+                                untracked += session.totals.untracked();
+                            }
+                            final long[] now = {
+                                ingress.unlinked(),
+                                ingress.fragmented(),
+                                ingress.controlFull(),
+                                egress.unrouted(),
+                                egress.unnumberedFull(),
+                                untracked
+                            };
+                            if (!Arrays.equals(now, seen)) {
+                                logger.logf(
+                                        LogMessage.UNKNOWN_ERROR,
+                                        "Gateway dropped, since the last minute: %d orders from unlinked images, %d"
+                                                + " fragmented messages, %d session messages for a full control ring,"
+                                                + " %d reports for no session, %d control messages for a full"
+                                                + " session queue, %d orders untracked, so missing from a resync",
+                                        now[0] - seen[0],
+                                        now[1] - seen[1],
+                                        now[2] - seen[2],
+                                        now[3] - seen[3],
+                                        now[4] - seen[4],
+                                        now[5] - seen[5]);
+                                System.arraycopy(now, 0, seen, 0, seen.length);
+                            }
+                        },
+                        1,
+                        1,
+                        TimeUnit.MINUTES);
+    }
+
+    private List<GatewayAccount> buildAccounts(
+            final GatewaySettings settings, final Properties properties, final Logger logger, final ProcessExit exit) {
+        final VenueAccounts builder = new VenueAccounts(new VenueAccounts.Context(
+                logger,
+                properties,
+                getInstance(SecretCache.class)::get,
+                settings,
+                getInstance(EpochClock.class),
+                getInstance(EpochNanoClock.class),
+                exit));
+        final List<GatewayAccount> accounts = new ArrayList<>();
+        for (final VenueAccount account :
+                GatewayAccounts.fetch(getInstance(RegistryConnection.class), settings.key())) {
+            try {
+                accounts.add(builder.build(settings.venue(), account));
+            } catch (Exception e) {
+                throw new IllegalStateException("Can't build account " + account.label() + ": " + e.getMessage(), e);
+            }
+        }
+        if (accounts.isEmpty()) {
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway %s holds no accounts", settings.key());
+        }
+        return accounts;
+    }
+
+    /** Takes back the previous process's sessions and orders, before any thread starts. */
+    private static GatewayRestart.Result restart(
+            final Logger logger,
+            final Properties properties,
+            final GatewaySettings settings,
+            final List<GatewayAccount> accounts,
+            final GatewayControl.Listings listings,
+            final SessionRegistry registry) {
+        final Path directory = Path.of(
+                properties.getStringProperty("gateway.state.directory"),
+                settings.key().replace(':', '-'));
+        try {
+            return GatewayRestart.recover(
+                    logger,
+                    directory,
+                    (long) properties.getIntProperty("gateway.ownership.log.mb") * 1024L * 1024L,
+                    accounts,
+                    listings,
+                    registry,
+                    System.nanoTime(),
+                    System.currentTimeMillis());
+        } catch (IOException e) {
+            throw new IllegalStateException("Can't read the gateway's state in " + directory, e);
+        }
+    }
+
+    /** Null when the journal is off. */
+    private static GatewayJournal journal(
+            final Logger logger,
+            final Properties properties,
+            final GatewaySettings settings,
+            final EpochNanoClock wallClock,
+            final int lanes) {
+        if (!properties.getBooleanProperty("journal.enabled")) {
+            return null;
+        }
+        // One directory per start, so a restart never writes over the segments of the run before.
+        final Path directory = Path.of(
+                properties.getStringProperty("journal.directory"),
+                "gateway-" + settings.key().replace(':', '-'),
+                Long.toString(TimeUnit.NANOSECONDS.toMillis(wallClock.nanoTime())));
+        try {
+            return new GatewayJournal(
+                    logger,
+                    directory,
+                    (long) properties.getIntProperty("journal.segment.size.mb") * 1024L * 1024L,
+                    TimeUnit.SECONDS.toNanos(properties.getIntProperty("journal.segment.interval.seconds")),
+                    System::nanoTime,
+                    lanes);
+        } catch (IOException e) {
+            throw new IllegalStateException("Can't open the gateway journal in " + directory, e);
+        }
+    }
+
+    private static Watchdog watchdog(
+            final Logger logger,
+            final Properties properties,
+            final ProcessExit exit,
+            final GnomeAgentRunner ingress,
+            final GnomeAgentRunner egress,
+            final GnomeAgentRunner control,
+            final List<GatewayAccount> accounts) {
+        final long stall = TimeUnit.MILLISECONDS.toNanos(properties.getLongProperty("gateway.watchdog.stall.millis"));
+        final List<Watchdog.CheckIn> checkIns = new ArrayList<>();
+        checkIns.add(new Watchdog.CheckIn("ingress", ingress::cycles, () -> false, stall));
+        checkIns.add(new Watchdog.CheckIn("egress", egress::cycles, () -> false, stall));
+        // The control thread waits on the registry and the venue now and then; stuck for a minute, liveness and hellos
+        // have stopped.
+        checkIns.add(new Watchdog.CheckIn("control", control::cycles, () -> false, CONTROL_STALL_NANOS));
+        for (final GatewayAccount account : accounts) {
+            checkIns.add(new Watchdog.CheckIn(account.name() + " lane", account::lanePasses, () -> false, stall));
+            checkIns.add(new Watchdog.CheckIn(
+                    account.name() + " reader", account::readerPasses, account::readerPaused, stall));
+        }
+        return new Watchdog(logger, checkIns, System::nanoTime, exit);
+    }
+
+    /**
+     * Stopping when idle: the exit is the planned stop of the shutdown hook. Off while {@code gateway.idle.minutes} is
+     * 0, as something must also stop the gateway being started again.
+     */
+    private GatewayControl.Idle idle(final Properties properties, final GatewaySettings settings) {
+        final long minutes = properties.getLongProperty("gateway.idle.minutes");
+        if (minutes <= 0) {
+            return GatewayControl.Idle.NEVER;
+        }
+        final RegistryConnection registry = getInstance(RegistryConnection.class);
+        final ObjectMapper mapper = new ObjectMapper();
+        return new GatewayControl.Idle(
+                TimeUnit.MINUTES.toNanos(minutes),
+                () -> wantedAtMillis(registry, mapper, settings.key()),
+                System::currentTimeMillis,
+                // On a thread of its own: the shutdown hook's planned stop closes the control thread that calls this.
+                () -> new Thread(() -> System.exit(0), "gateway-idle-exit").start());
+    }
+
+    /** When a session last asked for the gateway, from its registry row; 0 if never. */
+    private static long wantedAtMillis(
+            final RegistryConnection registry, final ObjectMapper mapper, final String gatewayKey) {
+        final ByteBuffer body = registry.get(
+                new ViewString("/api/gateways?gatewayKey=" + URLEncoder.encode(gatewayKey, StandardCharsets.UTF_8)));
+        final byte[] bytes = new byte[body.remaining()];
+        body.get(bytes);
+        try {
+            final JsonNode rows = mapper.readTree(bytes);
+            final JsonNode wanted = rows.isEmpty() ? null : rows.get(0).get("wanted_at");
+            return wanted == null || wanted.isNull()
+                    ? 0
+                    : OffsetDateTime.parse(wanted.asText()).toInstant().toEpochMilli();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static GatewayControl.Listings listings(final SecurityMaster securityMaster) {
+        return new GatewayControl.Listings() {
+            @Override
+            public Listing listing(final int exchangeId, final long securityId) {
+                return securityMaster.getListing(exchangeId, (int) securityId);
+            }
+
+            @Override
+            public FeeTimeline fees(final Listing listing) {
+                return securityMaster.getFeeTimeline(listing.listingId());
+            }
+        };
+    }
+
+    /** Writes where sessions reach the gateway and its state; never throws, as the next write comes 15 s later. */
+    private GatewayControl.Advertiser advertiser(
+            final Logger logger,
+            final GatewaySettings settings,
+            final Properties properties,
+            final String ip,
+            final int port) {
+        final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "ENDPOINTS"));
+        final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
+        final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
+        final String instance = instance();
+        final String version = properties.getStringProperty("orchestrator.version");
+        return state -> {
+            try {
+                endpoints.put(new ServiceEndpoint(
+                        ServiceEndpoint.Kind.ORDER_GATEWAY,
+                        settings.key(),
+                        instance,
+                        region,
+                        ip,
+                        port,
+                        state.name(),
+                        version,
+                        wallClock.nanoTime()));
+            } catch (Exception e) {
+                logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to write the gateway's endpoint: %s", CauseChain.of(e));
+            }
+        };
+    }
+
+    private static String instance() {
+        try {
+            return InetAddress.getLocalHost().getHostName();
+        } catch (IOException e) {
+            return "unknown";
+        }
+    }
+
+    /**
+     * The planned stop: control's thread stopped, then every session's orders cancelled and a goodbye sent while
+     * ingress and egress still run (cancels reach the lanes, reports and goodbyes the sessions), then everything closed,
+     * the accounts last before the media driver.
+     */
+    @SuppressWarnings("checkstyle:ParameterNumber")
+    private static void stop(
+            final Logger logger,
+            final GatewayControl control,
+            final GnomeAgentRunner controlRunner,
+            final GnomeAgentRunner ingressRunner,
+            final GnomeAgentRunner egressRunner,
+            final List<GatewayAccount> accounts,
+            final AeronRuntime aeron) {
+        close(logger, controlRunner);
+        try {
+            if (!control.stop(STOP_TIMEOUT_NANOS)) {
+                logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway stopping with orders still working");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        close(logger, ingressRunner);
+        close(logger, egressRunner);
+        for (final GatewayAccount account : accounts) {
+            account.close();
+        }
+        aeron.close();
+        logger.logf(LogMessage.DEBUG, "Gateway stopped");
+    }
+
+    private static GnomeAgentRunner start(final GnomeAgent agent, final ErrorHandler errors) {
+        final GnomeAgentRunner runner = new GnomeAgentRunner(agent, errors);
+        GnomeAgentRunner.startOnThread(runner);
+        return runner;
+    }
+
+    private static void close(final Logger logger, final GnomeAgentRunner runner) {
+        try {
+            runner.close();
+        } catch (Exception e) {
+            logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Failed to stop %s: %s",
+                    runner.getAgent().roleName(),
+                    e);
+        }
+    }
+
+    private static ErrorHandler fatal(final Logger logger, final ProcessExit exit, final String what) {
+        return error -> {
+            logger.logf(LogMessage.FATAL_ERROR_EXITING, "Gateway %s failed: %s", what, CauseChain.of(error));
+            exit.exit(1, error);
+        };
+    }
+
+    private static void serveHealth(final List<GatewayAccount> accounts) {
+        final List<LaneLiveness> lanes = new ArrayList<>();
+        for (final GatewayAccount account : accounts) {
+            lanes.add(new LaneLiveness(account::lanePasses, System::nanoTime, LaneLiveness.STALL_NANOS));
+        }
+        try {
+            new HealthCheckServer(HEALTH_PORT, () -> lanes.stream().allMatch(LaneLiveness::getAsBoolean)).start();
+        } catch (IOException e) {
+            throw new IllegalStateException("Can't serve health checks on " + HEALTH_PORT, e);
+        }
+    }
+
+    /**
+     * Logs why and halts, once, without the shutdown hook: its planned stop would cancel every order, while a gateway
+     * that failed should leave them resting for its restart to take back (and a stuck thread could keep the planned stop
+     * from ever finishing). On a thread of its own, so the failing agent's thread isn't the one halting.
+     */
+    private static ProcessExit exit(final Logger logger) {
+        final AtomicBoolean exiting = new AtomicBoolean();
+        return (status, cause) -> {
+            logger.logf(LogMessage.FATAL_ERROR_EXITING, "Gateway exiting: %s", CauseChain.of(cause));
+            if (exiting.compareAndSet(false, true)) {
+                new Thread(
+                                () -> {
+                                    if (logger instanceof AsyncLogger async) {
+                                        async.close();
+                                    }
+                                    Runtime.getRuntime().halt(status);
+                                },
+                                "gateway-exit")
+                        .start();
+            }
+        };
+    }
+}
