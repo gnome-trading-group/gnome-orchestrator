@@ -22,6 +22,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -242,6 +243,9 @@ class AeronTransportTest {
                 "the rejoined subscriber to read live values");
     }
 
+    // A session's side starved of CPU for longer than the 128 KB window holds (about 1.3 s at this rate) back-pressures
+    // the shard whether it just joined or not, so a busy machine fails this whatever joining costs.
+    @Tag("timing")
     @Test
     void aSessionJoiningAPublishingShardIsNeverBackPressured() throws Exception {
         final Aeron shard = host("shard");

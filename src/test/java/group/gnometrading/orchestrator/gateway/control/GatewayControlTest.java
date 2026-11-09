@@ -10,6 +10,7 @@ import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.account.reader.PublishedMap;
+import group.gnometrading.gateways.orders.CrossMarket;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.NullLogger;
@@ -20,11 +21,15 @@ import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.aeron.HostAddress;
 import group.gnometrading.orchestrator.gateway.FakeOrderQuery;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.CrossKey;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
+import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
@@ -119,6 +124,7 @@ class GatewayControlTest {
     private volatile boolean idled;
     private final List<Received> received = new ArrayList<>();
     private GatewayIngress ingress;
+    private CrossIndex cross;
     private GatewayEgress egress;
     private GatewayControl control;
     private Listing listing;
@@ -146,6 +152,11 @@ class GatewayControlTest {
         }
 
         @Override
+        public int exchangeId() {
+            return 7;
+        }
+
+        @Override
         public ManyToOneRingBuffer<LaneCommand> commands() {
             return this.commands;
         }
@@ -169,8 +180,10 @@ class GatewayControlTest {
         public AccountLink.Markets markets() {
             return new AccountLink.Markets() {
                 @Override
-                public void load(final Listing listing, final FeeTimeline fees) {
+                public CrossKey load(final Listing listing, final FeeTimeline fees) {
                     TestAccount.this.loads.add(listing.listingId());
+                    return CrossKey.of(
+                            listing.exchange().exchangeId(), new CrossMarket(listing.exchangeSecurityId(), false));
                 }
 
                 @Override
@@ -185,6 +198,7 @@ class GatewayControlTest {
     void setUp() throws Exception {
         this.sessionsFile = SessionsFile.open(
                 this.stateDirectory.resolve("sessions.jsonl"), System.currentTimeMillis(), new ArrayList<>());
+        this.cross = new CrossIndex(new CrossKeys(), CrossIndex.Mode.ENFORCE, 1024, 1024);
         this.ingress = new GatewayIngress(
                 this.ingressSubscription,
                 this.sessions,
@@ -192,7 +206,9 @@ class GatewayControlTest {
                 new GatewayRejects(this.rejectRing, new SystemEpochNanoClock()),
                 this.toControl,
                 System::nanoTime,
-                JournalRecorder.NONE);
+                JournalRecorder.NONE,
+                this.cross,
+                Kills.none());
         this.egress = new GatewayEgress(
                 this.sessions,
                 this.status,
@@ -200,7 +216,8 @@ class GatewayControlTest {
                 this.toEgress,
                 System::nanoTime,
                 new SystemEpochNanoClock(),
-                JournalRecorder.NONE);
+                JournalRecorder.NONE,
+                this.cross);
         this.listing = new Listing(
                 LISTING_ID,
                 new Exchange(EXCHANGE_ID, "KALSHI", "KALSHI", "global"),
@@ -292,7 +309,7 @@ class GatewayControlTest {
     }
 
     @Test
-    void anAcceptedSessionIsIntroducedToItsLaneWithItsWeightAndWaitBeforeAnyOrder() throws Exception {
+    void anAcceptedSessionIsIntroducedToItsLaneWithItsWeightWaitAndCapsBeforeAnyOrder() throws Exception {
         awaitReady();
         this.registryRecord.set(new SessionRegistry.SessionRecord(
                 SLOT, "RUNNING", STRATEGY_ID, "live", Set.of(LISTING_ID), Map.of(EXCHANGE_ID, ACCOUNT_ID), 3));
@@ -307,6 +324,8 @@ class GatewayControlTest {
         assertEquals(SLOT, introduction.sessionSlot);
         assertEquals(3, introduction.weight, "the strategy's weight from the registry");
         assertEquals(TimeUnit.MILLISECONDS.toNanos(2_000), introduction.maxQueueNanos, "the hello's wait");
+        assertEquals(30, introduction.maxOpenOrders, "the caps it asked for, which the lane bounds");
+        assertEquals(5, introduction.maxNewPerSecond);
     }
 
     @Test
@@ -788,7 +807,9 @@ class GatewayControlTest {
                 .lastReportEpoch(lastReportSeq > 0 ? 99 : 0)
                 .codTimeoutMs((int) COD_MILLIS)
                 .maxQueueMs(2_000)
-                .openOrderPages(pages);
+                .openOrderPages(pages)
+                .maxOpenOrders(30)
+                .maxNewPerSecond(5);
         hello.listingsCount(1).next().exchangeId(EXCHANGE_ID).securityId(SECURITY_ID);
         offer(buffer, MessageHeaderEncoder.ENCODED_LENGTH + hello.encodedLength());
     }

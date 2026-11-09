@@ -80,7 +80,29 @@ public final class GatewayClient implements AeronPathAgent {
     private static final int MAX_MESSAGE = 1024;
 
     /** Who the session is, as its hello says. */
-    record Identity(long sessionSeq, String sessionId, int strategyId, int codTimeoutMs, int maxQueueMs) {}
+    /**
+     * Who the session is, and what it asks of the gateway: its cancel-on-disconnect timeout, how long its orders may
+     * wait for budget, and caps on what it may hold and send (0 for the gateway's own, which also bound what it asks).
+     */
+    record Identity(
+            long sessionSeq,
+            String sessionId,
+            int strategyId,
+            int codTimeoutMs,
+            int maxQueueMs,
+            int maxOpenOrders,
+            int maxNewPerSecond) {
+
+        /** Asking for no caps of its own: the gateway's apply. */
+        Identity(
+                final long sessionSeq,
+                final String sessionId,
+                final int strategyId,
+                final int codTimeoutMs,
+                final int maxQueueMs) {
+            this(sessionSeq, sessionId, strategyId, codTimeoutMs, maxQueueMs, 0, 0);
+        }
+    }
 
     private final GatewayLink[] links;
     private final Int2ObjectHashMap<GatewayLink> byExchange = new Int2ObjectHashMap<>();
@@ -395,7 +417,9 @@ public final class GatewayClient implements AeronPathAgent {
                 .lastReportEpoch(link.epoch)
                 .codTimeoutMs(this.identity.codTimeoutMs())
                 .maxQueueMs(this.identity.maxQueueMs())
-                .openOrderPages(pages);
+                .openOrderPages(pages)
+                .maxOpenOrders(this.identity.maxOpenOrders())
+                .maxNewPerSecond(this.identity.maxNewPerSecond());
         final SessionHelloEncoder.ListingsEncoder listings = this.hello.listingsCount(link.listings.size());
         for (int i = 0; i < link.listings.size(); i++) {
             final long[] listing = link.listings.get(i);

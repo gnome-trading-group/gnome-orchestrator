@@ -86,6 +86,24 @@ class OwnershipLogTest {
     }
 
     @Test
+    void anAmendedOrderComesBackAtItsNewTermsKeepingItsVenueId() throws Exception {
+        try (OwnershipLog log = OwnershipLog.open(path(), SIZE, ctx -> {})) {
+            final OrderContext order = order(42, 1);
+            log.added(order);
+            venueId(order, "v-1");
+            log.venueIdLearned(order);
+            order.limitPrice = 350_000_000;
+            order.originalQty = 2_000_000;
+            log.amended(order);
+        }
+        final List<OrderContext> open = OwnershipLog.read(path());
+        assertEquals(1, open.size());
+        assertEquals(350_000_000, open.get(0).limitPrice);
+        assertEquals(2_000_000, open.get(0).originalQty);
+        assertEquals("v-1", new String(open.get(0).exchangeOrderIdBytes, 0, open.get(0).exchangeOrderIdLength));
+    }
+
+    @Test
     void aRecordTornOrDamagedEndsTheLogThereAndNothingAfterItCounts() throws Exception {
         try (OwnershipLog log = OwnershipLog.open(path(), SIZE, ctx -> {})) {
             log.added(order(42, 1));

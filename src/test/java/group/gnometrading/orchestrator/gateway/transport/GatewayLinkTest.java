@@ -8,6 +8,7 @@ import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.account.reader.PublishedMap;
+import group.gnometrading.gateways.orders.CrossMarket;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
@@ -15,10 +16,13 @@ import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.gateway.FakeOrderQuery;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.CrossKey;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
+import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
@@ -86,6 +90,7 @@ class GatewayLinkTest {
             new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16);
     private final ManyToOneRingBuffer<GatewayMessage> fromControl =
             new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16);
+    private final CrossIndex cross = new CrossIndex(new CrossKeys(), CrossIndex.Mode.ENFORCE, 1024, 1024);
     private final GatewayIngress ingress = new GatewayIngress(
             this.ingressSubscription,
             this.sessions,
@@ -93,7 +98,9 @@ class GatewayLinkTest {
             new GatewayRejects(this.rejectRing, new SystemEpochNanoClock()),
             this.toControl,
             System::nanoTime,
-            JournalRecorder.NONE);
+            JournalRecorder.NONE,
+            this.cross,
+            Kills.none());
     private final GatewayEgress egress = new GatewayEgress(
             this.sessions,
             this.status,
@@ -101,7 +108,8 @@ class GatewayLinkTest {
             this.fromControl,
             System::nanoTime,
             new SystemEpochNanoClock(),
-            JournalRecorder.NONE);
+            JournalRecorder.NONE,
+            this.cross);
     private final List<Received> received = new ArrayList<>();
     private final FragmentHandler replyHandler = (buffer, offset, length, header) -> {
         final UnsafeBuffer copy = new UnsafeBuffer(new byte[length]);
@@ -120,6 +128,11 @@ class GatewayLinkTest {
         @Override
         public int accountId() {
             return 5;
+        }
+
+        @Override
+        public int exchangeId() {
+            return 7;
         }
 
         @Override
@@ -144,7 +157,8 @@ class GatewayLinkTest {
 
         @Override
         public AccountLink.Markets markets() {
-            return (listing, fees) -> {};
+            return (listing, fees) ->
+                    CrossKey.of(listing.exchange().exchangeId(), new CrossMarket(listing.exchangeSecurityId(), false));
         }
     }
 

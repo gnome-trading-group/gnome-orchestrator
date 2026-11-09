@@ -59,6 +59,8 @@ final class HelloPages {
                 this.hello.lastReportEpoch(),
                 TimeUnit.MILLISECONDS.toNanos(this.hello.codTimeoutMs()),
                 TimeUnit.MILLISECONDS.toNanos(this.hello.maxQueueMs()),
+                this.hello.maxOpenOrders(),
+                this.hello.maxNewPerSecond(),
                 this.hello.openOrderPages(),
                 listings,
                 this.nanoClock.getAsLong(),

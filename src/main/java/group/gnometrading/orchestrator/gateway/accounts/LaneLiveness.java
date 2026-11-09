@@ -5,7 +5,8 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 /**
- * Whether an account's lane is still running, read by its Polymarket Intl heartbeat keeper before every beat: the lane's
+ * Whether an account's lane is still running, read by its venue heartbeat keeper (where the venue has one) before every
+ * beat: the lane's
  * runner counts its passes, idle or not, so passes that stop moving mean the lane is stuck or gone, and the keeper then
  * lets the venue cancel the key's orders rather than keep them alive with nothing behind them. Read on one thread;
  * allocates nothing.

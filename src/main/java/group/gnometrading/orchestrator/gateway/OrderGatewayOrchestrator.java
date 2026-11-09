@@ -10,6 +10,7 @@ import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.account.reader.AccountReport;
+import group.gnometrading.gateways.account.reader.PublishedMap;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -34,15 +35,20 @@ import group.gnometrading.orchestrator.gateway.accounts.LaneAdmissions;
 import group.gnometrading.orchestrator.gateway.accounts.LaneLiveness;
 import group.gnometrading.orchestrator.gateway.accounts.VenueAccounts;
 import group.gnometrading.orchestrator.gateway.control.GatewayControl;
+import group.gnometrading.orchestrator.gateway.control.GatewayKills;
+import group.gnometrading.orchestrator.gateway.control.KillSource;
 import group.gnometrading.orchestrator.gateway.control.SessionRegistry;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
+import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
+import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
@@ -68,6 +74,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -134,7 +141,15 @@ public class OrderGatewayOrchestrator extends Orchestrator {
 
         final GatewaySettings settings = GatewaySettings.of(properties);
         final ProcessExit exit = exit(logger);
-        final List<GatewayAccount> accounts = buildAccounts(settings, properties, logger, exit);
+        final CrossKeys crossKeys = new CrossKeys();
+        final List<GatewayAccount> accounts = buildAccounts(settings, properties, logger, exit, crossKeys);
+        final int crossCapacity = settings.maxOrders() * Math.max(1, accounts.size());
+        final CrossIndex cross = new CrossIndex(
+                crossKeys,
+                CrossIndex.Mode.valueOf(
+                        properties.getStringProperty("gateway.self.trade.mode").toUpperCase(Locale.ROOT)),
+                crossCapacity,
+                2 * crossCapacity);
         final String ip = HostAddress.privateIp();
         if (ip == null) {
             throw new IllegalStateException("No private IP for sessions to reach this gateway on");
@@ -166,6 +181,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         reportRings.add(rejects);
 
         final GatewayJournal journal = journal(logger, properties, settings, wallClock, accounts.size());
+        final Kills kills = new Kills();
         final List<LaneAdmissions> admissions = admissions(accounts, journal);
         final GatewayIngress ingress = new GatewayIngress(
                 ingressSubscription,
@@ -174,7 +190,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 new GatewayRejects(rejects, wallClock),
                 toControl,
                 System::nanoTime,
-                journal == null ? JournalRecorder.NONE : journal.ingress());
+                journal == null ? JournalRecorder.NONE : journal.ingress(),
+                cross,
+                kills);
         final GatewayEgress egress = new GatewayEgress(
                 sessions,
                 status,
@@ -182,11 +200,13 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 toEgress,
                 System::nanoTime,
                 wallClock,
-                journal == null ? JournalRecorder.NONE : journal.egress());
+                journal == null ? JournalRecorder.NONE : journal.egress(),
+                cross);
         final SessionRegistry registry =
                 new SessionRegistry(SessionRegistry.over(getInstance(RegistryConnection.class)));
         final GatewayControl.Listings listings = listings(getInstance(SecurityMaster.class));
-        final GatewayRestart.Result restart = restart(logger, properties, settings, accounts, listings, registry);
+        final GatewayRestart.Result restart =
+                restart(logger, properties, settings, accounts, listings, registry, cross);
         final GatewayControl control = new GatewayControl(
                 logger,
                 sessions,
@@ -229,7 +249,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway control failed: %s", CauseChain.of(error)));
         logger.logf(LogMessage.DEBUG, "Gateway %s: taking sessions on %s:%d", settings.key(), ip, port);
         reportAdmissions(logger, accounts, admissions);
-        reportDrops(logger, ingress, egress, sessions);
+        pollKills(logger, properties, kills, sessions, getInstance(SecurityMaster.class));
+        reportDrops(logger, ingress, egress, sessions, cross);
+        reportSelfTrades(logger, cross);
         final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, controlRunner, accounts)
                 .start();
 
@@ -311,8 +333,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final Logger logger,
             final GatewayIngress ingress,
             final GatewayEgress egress,
-            final SessionTable sessions) {
-        final long[] seen = new long[6];
+            final SessionTable sessions,
+            final CrossIndex cross) {
+        final long[] seen = new long[8];
         DaemonThreads.scheduler("gateway-drops")
                 .scheduleAtFixedRate(
                         () -> {
@@ -326,7 +349,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                 ingress.controlFull(),
                                 egress.unrouted(),
                                 egress.unnumberedFull(),
-                                untracked
+                                untracked,
+                                cross.noRoom(),
+                                cross.lost()
                             };
                             if (!Arrays.equals(now, seen)) {
                                 logger.logf(
@@ -334,13 +359,17 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                         "Gateway dropped, since the last minute: %d orders from unlinked images, %d"
                                                 + " fragmented messages, %d session messages for a full control ring,"
                                                 + " %d reports for no session, %d control messages for a full"
-                                                + " session queue, %d orders untracked, so missing from a resync",
+                                                + " session queue, %d orders untracked, so missing from a resync,"
+                                                + " %d orders the self-trade index had no room for, %d order ends"
+                                                + " lost to it, so those orders block others until restart",
                                         now[0] - seen[0],
                                         now[1] - seen[1],
                                         now[2] - seen[2],
                                         now[3] - seen[3],
                                         now[4] - seen[4],
-                                        now[5] - seen[5]);
+                                        now[5] - seen[5],
+                                        now[6] - seen[6],
+                                        now[7] - seen[7]);
                                 System.arraycopy(now, 0, seen, 0, seen.length);
                             }
                         },
@@ -349,8 +378,71 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         TimeUnit.MINUTES);
     }
 
+    /**
+     * Reads the kill switches every second and enforces them ({@link GatewayKills}): from the registry, or from
+     * {@code gateway.kills.file} when it is set, for runs against real venues that mustn't touch the registry's kills.
+     */
+    private void pollKills(
+            final Logger logger,
+            final Properties properties,
+            final Kills kills,
+            final SessionTable sessions,
+            final SecurityMaster securityMaster) {
+        final KillSource source = properties.hasProperty("gateway.kills.file")
+                ? KillSource.file(Path.of(properties.getStringProperty("gateway.kills.file")))
+                : KillSource.over(getInstance(RegistryConnection.class));
+        final GatewayKills gatewayKills = new GatewayKills(
+                logger,
+                source,
+                kills,
+                sessions,
+                listingId -> {
+                    try {
+                        final Listing listing = securityMaster.getListing(listingId);
+                        return listing == null
+                                ? 0
+                                : PublishedMap.listingKey(
+                                        listing.exchange().exchangeId(),
+                                        listing.security().securityId());
+                    } catch (RuntimeException e) {
+                        return 0;
+                    }
+                },
+                System::nanoTime);
+        DaemonThreads.scheduler("gateway-kills").scheduleWithFixedDelay(gatewayKills, 0, 1, TimeUnit.SECONDS);
+    }
+
+    /** Each minute, how many orders the self-trade check refused, or in shadow mode would have. */
+    private static void reportSelfTrades(final Logger logger, final CrossIndex cross) {
+        final long[] seen = new long[2];
+        DaemonThreads.scheduler("gateway-self-trades")
+                .scheduleAtFixedRate(
+                        () -> {
+                            final long refused = cross.refused();
+                            final long shadowed = cross.shadowed();
+                            if (refused != seen[0] || shadowed != seen[1]) {
+                                logger.logf(
+                                        LogMessage.DEBUG,
+                                        "Gateway self-trade check, since the last minute: %d orders refused, %d"
+                                                + " sent that would have been (shadow mode); %d orders held",
+                                        refused - seen[0],
+                                        shadowed - seen[1],
+                                        cross.size());
+                                seen[0] = refused;
+                                seen[1] = shadowed;
+                            }
+                        },
+                        1,
+                        1,
+                        TimeUnit.MINUTES);
+    }
+
     private List<GatewayAccount> buildAccounts(
-            final GatewaySettings settings, final Properties properties, final Logger logger, final ProcessExit exit) {
+            final GatewaySettings settings,
+            final Properties properties,
+            final Logger logger,
+            final ProcessExit exit,
+            final CrossKeys crossKeys) {
         final VenueAccounts builder = new VenueAccounts(new VenueAccounts.Context(
                 logger,
                 properties,
@@ -358,7 +450,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 settings,
                 getInstance(EpochClock.class),
                 getInstance(EpochNanoClock.class),
-                exit));
+                exit,
+                crossKeys));
         final List<GatewayAccount> accounts = new ArrayList<>();
         for (final VenueAccount account :
                 GatewayAccounts.fetch(getInstance(RegistryConnection.class), settings.key())) {
@@ -381,7 +474,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final GatewaySettings settings,
             final List<GatewayAccount> accounts,
             final GatewayControl.Listings listings,
-            final SessionRegistry registry) {
+            final SessionRegistry registry,
+            final CrossIndex cross) {
         final Path directory = Path.of(
                 properties.getStringProperty("gateway.state.directory"),
                 settings.key().replace(':', '-'));
@@ -394,7 +488,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                     listings,
                     registry,
                     System.nanoTime(),
-                    System.currentTimeMillis());
+                    System.currentTimeMillis(),
+                    cross);
         } catch (IOException e) {
             throw new IllegalStateException("Can't read the gateway's state in " + directory, e);
         }

@@ -18,6 +18,8 @@ record Hello(
         long lastReportEpoch,
         long codTimeoutNanos,
         long maxQueueNanos,
+        int maxOpenOrders,
+        int maxNewPerSecond,
         int pages,
         List<long[]> listings,
         long receivedAtNanos,

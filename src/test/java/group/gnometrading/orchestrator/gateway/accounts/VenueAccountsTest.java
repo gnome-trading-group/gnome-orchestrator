@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.account.VenueAccount;
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.resources.Properties;
 import java.io.IOException;
@@ -75,7 +76,8 @@ class VenueAccountsTest {
                 new GatewaySettings("live:kalshi:main", 64, 2),
                 SystemEpochClock.INSTANCE,
                 new SystemEpochNanoClock(),
-                ProcessExit.SYSTEM));
+                ProcessExit.SYSTEM,
+                new CrossKeys()));
     }
 
     private static String kalshiSecret() {

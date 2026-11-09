@@ -16,8 +16,12 @@ public interface AccountLink {
 
     /** What only the venue knows how to do, on the gateway's control thread: may block and allocate. */
     interface Markets {
-        /** Makes a listing tradeable on the account: the lane can send its orders and the reader read their events. */
-        void load(Listing listing, FeeTimeline fees) throws IOException;
+        /**
+         * Makes a listing tradeable on the account: the lane can send its orders and the reader read their events.
+         *
+         * @return where the listing's orders can meet others, for the self-trade check
+         */
+        CrossKey load(Listing listing, FeeTimeline fees) throws IOException;
 
         /** A session the account now serves, under its slot; on venues whose order ids carry the session. */
         default void addSession(final long slot, final String sessionId) {}
@@ -26,6 +30,9 @@ public interface AccountLink {
     }
 
     int accountId();
+
+    /** The exchange the account trades on. */
+    int exchangeId();
 
     ManyToOneRingBuffer<LaneCommand> commands();
 

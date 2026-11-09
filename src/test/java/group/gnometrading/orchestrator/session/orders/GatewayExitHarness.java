@@ -18,6 +18,7 @@ import group.gnometrading.orchestrator.gateway.accounts.GatewayAccount;
 import group.gnometrading.orchestrator.gateway.accounts.GatewaySettings;
 import group.gnometrading.orchestrator.gateway.accounts.GatewayVenue;
 import group.gnometrading.orchestrator.gateway.accounts.VenueAccounts;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.runtime.LatencyHistogram;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.CancelOrder;
@@ -66,7 +67,11 @@ import org.agrona.concurrent.UnsafeBuffer;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.lambda.LambdaClient;
+import software.amazon.awssdk.services.lambda.model.InvokeRequest;
+import software.amazon.awssdk.services.lambda.model.InvokeResponse;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 
@@ -82,9 +87,14 @@ import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueReques
  *                                    dev is Kalshi's demo exchange
  * -Daws.profile=&lt;name&gt;|instance       default: the stage's name; instance on EC2
  * -Dsecret=gnome/accounts/&lt;label&gt;/trading   -Dpm.funder=0x... (Polymarket Intl: the account's recorded funder)
- * -Dprice=0.01 -Dsize=1              -Dscenario=all|trade|restart|evict|lap|orphan|blocked|load, several
- *                                    comma-separated (all is every exit but load), or list (the account's resting
- *                                    orders on the market) or sweep (cancels them all)
+ * -Dsecret2=gnome/accounts/&lt;label&gt;/trading  optional: a second account on the same venue (-Dpm.funder2), for stp's
+ *                                    check across accounts
+ * -Dprice=0.01 -Dsize=1              -Dscenario=all|trade|restart|evict|lap|orphan|blocked|cod|stp|kill|load|
+ *                                    emergency, several comma-separated (all is every exit but load and emergency),
+ *                                    or list (the account's resting orders on the market) or sweep (cancels them all)
+ *                                    emergency starts the deployed EmergencyCancel in -Demergency.region (the
+ *                                    exchange's region) with this run's AWS credentials, which need
+ *                                    lambda:InvokeFunction (a person's profile; not the live instance role)
  * -Dload.sessions=30 -Dload.seconds=120   load: that many sessions, weights 1, 2 and 3 in turn, each keeping
  * -Dload.quotes=12 -Dload.hold.ms=50  load.quotes bids working, each waiting load.hold.ms at most for the budget and
  *                                    cancelled 50 ms after it rests, faster than the account's budget allows; passes
@@ -100,7 +110,10 @@ public final class GatewayExitHarness {
     private static final long SECURITY_ID = 1;
     private static final int LISTING_ID = 1;
     private static final int ACCOUNT_ID = 1;
+    private static final int SECOND_ACCOUNT_ID = 2;
     private static final int STRATEGY_ID = 7;
+    // A second strategy on the same listing, for what one strategy's orders do to another's.
+    private static final int OTHER_STRATEGY_ID = 8;
     private static final int COD_MILLIS = 5_000;
     private static final long WAIT_NANOS = TimeUnit.SECONDS.toNanos(30);
     // The journal's sources, as GatewayJournal numbers them.
@@ -111,8 +124,11 @@ public final class GatewayExitHarness {
     private final Properties properties;
     private final GatewayVenue venue;
     private final VenueAccount account;
+    // Null without -Dsecret2.
+    private final VenueAccount secondAccount;
     private final Listing listing;
     private final SecretsManagerClient secrets;
+    private final AwsCredentialsProvider credentials;
     private final GatewayFixture.Registry registry = new GatewayFixture.Registry();
     private final String run = Long.toString(System.currentTimeMillis() / 1000 % 1_000_000, Character.MAX_RADIX);
     private final long price;
@@ -124,6 +140,7 @@ public final class GatewayExitHarness {
             AeronRuntime.launch("exit-sessions", AeronProfile.GATEWAY, Throwable::printStackTrace);
     private final ScheduledExecutorService linkThread = Executors.newSingleThreadScheduledExecutor();
     private GatewayAccount queries;
+    private GatewayAccount secondQueries;
     private long nextSlot;
 
     private GatewayExitHarness() throws Exception {
@@ -135,6 +152,14 @@ public final class GatewayExitHarness {
             default -> throw new IllegalArgumentException("-Dvenue is kalshi, pmus or pmintl");};
         this.account = new VenueAccount(
                 ACCOUNT_ID, EXCHANGE_ID, "exit-account", required("secret"), System.getProperty("pm.funder"));
+        this.secondAccount = System.getProperty("secret2") == null
+                ? null
+                : new VenueAccount(
+                        SECOND_ACCOUNT_ID,
+                        EXCHANGE_ID,
+                        "exit-account-2",
+                        System.getProperty("secret2"),
+                        System.getProperty("pm.funder2"));
         this.listing = listing(this.venue, required("market"));
         final String profile = System.getProperty("aws.profile", this.stage);
         // "instance": on EC2, the instance role's credentials.
@@ -147,6 +172,7 @@ public final class GatewayExitHarness {
             throw new IllegalStateException(
                     "No AWS credentials for profile " + profile + " (run: aws sso login --profile " + profile + ")", e);
         }
+        this.credentials = credentials;
         this.secrets = SecretsManagerClient.builder()
                 .region(Region.US_EAST_1)
                 .credentialsProvider(credentials)
@@ -199,10 +225,16 @@ public final class GatewayExitHarness {
         scenarios.put("lap", this::lap);
         scenarios.put("orphan", this::orphan);
         scenarios.put("blocked", this::blocked);
+        scenarios.put("cod", this::cod);
+        scenarios.put("stp", this::stp);
+        scenarios.put("kill", this::kill);
         scenarios.put("load", this::load);
+        scenarios.put("emergency", this::emergency);
         final Set<String> wanted = Set.of(scenario.split(","));
         for (final Map.Entry<String, Scenario> entry : scenarios.entrySet()) {
-            final boolean inAll = wanted.contains("all") && !entry.getKey().equals("load");
+            final boolean inAll = wanted.contains("all")
+                    && !entry.getKey().equals("load")
+                    && !entry.getKey().equals("emergency");
             if (!inAll && !wanted.contains(entry.getKey())) {
                 continue;
             }
@@ -354,6 +386,156 @@ public final class GatewayExitHarness {
                     "   cancelled %d ms after it went deaf (cod %d ms)%n",
                     TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), COD_MILLIS);
         }
+    }
+
+    /**
+     * A session's process killed with orders resting: the gateway hears nothing from it and cancels them within its
+     * timeout. The venue's own read of them can lag a second or two behind, so that much is allowed on top.
+     */
+    private void cod() throws Exception {
+        try (Gateway gateway = new Gateway(null, 0, false)) {
+            final TestSession session = gateway.session("c");
+            try {
+                session.order(1);
+                session.order(2);
+                check(await(() -> session.count(ExecType.NEW) == 2), "both orders acknowledged");
+                final List<String> ids = List.of(session.exchangeOrderId(1), session.exchangeOrderId(2));
+                check(awaitFor(() -> resting(ids) == 2, WAIT_NANOS), "both rest at the venue");
+                final long start = System.nanoTime();
+                session.close();
+                check(
+                        awaitGone(ids, TimeUnit.MILLISECONDS.toNanos(COD_MILLIS + 1_000 + 2_000)),
+                        "both cancelled within the timeout + 1 s (+ 2 s for the venue's reads)");
+                System.out.printf(
+                        "   gone from the venue %d ms after the session died (cod %d ms)%n",
+                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), COD_MILLIS);
+            } finally {
+                // Closing twice is harmless; a check that throws above still leaves no session running.
+                session.close();
+            }
+        }
+    }
+
+    /**
+     * Two strategies on one listing: an order that would trade against the other's is refused SELF_TRADE before it is
+     * sent, whether the other's order rests or was sent in the same moment. Every crossing order is post-only, so if
+     * the check let one through the venue would refuse it rather than fill it.
+     */
+    private void stp() throws Exception {
+        try (Gateway gateway = new Gateway(null, 0, false);
+                TestSession first = gateway.session("s1", STRATEGY_ID);
+                TestSession second = gateway.session("s2", OTHER_STRATEGY_ID)) {
+            first.order(1);
+            check(await(() -> first.count(ExecType.NEW) == 1), "the first strategy's bid acknowledged");
+            second.order(1, Side.Ask, price);
+            check(await(() -> second.answered() == 1), "the crossing ask answered");
+            check(selfTrade(second, 1), "the ask against a resting bid refused SELF_TRADE");
+
+            first.order(2);
+            second.order(2, Side.Ask, price);
+            check(
+                    await(() -> refusedSelfTrade(first, 2) || refusedSelfTrade(second, 2)),
+                    "of two crossing orders sent together, one refused SELF_TRADE");
+            check(
+                    !(refusedSelfTrade(first, 2) && refusedSelfTrade(second, 2)),
+                    "and only one: the other went to the venue");
+        }
+        if (this.secondAccount == null) {
+            System.out.println("   (no -Dsecret2: the check across two accounts not run)");
+            return;
+        }
+        cleanUp();
+        try (Gateway gateway = new Gateway(this.account, this.secondAccount);
+                TestSession first = gateway.session("x1", STRATEGY_ID, ACCOUNT_ID);
+                TestSession second = gateway.session("x2", OTHER_STRATEGY_ID, SECOND_ACCOUNT_ID)) {
+            first.order(1);
+            check(await(() -> first.count(ExecType.NEW) == 1), "a bid on the first account acknowledged");
+            second.order(1, Side.Ask, price);
+            check(await(() -> second.answered() == 1), "the crossing ask on the second account answered");
+            check(selfTrade(second, 1), "an ask on another account against the resting bid refused SELF_TRADE");
+        }
+    }
+
+    private static boolean selfTrade(final TestSession session, final long counter) {
+        return refusedSelfTrade(session, counter) && session.count(ExecType.NEW, counter) == 0;
+    }
+
+    private static boolean refusedSelfTrade(final TestSession session, final long counter) {
+        return session.reports().stream()
+                .anyMatch(r -> r.getClientOidCounter() == counter
+                        && r.decoder.execType() == ExecType.REJECT
+                        && r.decoder.rejectReason() == RejectReason.SELF_TRADE);
+    }
+
+    /**
+     * Kills behind the OMS, from a kills file as the registry would return them: one strategy's kill cancels and
+     * refuses only its orders, leaving another strategy's on the same listing; an account kill then clears the rest.
+     */
+    private void kill() throws Exception {
+        try (Gateway gateway = new Gateway(null, 0, false);
+                TestSession killed = gateway.session("k1", STRATEGY_ID);
+                TestSession other = gateway.session("k2", OTHER_STRATEGY_ID)) {
+            killed.order(1);
+            other.order(1);
+            check(await(() -> killed.count(ExecType.NEW) == 1 && other.count(ExecType.NEW) == 1), "both acknowledged");
+            final String killedId = killed.exchangeOrderId(1);
+            final String otherId = other.exchangeOrderId(1);
+            check(awaitFor(() -> resting(List.of(killedId, otherId)) == 2, WAIT_NANOS), "both rest at the venue");
+
+            gateway.fixture.kills("[{\"policy_type\":\"KILL_SWITCH\",\"strategy_id\":" + STRATEGY_ID + "}]");
+            check(awaitGone(List.of(killedId), WAIT_NANOS), "the killed strategy's order cancelled");
+            check(resting(List.of(otherId)) == 1, "the other strategy's order on the same listing untouched");
+            killed.order(2);
+            check(
+                    await(() -> killed.reports().stream()
+                            .anyMatch(r ->
+                                    r.getClientOidCounter() == 2 && r.decoder.rejectReason() == RejectReason.HALTED)),
+                    "the killed strategy's new order refused HALTED");
+
+            gateway.fixture.kills("[{\"policy_type\":\"KILL_SWITCH\",\"account_id\":" + ACCOUNT_ID + "}]");
+            check(awaitGone(List.of(otherId), WAIT_NANOS), "an account kill clears every order on it");
+            gateway.fixture.kills("[]");
+        }
+    }
+
+    /**
+     * The gateway gone with orders resting: the deployed EmergencyCancel, with this run's AWS credentials, clears the
+     * account on the venue with nothing of the gateway's.
+     */
+    private void emergency() throws Exception {
+        final List<String> ids;
+        try (Gateway gateway = new Gateway(null, 0, false);
+                TestSession session = gateway.session("e")) {
+            session.order(1);
+            session.order(2);
+            check(await(() -> session.count(ExecType.NEW) == 2), "both orders acknowledged");
+            ids = List.of(session.exchangeOrderId(1), session.exchangeOrderId(2));
+            check(awaitFor(() -> resting(ids) == 2, WAIT_NANOS), "both rest at the venue");
+            // Gone as a crash would take it: nothing cancelled. The session is closed with it, before its timeout.
+        }
+        final String exchange =
+                switch (this.venue) {
+                    case KALSHI -> "KALSHI";
+                    case POLYMARKET_US -> "POLYMARKET_US";
+                    case POLYMARKET_INTL -> "POLYMARKET_INTL";
+                };
+        // Where the exchange trades from (the registry's sm.exchange.region), as the registry's route would start it.
+        final Region region = Region.of(required("emergency.region"));
+        final String payload = "{\"exchange\":\"" + exchange + "\",\"secretName\":\"" + this.account.tradingSecretName()
+                + "\",\"reason\":\"exit harness " + this.run + "\",\"actor\":\"exit-harness\"}";
+        try (LambdaClient lambda = LambdaClient.builder()
+                .region(region)
+                .credentialsProvider(this.credentials)
+                .build()) {
+            final InvokeResponse answer = lambda.invoke(InvokeRequest.builder()
+                    .functionName("EmergencyCancel")
+                    .payload(SdkBytes.fromUtf8String(payload))
+                    .build());
+            final String result = answer.payload().asUtf8String();
+            System.out.println("   EmergencyCancel: " + result);
+            check(answer.functionError() == null, "EmergencyCancel ran");
+        }
+        check(awaitGone(ids, WAIT_NANOS), "the account's orders gone from the venue");
     }
 
     /**
@@ -612,7 +794,7 @@ public final class GatewayExitHarness {
                     "exit-gateway",
                     PORT,
                     new GatewayFixture.Setup(
-                            account,
+                            List.of(account),
                             List.of(listing),
                             registry,
                             Files.createTempDirectory("exit-state"),
@@ -622,12 +804,32 @@ public final class GatewayExitHarness {
                             tap));
         }
 
+        /** On both of the run's accounts (-Dsecret and -Dsecret2), one cross index over them. */
+        Gateway(final VenueAccount first, final VenueAccount second) throws Exception {
+            final CrossKeys crossKeys = new CrossKeys();
+            final GatewaySettings settings = new GatewaySettings("live:exit:main", 256, 4);
+            this.fixture = GatewayFixture.start(
+                    "exit-gateway",
+                    PORT,
+                    new GatewayFixture.Setup(
+                            List.of(
+                                    buildAccount(first, settings, crossKeys),
+                                    buildAccount(second, settings, crossKeys)),
+                            List.of(listing),
+                            registry,
+                            Files.createTempDirectory("exit-state"),
+                            null,
+                            0,
+                            false,
+                            AccountLane.Admissions.NONE));
+        }
+
         Gateway(final Path state, final Path journal, final int ring, final boolean paused) throws Exception {
             this.fixture = GatewayFixture.start(
                     "exit-gateway",
                     PORT,
                     new GatewayFixture.Setup(
-                            buildAccount(),
+                            List.of(buildAccount()),
                             List.of(listing),
                             registry,
                             state,
@@ -638,8 +840,16 @@ public final class GatewayExitHarness {
         }
 
         TestSession session(final String name) throws InterruptedException {
-            final TestSession session = new TestSession("x" + run + name, nextSlot++);
-            registry.register(session.sessionId, session.slot, STRATEGY_ID, EXCHANGE_ID, LISTING_ID, ACCOUNT_ID);
+            return session(name, STRATEGY_ID);
+        }
+
+        TestSession session(final String name, final int strategyId) throws InterruptedException {
+            return session(name, strategyId, ACCOUNT_ID);
+        }
+
+        TestSession session(final String name, final int strategyId, final int accountId) throws InterruptedException {
+            final TestSession session = new TestSession("x" + run + name, nextSlot++, strategyId, accountId);
+            registry.register(session.sessionId, session.slot, strategyId, EXCHANGE_ID, LISTING_ID, accountId);
             session.start();
             if (!await(() -> session.link.state == GatewayLink.READY)) {
                 try {
@@ -666,6 +876,7 @@ public final class GatewayExitHarness {
     private final class TestSession implements AutoCloseable {
         final String sessionId;
         final long slot;
+        final int strategyId;
         final GatewayLink link;
         private final GatewayClient client;
         private final GatewayLinks links;
@@ -675,9 +886,10 @@ public final class GatewayExitHarness {
         private GnomeAgentRunner runner;
         private java.util.concurrent.ScheduledFuture<?> tending;
 
-        TestSession(final String sessionId, final long slot) {
+        TestSession(final String sessionId, final long slot, final int strategyId, final int accountId) {
             this.sessionId = sessionId;
             this.slot = slot;
+            this.strategyId = strategyId;
             final GlobalSequence sequence = new GlobalSequence();
             this.omsOrders = new SequencedRingBuffer<>(Intent::new, sequence);
             final SequencedRingBuffer<OrderExecutionReport> toOms =
@@ -694,14 +906,14 @@ public final class GatewayExitHarness {
             this.link = new GatewayLink(
                     "live:exit:main",
                     EXCHANGE_ID,
-                    ACCOUNT_ID,
+                    accountId,
                     List.<long[]>of(new long[] {EXCHANGE_ID, SECURITY_ID}),
                     64);
             this.client = new GatewayClient(
                     List.of(this.link),
                     this.omsOrders,
                     toOms,
-                    new GatewayClient.Identity(slot, sessionId, STRATEGY_ID, COD_MILLIS, 2_000),
+                    new GatewayClient.Identity(slot, sessionId, strategyId, COD_MILLIS, 2_000),
                     64,
                     System::nanoTime,
                     new SystemEpochNanoClock());
@@ -721,24 +933,29 @@ public final class GatewayExitHarness {
         }
 
         void order(final long counter) {
+            order(counter, Side.Bid, price);
+        }
+
+        /** A post-only order: one that would take is refused by the venue, so a test of crossing fills nothing. */
+        void order(final long counter, final Side side, final long at) {
             final Order order = new Order();
             order.encoder
                     .exchangeId(EXCHANGE_ID)
                     .securityId(SECURITY_ID)
-                    .price(price)
+                    .price(at)
                     .size(size)
-                    .side(Side.Bid)
+                    .side(side)
                     .orderType(OrderType.LIMIT)
                     .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
             order.encoder.flags().postOnly(true);
-            order.encodeClientOid(counter, STRATEGY_ID);
+            order.encodeClientOid(counter, this.strategyId);
             this.omsOrders.publishRaw(order.buffer, OrderDecoder.TEMPLATE_ID, order.totalMessageSize());
         }
 
         void cancel(final long counter) {
             final CancelOrder cancel = new CancelOrder();
             cancel.encoder.exchangeId(EXCHANGE_ID).securityId(SECURITY_ID);
-            cancel.encodeClientOid(counter, STRATEGY_ID);
+            cancel.encodeClientOid(counter, this.strategyId);
             this.omsOrders.publishRaw(cancel.buffer, CancelOrderDecoder.TEMPLATE_ID, cancel.totalMessageSize());
         }
 
@@ -798,6 +1015,12 @@ public final class GatewayExitHarness {
     }
 
     private GatewayAccount buildAccount(final GatewaySettings settings) throws Exception {
+        return buildAccount(this.account, settings, new CrossKeys());
+    }
+
+    /** One account of a gateway; every account of one gateway shares its cross keys, so the index spans them. */
+    private GatewayAccount buildAccount(
+            final VenueAccount which, final GatewaySettings settings, final CrossKeys crossKeys) throws Exception {
         return new VenueAccounts(new VenueAccounts.Context(
                         new ConsoleLogger(new SystemEpochNanoClock()),
                         this.properties,
@@ -807,8 +1030,9 @@ public final class GatewayExitHarness {
                         new SystemEpochNanoClock(),
                         (status, cause) -> {
                             throw new IllegalStateException("The gateway gave up: " + cause, cause);
-                        }))
-                .build(this.venue, this.account);
+                        },
+                        crossKeys))
+                .build(this.venue, which);
     }
 
     /** An account never started, for its venue order lookups only. */
@@ -817,6 +1041,18 @@ public final class GatewayExitHarness {
             this.queries = buildAccount();
         }
         return this.queries;
+    }
+
+    /** Each account this run trades on, to read and clean up its orders. */
+    private List<GatewayAccount> allQueries() throws Exception {
+        if (this.secondAccount == null) {
+            return List.of(queries());
+        }
+        if (this.secondQueries == null) {
+            this.secondQueries =
+                    buildAccount(this.secondAccount, new GatewaySettings("live:exit:main", 256, 4), new CrossKeys());
+        }
+        return List.of(queries(), this.secondQueries);
     }
 
     private String secret(final String name) {
@@ -846,9 +1082,13 @@ public final class GatewayExitHarness {
     /** How many of {@code ids} rest at the venue. */
     private long resting(final List<String> ids) {
         try {
-            return queries().orderQuery().listOpenOrders(this.listing).stream()
-                    .filter(order -> ids.contains(order.exchangeOrderId()))
-                    .count();
+            long resting = 0;
+            for (final GatewayAccount account : allQueries()) {
+                resting += account.orderQuery().listOpenOrders(this.listing).stream()
+                        .filter(order -> ids.contains(order.exchangeOrderId()))
+                        .count();
+            }
+            return resting;
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
@@ -880,10 +1120,12 @@ public final class GatewayExitHarness {
     private void cleanUp() {
         int cancelled = 0;
         try {
-            final VenueOrderQuery query = queries().orderQuery();
-            for (final VenueOrder order : query.listOpenOrders(this.listing)) {
-                if (this.placed.contains(order.exchangeOrderId()) && query.cancel(this.listing, order)) {
-                    cancelled++;
+            for (final GatewayAccount account : allQueries()) {
+                final VenueOrderQuery query = account.orderQuery();
+                for (final VenueOrder order : query.listOpenOrders(this.listing)) {
+                    if (this.placed.contains(order.exchangeOrderId()) && query.cancel(this.listing, order)) {
+                        cancelled++;
+                    }
                 }
             }
         } catch (Exception | LinkageError e) {

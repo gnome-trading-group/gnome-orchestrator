@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.session.orders;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.logging.NullLogger;
@@ -94,6 +95,118 @@ class GatewayInProcessTest {
     }
 
     @Test
+    void anOrderCrossingAnotherSessionsWithinOneRoundTripIsRefusedBeforeTheVenue() throws Exception {
+        this.first.order(1, Side.Bid, 400_000_000);
+        this.second.order(1, Side.Ask, 400_000_000);
+
+        // The two sessions send on threads of their own, so either may reach the gateway first: that one goes, and
+        // the other, which would trade against it, is refused.
+        await(() -> !this.first.reports().isEmpty() || !this.second.reports().isEmpty(), "the crossing order answered");
+        final TestSession refused = this.first.reports().isEmpty() ? this.second : this.first;
+        assertEquals(ExecType.REJECT, refused.reports().get(0).decoder.execType());
+        assertEquals(RejectReason.SELF_TRADE, refused.reports().get(0).decoder.rejectReason());
+        await(() -> this.venue.server().requests().size() == 1, "the other order at the venue");
+        Thread.sleep(200);
+        assertEquals(1, this.venue.server().requests().size(), "only one reached the venue");
+        assertEquals(1, this.first.reports().size() + this.second.reports().size(), "one refused, none acked yet");
+    }
+
+    @Test
+    void anOrderCrossingAnotherSessionsOnAnotherAccountIsRefusedToo() throws Exception {
+        // In place of the one-account gateway: one holding two accounts, each on a fake venue of its own.
+        this.first.close();
+        this.second.close();
+        this.gateway.close();
+        final GatewayFixture.Venue otherVenue = GatewayFixture.Venue.start(this.state.resolve("other"));
+        try {
+            this.venue
+                    .registry()
+                    .register(
+                            "session-c",
+                            44,
+                            4,
+                            GatewayFixture.EXCHANGE_ID,
+                            GatewayFixture.LISTING_ID,
+                            GatewayFixture.SECOND_ACCOUNT_ID);
+            this.gateway =
+                    GatewayFixture.startOnTwoAccounts("in-process-gateway", this.venue, otherVenue, INGRESS_PORT);
+            this.first = new TestSession("session-a", 42, 3);
+            this.second = new TestSession("session-c", 44, 4, GatewayFixture.SECOND_ACCOUNT_ID);
+            await(() -> this.first.ready() && this.second.ready(), "both sessions welcomed, on their own accounts");
+
+            this.first.order(1, Side.Bid, 400_000_000);
+            this.second.order(1, Side.Ask, 400_000_000);
+
+            await(
+                    () -> !this.first.reports().isEmpty()
+                            || !this.second.reports().isEmpty(),
+                    "the crossing order answered");
+            final TestSession refused = this.first.reports().isEmpty() ? this.second : this.first;
+            assertEquals(
+                    RejectReason.SELF_TRADE, refused.reports().get(0).decoder.rejectReason());
+            Thread.sleep(200);
+            assertEquals(
+                    1,
+                    this.venue.server().requests().size()
+                            + otherVenue.server().requests().size(),
+                    "only one reached a venue");
+        } finally {
+            otherVenue.server().close();
+        }
+    }
+
+    @Test
+    void anOrderThatHasFilledNoLongerBlocksAnotherSession() throws Exception {
+        this.first.order(1, Side.Bid, 400_000_000);
+        await(() -> this.venue.server().requests().size() == 1, "the order at the venue");
+        this.venue.transport().push("ACK s42-1");
+        this.venue.transport().push("FILL s42-1 " + 3 * UNIT);
+        await(() -> this.first.reports().size() == 2, "its fill");
+
+        this.second.order(1, Side.Ask, 400_000_000);
+
+        await(() -> this.venue.server().requests().size() == 2, "the other session's order at the venue");
+    }
+
+    @Test
+    void aStrategyKillCancelsAndRefusesOnlyThatStrategysOrdersUntilItLifts() throws Exception {
+        this.first.order(1);
+        this.second.order(1);
+        await(() -> this.venue.server().requests().size() == 2, "both orders at the venue");
+        this.venue.transport().push("ACK s42-1");
+        this.venue.transport().push("ACK s43-1");
+        await(() -> this.first.reports().size() == 1 && this.second.reports().size() == 1, "both acknowledged");
+
+        this.gateway.kills("[{\"policy_type\":\"KILL_SWITCH\",\"strategy_id\":3}]");
+
+        await(() -> deletes().size() == 1, "the killed strategy's order cancelled");
+        assertTrue(deletes().get(0).contains("s42-1"), "the killed strategy's: " + deletes());
+        this.first.order(2);
+        await(() -> this.first.reports().size() == 2, "the killed strategy's new order answered");
+        assertEquals(RejectReason.HALTED, this.first.reports().get(1).decoder.rejectReason());
+        this.second.order(2);
+        await(() -> posts() == 3, "the other strategy still trading");
+
+        this.gateway.kills("[]");
+        this.first.order(3);
+        await(() -> posts() == 4, "the killed strategy trading again once the kill lifts");
+        assertEquals(1, deletes().size(), "the other strategy's order untouched");
+    }
+
+    private List<String> deletes() {
+        return this.venue.server().requests().stream()
+                .filter(r -> r.method().equals("DELETE"))
+                .map(r -> r.path())
+                .toList();
+    }
+
+    private long posts() {
+        return this.venue.server().requests().stream()
+                .filter(r -> r.method().equals("POST"))
+                .count();
+    }
+
+    @Test
     void aSessionThatReconnectsIsSentWhatItMissedOnce() throws Exception {
         this.first.order(1);
         await(() -> this.venue.server().requests().size() == 1, "the order at the venue");
@@ -128,6 +241,28 @@ class GatewayInProcessTest {
         assertEquals(
                 RejectReason.GATEWAY_UNAVAILABLE,
                 this.second.reports().get(0).decoder.rejectReason());
+    }
+
+    @Test
+    void aRestartedGatewayStillRefusesAnOrderCrossingOneItTookBack() throws Exception {
+        this.first.order(1, Side.Bid, 400_000_000);
+        await(() -> this.venue.server().requests().size() == 1, "the bid at the venue");
+        this.venue.transport().push("ACK s42-1");
+        await(() -> this.first.reports().size() == 1, "acknowledged");
+
+        this.gateway.kill();
+        this.venue.protocol().catchUp = List.of("ACK s42-1");
+        this.gateway = GatewayFixture.start("in-process-gateway", this.venue, INGRESS_PORT);
+        await(() -> this.gateway.account().lane().workingOrders() == 1, "the bid taken back");
+        // Its link may still read ready from before the restart; the new gateway linking it is what counts.
+        await(() -> this.gateway.linked(43) && this.second.ready(), "the other session linked to the new gateway");
+
+        this.second.order(1, Side.Ask, 400_000_000);
+
+        await(() -> !this.second.reports().isEmpty(), "the crossing ask answered");
+        assertEquals(
+                RejectReason.SELF_TRADE, this.second.reports().get(0).decoder.rejectReason());
+        assertEquals(1, this.venue.server().requests().size(), "nothing new reached the venue");
     }
 
     @Test
@@ -175,6 +310,10 @@ class GatewayInProcessTest {
         private final GnomeAgentRunner runner;
 
         TestSession(final String sessionId, final long slot, final int strategyId) {
+            this(sessionId, slot, strategyId, GatewayFixture.ACCOUNT_ID);
+        }
+
+        TestSession(final String sessionId, final long slot, final int strategyId, final int accountId) {
             this.strategyId = strategyId;
             final GlobalSequence sequence = new GlobalSequence();
             this.omsOrders = new SequencedRingBuffer<>(Intent::new, sequence);
@@ -188,7 +327,7 @@ class GatewayInProcessTest {
             this.link = new GatewayLink(
                     "live:test:main",
                     GatewayFixture.EXCHANGE_ID,
-                    GatewayFixture.ACCOUNT_ID,
+                    accountId,
                     List.<long[]>of(new long[] {GatewayFixture.EXCHANGE_ID, GatewayFixture.SECURITY_ID}),
                     64);
             this.client = new GatewayClient(
@@ -216,13 +355,17 @@ class GatewayInProcessTest {
         }
 
         void order(final long counter) {
+            order(counter, Side.Bid, 400_000_000);
+        }
+
+        void order(final long counter, final Side side, final long price) {
             final Order order = new Order();
             order.encoder
                     .exchangeId(GatewayFixture.EXCHANGE_ID)
                     .securityId(GatewayFixture.SECURITY_ID)
-                    .price(400_000_000)
+                    .price(price)
                     .size(3 * UNIT)
-                    .side(Side.Bid);
+                    .side(side);
             order.encoder.flags().postOnly(true);
             order.encodeClientOid(counter, this.strategyId);
             this.omsOrders.publishRaw(order.buffer, OrderDecoder.TEMPLATE_ID, order.totalMessageSize());

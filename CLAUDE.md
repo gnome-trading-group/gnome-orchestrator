@@ -12,6 +12,8 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 - `mvn clean package` builds the shaded jar `target/gnome-orchestrator-<version>.jar`.
 - `mvn test` runs the unit tests. One class: `mvn test -Dtest=group.gnometrading.orchestrator.session.lifecycle.SessionExitTest` (always
   the full class name).
+- `@Tag("timing")` tests check timing on real sockets and threads, which a busy machine can fail: `mvn test` leaves
+  them out; run them on a quiet machine with `mvn test-compile surefire:test@timing`.
 - `mvn spotless:apply` fixes formatting. Spotless (palantir-java-format) and checkstyle both run at `validate` and
   fail the build, so run it before committing.
 - `*LiveSmoke` (test package `live/`), `*Probe` (`live/probes/`), `*LiveCheck`, `*CrossCheck` under `src/test` are
@@ -94,9 +96,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
 - `gateway/` - the order gateway (`Main gateway`, `GATEWAY_KEY` `live:<exchange>:<instance>`): one process per venue
   holding that venue's accounts (registry `venue-accounts/gateway`) for every live session. Layered, and `LayoutTest`
   enforces it: `core/` is what every thread shares (`GatewaySession`, `SessionTable`, `GatewayMessage`, `ReplayRing`,
-  `OrderTotals`, `GatewayStatus`, `JournalRecorder`, `AccountLink`) and uses none of the rest; `accounts/` (accounts,
-  their lanes' admissions and liveness, `GatewaySettings`), `transport/` (ingress, egress, `OrderStatuses`,
-  `GatewayRejects`), `control/` (`GatewayControl`, `HelloPages` + `Hello`, `SessionRegistry`, `SessionsFile`) and
+  `OrderTotals`, `GatewayStatus`, `JournalRecorder`, `AccountLink`, `CrossKey`/`CrossKeys`) and uses none of the rest; `accounts/` (accounts,
+  their lanes' admissions and liveness, `GatewaySettings`), `transport/` (ingress, egress, `CrossIndex`,
+  `OrderStatuses`, `GatewayRejects`), `control/` (`GatewayControl`, `HelloPages` + `Hello`, `SessionRegistry`, `SessionsFile`) and
   `journal/` (`GatewayJournal`, `OwnershipLog`) each use only `core/`; the root (`OrderGatewayOrchestrator`,
   `GatewayRestart`, `Watchdog`) assembles them. A session the gateway forgot (unlinked 10 min) that says hello again
   within the same epoch carries on its report numbering from its hello's `lastReportSeq`.
@@ -112,6 +114,29 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     orders (lane `CANCEL_SESSION`) and asks it to hello again, evicts a session that sends something unreadable
     (refused 5 min), keeps the state (STARTING/READY/DEGRADED) and writes `order-gateway#<key>` to `service-endpoints`
     every 15 s. SIGTERM is a planned stop: every session's orders cancelled and a goodbye sent before anything closes.
+  - Caps: `gateway.session.max.open.orders` (200) and `gateway.session.max.new.per.second` (50) per session,
+    `gateway.account.max.open.orders` (2,000) per account, in each lane (`AccountLane.Caps`); a session's hello may
+    ask for less (`order.gateway.max.open.orders`, `order.gateway.max.new.per.second`, session properties), never
+    more. Past one, a new order is refused `SESSION_CAP`; cancels and amends always go.
+  - Kills behind the OMS (`control/GatewayKills`, its own thread, every second): reads the registry's enabled
+    `KILL_SWITCH` rows (`KillSource.over`; `gateway.kills.file`, a JSON array of rows, instead when set, for runs on
+    real venues), resolves sessions to slots and listing ids to keys, publishes `core/KillRules` through `Kills` for
+    ingress to refuse covered new orders and amends `HALTED`, and sends each covered session's lane `CANCEL_ORDERS`
+    (all its listings, or the kill's one) on the first two passes it covers it, so an order that slipped past the
+    first sweep is caught by the second. Until the first read ingress refuses new orders `GATEWAY_NOT_READY`: at
+    startup the kills are unknown, not none. Cancels go per session, so one strategy's kill never touches another's orders. Account
+    kills (`risk.policy.account_id`) are the gateway's alone. A failed read keeps the kills in force (logged
+    `GATEWAY_KILLS_STALE` past 30 s). No venue-wide cancel-all yet: an account or exchange kill cancels order by
+    order.
+  - Self-trade check across sessions and accounts (`CrossIndex`, ingress's): each listing's load returns its
+    `CrossKey`, from the venue's `<Venue>Venue.crossMarketOf` in gnome-gateways (the market it matches on, and
+    whether the listing prices its complement), published through `CrossKeys`. Every order counts from ingress's admission (so two sent within one round trip
+    can't both pass) until egress, which sees every report, says it ended; an amend counts at both prices until
+    accepted. A new order or amend that meets another session's order on the same market, in first-side terms, is
+    refused `SELF_TRADE` before its lane (`gateway.self.trade.mode` `enforce`; `shadow` sends it and counts). A full
+    index refuses `SESSION_CAP`. A restart refills it from the ownership log. Where a venue has its own prevention
+    (`VenueAccounts`), it is set so the crossing order is the one cancelled, as a backstop. Matches a venue makes
+    across markets (Polymarket Intl neg-risk conversions) aren't covered.
   - Each account's budget is shared fairly: an accepted hello introduces the session to its lane (`LaneCommand.SESSION`)
     with its strategy's `rate_weight` (registry) and its `order.gateway.max.queue.ms` (50), and a forgotten session
     gives its place up (`SESSION_ENDED`). A hello past `AccountLane.MAX_SESSIONS` (1,024) on one account is refused
@@ -121,7 +146,8 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     and cancels and how many it never answered, how often every lane connection was in use, and any venue 429s
     (`VENUE_RATE_LIMITED`). It also logs, when any rose, what ingress and egress dropped (orders from unlinked
     images, session messages for a full control ring, reports for no session, orders untracked so missing from a
-    resync).
+    resync, orders the self-trade index had no room for, ends lost to it), and how many orders the self-trade check
+    refused or (shadow) would have.
   - Idle parks on the Aeron path: `gateway.idle.max.park.micros` (50). A lane or connector, ingress or egress failure
     exits the process; so does `Watchdog` when ingress, egress, a lane or a reader (unless paused for a reconnect) makes
     no progress for `gateway.watchdog.stall.millis` (3000). `/health` on :8080 fails when a lane stops.
@@ -165,8 +191,13 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
 - `src/main/resources/orchestrator.{dev,prod}.properties` - per-stage defaults.
 - `ami/` - Image Builder inputs: `scripts/install-runtime.sh`, `scripts/tune-kernel.sh`, `files/run-strategy.sh`
   (EC2 wrapper), `files/start-session.sh` (shared with Docker), systemd units, `files/journal-shipper.py` (+ test).
-- `cdk/` - `OrchestratorPipelineStack`, `lib/stacks/{storage,network,ec2,ami}-stack.ts`. Ignore stale local
-  `ecs-stack.js` / `ecr-stack.js` (untracked build output, no source).
+- `cdk/` - `OrchestratorPipelineStack`, `lib/stacks/{storage,network,ec2,ami,emergency-cancel}-stack.ts`. Ignore
+  stale local `ecs-stack.js` / `ecr-stack.js` (untracked build output, no source).
+- `cdk/lambda/emergency_cancel/` - the order gateway's break-glass, Python, sharing no code with gnome-gateways:
+  lists one venue account's open orders with its trading key, cancels each (the gateway's own verified endpoints and
+  signing, no venue-wide cancel-all), lists again, and puts an `EMERGENCY_CANCEL` alert on `gnome-alerts`. Tests run
+  against local fake venues that check real signatures: `pip install cryptography boto3 pytest` in a venv, then
+  `AWS_REGION=us-east-1 python -m pytest cdk/lambda/emergency_cancel/tests`. `cdk synth` bundles it in Docker.
 
 ## Conventions and invariants
 
@@ -198,7 +229,12 @@ account) deploys stage `Dev`, waits on `ApproveProd`, then `Prod`. Stacks per st
 (journal bucket `gnome-journals-<stage>`, SSM params), `<Stage>-OrchestratorAmiStack` (us-east-1, AMIs copied to all
 regions), and per region in us-east-1, ap-northeast-1, eu-west-1: `<Stage>-OrchestratorEcsStack-<region>` (VPC,
 security group, log group; the name is historical, renaming recreates the VPC) and `<Stage>-OrchestratorEc2Stack-<region>`
-(launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; only live roles can read `gnome/accounts/*`).
+(launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; only live roles can read `gnome/accounts/*`),
+and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
+exchange code; run in the exchange's region, `sm.exchange.region`, where its gateway runs; reads only that region's
+`gnome/accounts/*/trading`; 5-minute timeout, 2 at once, never retried). Started from the controller's Treasury
+(registry `POST /venue-accounts/emergency-cancel`, async) or by `aws lambda invoke` (registry runbook
+`stop-or-kill.md`).
 
 **How a version reaches sessions.** The jar is not baked into the AMI. The launcher pins `ORCHESTRATOR_VERSION`
 (default: SSM `/gnome/orchestrator/latest-version`, written by StorageStack only for non-SNAPSHOT releases) and

@@ -9,6 +9,7 @@ import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.account.reader.PublishedMap;
+import group.gnometrading.gateways.orders.CrossMarket;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
@@ -16,17 +17,23 @@ import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.CrossKey;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
+import group.gnometrading.orchestrator.gateway.core.KillRules;
+import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
+import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.gateway.GatewayState;
 import io.aeron.Publication;
@@ -65,6 +72,11 @@ class GatewayAllocationTest {
         }
 
         @Override
+        public int exchangeId() {
+            return 7;
+        }
+
+        @Override
         public ManyToOneRingBuffer<LaneCommand> commands() {
             return this.commands;
         }
@@ -86,7 +98,8 @@ class GatewayAllocationTest {
 
         @Override
         public AccountLink.Markets markets() {
-            return (listing, fees) -> {};
+            return (listing, fees) ->
+                    CrossKey.of(listing.exchange().exchangeId(), new CrossMarket(listing.exchangeSecurityId(), false));
         }
     }
 
@@ -100,7 +113,13 @@ class GatewayAllocationTest {
                 final ManyToOneRingBuffer<LaneCommand> commands, final ManyToOneRingBuffer<AccountReport> reports) {
             this.commands = commands;
             this.reports = reports;
-            this.report.encoder.exchangeId(1).securityId(7).execType(ExecType.NEW);
+            // Each order ends at once, so the self-trade index takes it in and lets it go on every round trip.
+            this.report
+                    .encoder
+                    .exchangeId(1)
+                    .securityId(7)
+                    .execType(ExecType.CANCEL)
+                    .orderStatus(OrderStatus.CANCELED);
         }
 
         @Override
@@ -168,6 +187,12 @@ class GatewayAllocationTest {
             status.state(GatewayState.READY);
             final GatewayJournal journal = new GatewayJournal(
                     new NullLogger(), journalDirectory, 64L << 20, Long.MAX_VALUE, System::nanoTime, 0);
+            final CrossKeys crossKeys = new CrossKeys();
+            crossKeys.put(LISTING, CrossKey.of(1, new CrossMarket("M", false)));
+            final CrossIndex cross = new CrossIndex(crossKeys, CrossIndex.Mode.ENFORCE, 1024, 1024);
+            // A kill of another strategy: every order is checked against it and none is covered.
+            final Kills kills = new Kills();
+            kills.publish(new KillRules(new int[] {0}, new int[] {0}, new long[] {0}, new int[] {99}, new long[] {0}));
             final GatewayIngress ingress = new GatewayIngress(
                     ingressSubscription,
                     sessions,
@@ -175,7 +200,9 @@ class GatewayAllocationTest {
                     new GatewayRejects(rejects, new SystemEpochNanoClock()),
                     new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16),
                     System::nanoTime,
-                    journal.ingress());
+                    journal.ingress(),
+                    cross,
+                    kills);
             final GatewayEgress egress = new GatewayEgress(
                     sessions,
                     status,
@@ -183,7 +210,8 @@ class GatewayAllocationTest {
                     new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16),
                     System::nanoTime,
                     new SystemEpochNanoClock(),
-                    journal.egress());
+                    journal.egress(),
+                    cross);
 
             final GatewaySession session = new GatewaySession(SLOT, "s", 3, account, 8192);
             final LongHashSet leases = new LongHashSet();

@@ -14,7 +14,9 @@ import group.gnometrading.gateways.account.reader.AccountConnection;
 import group.gnometrading.gateways.account.reader.AccountReader;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.FakeAccountTransport;
+import group.gnometrading.gateways.account.reader.PublishedMap;
 import group.gnometrading.gateways.account.reader.TextAccountProtocol;
+import group.gnometrading.gateways.orders.CrossMarket;
 import group.gnometrading.gateways.orders.OrderContext;
 import group.gnometrading.gateways.ratelimit.AccountBudget;
 import group.gnometrading.gateways.ratelimit.RequestClass;
@@ -31,14 +33,21 @@ import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.gateway.accounts.GatewayAccount;
 import group.gnometrading.orchestrator.gateway.accounts.LaneAdmissions;
 import group.gnometrading.orchestrator.gateway.control.GatewayControl;
+import group.gnometrading.orchestrator.gateway.control.GatewayKills;
+import group.gnometrading.orchestrator.gateway.control.KillSource;
 import group.gnometrading.orchestrator.gateway.control.SessionRegistry;
+import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.CrossKey;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
+import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
+import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
@@ -47,8 +56,11 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.fee.FeeTimeline;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -66,10 +78,12 @@ import org.agrona.concurrent.SystemEpochNanoClock;
 public final class GatewayFixture implements AutoCloseable {
 
     public static final int ACCOUNT_ID = 5;
+    public static final int SECOND_ACCOUNT_ID = ACCOUNT_ID + 1;
     public static final int EXCHANGE_ID = TestLaneVenue.EXCHANGE_ID;
     public static final long SECURITY_ID = TestLaneVenue.SECURITY_ID;
     public static final int LISTING_ID = 70;
     private static final int MAX_ORDERS = 256;
+    private static final int CROSS_CAPACITY = 4096;
 
     /** The registry a gateway checks hellos against: running sessions, each on one listing and bound to one account. */
     public static final class Registry {
@@ -138,7 +152,9 @@ public final class GatewayFixture implements AutoCloseable {
     }
 
     private final AeronRuntime aeron;
+    // The first of its accounts, which the fixture's single-account tests use.
     private final GatewayAccount account;
+    private final List<GatewayAccount> accounts;
     private final GatewayControl control;
     private final GatewayIngress ingress;
     private final GatewayEgress egress;
@@ -146,8 +162,12 @@ public final class GatewayFixture implements AutoCloseable {
     private final List<OwnershipLog> logs;
     private final List<GnomeAgentRunner> runners = new ArrayList<>();
     private final GatewayJournal journal;
-    private final LaneAdmissions admissions;
+    private final List<LaneAdmissions> admissions;
     private final boolean journalPaused;
+    private final CrossIndex cross;
+    private final Kills kills = new Kills();
+    private final GatewayKills gatewayKills;
+    private final Path killsFile;
     private GnomeAgentRunner journalRunner;
 
     /**
@@ -156,7 +176,7 @@ public final class GatewayFixture implements AutoCloseable {
      * when {@code journalPaused}). {@code tap} hears every decision of the account's lane as well, on its thread.
      */
     public record Setup(
-            GatewayAccount account,
+            List<GatewayAccount> accounts,
             List<Listing> listings,
             Registry registry,
             Path stateDirectory,
@@ -167,7 +187,8 @@ public final class GatewayFixture implements AutoCloseable {
 
     private GatewayFixture(final String name, final int ingressPort, final Setup setup) throws Exception {
         this.aeron = AeronRuntime.launch(name, AeronProfile.GATEWAY, Throwable::printStackTrace);
-        this.account = setup.account();
+        this.accounts = setup.accounts();
+        this.account = this.accounts.get(0);
         final GatewayControl.Listings listings = new GatewayControl.Listings() {
             @Override
             public Listing listing(final int exchangeId, final long securityId) {
@@ -193,50 +214,35 @@ public final class GatewayFixture implements AutoCloseable {
                         16L << 20,
                         Long.MAX_VALUE,
                         System::nanoTime,
-                        1,
+                        setup.accounts().size(),
                         setup.journalRing());
         this.journalPaused = setup.journalPaused();
-        this.admissions = new LaneAdmissions(
-                this.account.accountId(),
-                this.journal == null ? JournalRecorder.NONE : this.journal.lane(0),
-                System::nanoTime);
-        final AccountLane.Admissions journaled = this.admissions;
-        final AccountLane.Admissions tap = setup.tap();
-        this.account.lane().admissions(new AccountLane.Admissions() {
-            @Override
-            public void decided(
-                    final long sessionSlot,
-                    final long clientOidCounter,
-                    final RequestClass type,
-                    final AdmissionAction action,
-                    final long queuedNanos,
-                    final long tokensLeft) {
-                journaled.decided(sessionSlot, clientOidCounter, type, action, queuedNanos, tokensLeft);
-                tap.decided(sessionSlot, clientOidCounter, type, action, queuedNanos, tokensLeft);
-            }
-
-            @Override
-            public void answered(final RequestClass type, final long roundTripNanos, final boolean whole) {
-                journaled.answered(type, roundTripNanos, whole);
-                tap.answered(type, roundTripNanos, whole);
-            }
-
-            @Override
-            public void connectionsBusy() {
-                journaled.connectionsBusy();
-                tap.connectionsBusy();
-            }
-        });
+        this.admissions = new ArrayList<>();
+        for (int i = 0; i < this.accounts.size(); i++) {
+            final GatewayAccount account = this.accounts.get(i);
+            final LaneAdmissions journaled = new LaneAdmissions(
+                    account.accountId(),
+                    this.journal == null ? JournalRecorder.NONE : this.journal.lane(i),
+                    System::nanoTime);
+            this.admissions.add(journaled);
+            account.lane().admissions(tapped(journaled, setup.tap()));
+        }
         final SessionRegistry registry = new SessionRegistry(setup.registry().records::get);
+        this.cross = new CrossIndex(
+                this.account.crossKeys() == null ? new CrossKeys() : this.account.crossKeys(),
+                CrossIndex.Mode.ENFORCE,
+                CROSS_CAPACITY,
+                CROSS_CAPACITY);
         final GatewayRestart.Result restart = GatewayRestart.recover(
                 new NullLogger(),
                 setup.stateDirectory(),
                 1 << 20,
-                List.of(this.account),
+                this.accounts,
                 listings,
                 registry,
                 System.nanoTime(),
-                System.currentTimeMillis());
+                System.currentTimeMillis(),
+                this.cross);
         this.logs = restart.logs();
         final GatewayStatus status = new GatewayStatus(System.nanoTime());
         final ManyToOneRingBuffer<GatewayMessage> toControl =
@@ -255,20 +261,42 @@ public final class GatewayFixture implements AutoCloseable {
                 new GatewayRejects(rejects, new SystemEpochNanoClock()),
                 toControl,
                 System::nanoTime,
-                this.journal == null ? JournalRecorder.NONE : this.journal.ingress());
+                this.journal == null ? JournalRecorder.NONE : this.journal.ingress(),
+                this.cross,
+                this.kills);
         this.egress = new GatewayEgress(
                 this.sessions,
                 status,
-                List.of(this.account.reports(), rejects),
+                reportRings(this.accounts, rejects),
                 toEgress,
                 System::nanoTime,
                 new SystemEpochNanoClock(),
-                this.journal == null ? JournalRecorder.NONE : this.journal.egress());
+                this.journal == null ? JournalRecorder.NONE : this.journal.egress(),
+                this.cross);
+        this.killsFile = setup.stateDirectory().resolve("kills.json");
+        this.gatewayKills = new GatewayKills(
+                new NullLogger(),
+                KillSource.file(this.killsFile),
+                this.kills,
+                this.sessions,
+                listingId -> {
+                    for (final Listing listing : setup.listings()) {
+                        if (listing.listingId() == listingId) {
+                            return PublishedMap.listingKey(
+                                    listing.exchange().exchangeId(),
+                                    listing.security().securityId());
+                        }
+                    }
+                    return 0;
+                },
+                System::nanoTime);
+        // The gateway takes no new order before its first read of the kills, as at startup.
+        this.gatewayKills.run();
         this.control = new GatewayControl(
                 new NullLogger(),
                 this.sessions,
                 status,
-                Map.of(this.account.accountId(), this.account),
+                links(this.accounts),
                 toControl,
                 toEgress,
                 registry,
@@ -299,7 +327,7 @@ public final class GatewayFixture implements AutoCloseable {
                 name,
                 ingressPort,
                 new Setup(
-                        account(venue),
+                        List.of(account(venue)),
                         List.of(listing),
                         venue.registry(),
                         venue.stateDirectory(),
@@ -309,15 +337,65 @@ public final class GatewayFixture implements AutoCloseable {
                         AccountLane.Admissions.NONE));
     }
 
-    /** The lane's last full minute, as the gateway's status line gives it; null if none. */
+    /** The first account's lane's last full minute, as the gateway's status line gives it; null if none. */
     public String lastMinute() {
-        return this.admissions.lastMinute(System.nanoTime());
+        return this.admissions.get(0).lastMinute(System.nanoTime());
+    }
+
+    private static List<ManyToOneRingBuffer<AccountReport>> reportRings(
+            final List<GatewayAccount> accounts, final ManyToOneRingBuffer<AccountReport> rejects) {
+        final List<ManyToOneRingBuffer<AccountReport>> rings = new ArrayList<>();
+        for (final GatewayAccount account : accounts) {
+            rings.add(account.reports());
+        }
+        rings.add(rejects);
+        return rings;
+    }
+
+    private static Map<Integer, AccountLink> links(final List<GatewayAccount> accounts) {
+        final Map<Integer, AccountLink> links = new HashMap<>();
+        for (final GatewayAccount account : accounts) {
+            links.put(account.accountId(), account);
+        }
+        return links;
+    }
+
+    /** What the lane decides, to the journal and to the test's own tap. */
+    private static AccountLane.Admissions tapped(
+            final AccountLane.Admissions journaled, final AccountLane.Admissions tap) {
+        return new AccountLane.Admissions() {
+            @Override
+            public void decided(
+                    final long sessionSlot,
+                    final long clientOidCounter,
+                    final RequestClass type,
+                    final AdmissionAction action,
+                    final long queuedNanos,
+                    final long tokensLeft) {
+                journaled.decided(sessionSlot, clientOidCounter, type, action, queuedNanos, tokensLeft);
+                tap.decided(sessionSlot, clientOidCounter, type, action, queuedNanos, tokensLeft);
+            }
+
+            @Override
+            public void answered(final RequestClass type, final long roundTripNanos, final boolean whole) {
+                journaled.answered(type, roundTripNanos, whole);
+                tap.answered(type, roundTripNanos, whole);
+            }
+
+            @Override
+            public void connectionsBusy() {
+                journaled.connectionsBusy();
+                tap.connectionsBusy();
+            }
+        };
     }
 
     /** Starts a gateway: its account, and then ingress, egress, control and (unless held back) its journal. */
     public static GatewayFixture start(final String name, final int ingressPort, final Setup setup) throws Exception {
         final GatewayFixture gateway = new GatewayFixture(name, ingressPort, setup);
-        gateway.account.start();
+        for (final GatewayAccount account : gateway.accounts) {
+            account.start();
+        }
         gateway.run(gateway.egress);
         gateway.run(gateway.ingress);
         gateway.run(gateway.control);
@@ -347,7 +425,13 @@ public final class GatewayFixture implements AutoCloseable {
     }
 
     private static GatewayAccount account(final Venue venue) throws Exception {
-        return account(
+        return account(venue, ACCOUNT_ID, new CrossKeys());
+    }
+
+    /** An account on the fake venue under {@code accountId}, publishing into {@code crossKeys}. */
+    private static GatewayAccount account(final Venue venue, final int accountId, final CrossKeys crossKeys)
+            throws Exception {
+        final GatewayAccount account = account(
                 venue,
                 VenueRateLimits.of(
                         "Test",
@@ -358,7 +442,31 @@ public final class GatewayFixture implements AutoCloseable {
                         List.of()),
                 MAX_ORDERS,
                 4,
-                1);
+                1,
+                accountId,
+                crossKeys);
+        return account;
+    }
+
+    /**
+     * Starts a gateway holding two accounts, each on its own fake venue, sharing one self-trade index: sessions of
+     * either registered in {@code first}'s registry, the second's under {@link #SECOND_ACCOUNT_ID}.
+     */
+    public static GatewayFixture startOnTwoAccounts(
+            final String name, final Venue first, final Venue second, final int ingressPort) throws Exception {
+        final CrossKeys crossKeys = new CrossKeys();
+        return start(
+                name,
+                ingressPort,
+                new Setup(
+                        List.of(account(first, ACCOUNT_ID, crossKeys), account(second, SECOND_ACCOUNT_ID, crossKeys)),
+                        List.of(listing()),
+                        first.registry(),
+                        first.stateDirectory(),
+                        null,
+                        0,
+                        false,
+                        AccountLane.Admissions.NONE));
     }
 
     /**
@@ -373,6 +481,18 @@ public final class GatewayFixture implements AutoCloseable {
             final int connections,
             final int maxBatch)
             throws Exception {
+        return account(venue, limits, maxOrders, connections, maxBatch, ACCOUNT_ID, new CrossKeys());
+    }
+
+    private static GatewayAccount account(
+            final Venue venue,
+            final VenueRateLimits limits,
+            final int maxOrders,
+            final int connections,
+            final int maxBatch,
+            final int accountId,
+            final CrossKeys crossKeys)
+            throws Exception {
         final TestLaneVenue laneVenue = new TestLaneVenue();
         laneVenue.maxBatch = maxBatch;
         final ManyToOneRingBuffer<OrderContext> notices =
@@ -380,13 +500,15 @@ public final class GatewayFixture implements AutoCloseable {
         final ManyToOneRingBuffer<OrderContext> released =
                 new ManyToOneRingBuffer<>(OrderContext[]::new, OrderContext::new, 2 * maxOrders);
         final GatewayAccount.Parts parts = new GatewayAccount.Parts();
-        parts.account = new VenueAccount(ACCOUNT_ID, EXCHANGE_ID, "test-account", "unused", null);
-        parts.name = "account-" + ACCOUNT_ID;
+        parts.account = new VenueAccount(accountId, EXCHANGE_ID, "test-account-" + accountId, "unused", null);
+        parts.name = "account-" + accountId;
         parts.logger = new NullLogger();
         parts.exit = (status, cause) -> {
             throw new IllegalStateException("The gateway gave up: " + cause, cause);
         };
-        parts.markets = (listing, fees) -> {};
+        parts.markets = (listing, fees) ->
+                CrossKey.of(listing.exchange().exchangeId(), new CrossMarket(listing.exchangeSecurityId(), false));
+        parts.crossKeys = crossKeys;
         parts.orderQuery = venue.orders();
         parts.commands = new ManyToOneRingBuffer<>(LaneCommand[]::new, LaneCommand::new, 4 * maxOrders);
         parts.reports = new ManyToOneRingBuffer<>(AccountReport[]::new, AccountReport::new, 4 * maxOrders);
@@ -431,6 +553,15 @@ public final class GatewayFixture implements AutoCloseable {
     }
 
     /** The session holding {@code slot}, or null. */
+    /**
+     * Puts the kill switches in {@code json} (rows as the registry returns them) in force and runs one kill pass, as
+     * the gateway's poller does each second: what they cover is refused from now on, and its working orders cancelled.
+     */
+    public void kills(final String json) throws IOException {
+        Files.writeString(this.killsFile, json);
+        this.gatewayKills.run();
+    }
+
     public boolean linked(final long slot) {
         final GatewaySession session = this.sessions.bySlot(slot);
         return session != null && session.state == GatewaySession.ACTIVE;
@@ -445,7 +576,7 @@ public final class GatewayFixture implements AutoCloseable {
                 throw new IllegalStateException(e);
             }
         }
-        this.account.close();
+        this.accounts.forEach(GatewayAccount::close);
         this.logs.forEach(OwnershipLog::close);
         if (this.journal != null) {
             try {

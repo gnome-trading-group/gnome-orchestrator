@@ -10,6 +10,7 @@ import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
+import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
@@ -20,6 +21,7 @@ import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.SbeMessage;
+import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.gateway.SessionHeartbeatDecoder;
 import io.aeron.Subscription;
 import io.aeron.logbuffer.ControlledFragmentHandler;
@@ -32,7 +34,8 @@ import org.agrona.DirectBuffer;
  * Reads every session's messages off the gateway's ingress subscription. Core orders carry no session, so the sender is
  * the session linked to the Aeron image the message arrived on; one from an image no session is linked to is dropped
  * and counted. Orders become commands on the owning account's lane, or are refused with a report straight back when the
- * session isn't trading, the listing isn't its lease, or the gateway or account can't take them. Heartbeats are noted
+ * session isn't trading, the listing isn't its lease, a kill covers it ({@link Kills}), the gateway or account can't
+ * take them, or the order would trade against another session's ({@link CrossIndex}). Heartbeats are noted
  * on the session; hellos, goodbyes and queries go to the control thread, as does any message that can't be read, which
  * evicts its session.
  *
@@ -51,6 +54,8 @@ public final class GatewayIngress implements AeronPathAgent {
     private final ManyToOneRingBuffer<GatewayMessage> toControl;
     private final LongSupplier nanoClock;
     private final JournalRecorder journal;
+    private final CrossIndex cross;
+    private final Kills kills;
     private final Order order = new Order();
     private final CancelOrder cancel = new CancelOrder();
     private final ModifyOrder modify = new ModifyOrder();
@@ -69,7 +74,9 @@ public final class GatewayIngress implements AeronPathAgent {
             final GatewayRejects rejects,
             final ManyToOneRingBuffer<GatewayMessage> toControl,
             final LongSupplier nanoClock,
-            final JournalRecorder journal) {
+            final JournalRecorder journal,
+            final CrossIndex cross,
+            final Kills kills) {
         this.subscription = subscription;
         this.sessions = sessions;
         this.status = status;
@@ -77,10 +84,13 @@ public final class GatewayIngress implements AeronPathAgent {
         this.toControl = toControl;
         this.nanoClock = nanoClock;
         this.journal = journal;
+        this.cross = cross;
+        this.kills = kills;
     }
 
     @Override
     public int doWork() {
+        this.cross.drain();
         return this.subscription.controlledPoll(this.handler, FRAGMENT_LIMIT);
     }
 
@@ -180,9 +190,22 @@ public final class GatewayIngress implements AeronPathAgent {
         final int strategyId = this.order.getClientOidStrategyId();
         final int exchangeId = decoder.exchangeId();
         final long securityId = decoder.securityId();
-        final RejectReason refusal = refusal(session, PublishedMap.listingKey(exchangeId, securityId));
+        final long listingKey = PublishedMap.listingKey(exchangeId, securityId);
+        final RejectReason refusal = refusal(session, listingKey);
         if (refusal != null) {
             return this.rejects.reject(session.slot, counter, strategyId, exchangeId, securityId, refusal);
+        }
+        final Side side = decoder.side();
+        final long price = decoder.price();
+        final int cross = this.cross.checkNew(session.slot, listingKey, side, price);
+        if (cross != CrossIndex.CLEAR) {
+            return this.rejects.reject(
+                    session.slot,
+                    counter,
+                    strategyId,
+                    exchangeId,
+                    securityId,
+                    cross == CrossIndex.CROSSES ? RejectReason.SELF_TRADE : RejectReason.SESSION_CAP);
         }
         final ManyToOneRingBuffer<LaneCommand> lane = session.account.commands();
         final int index = lane.tryClaim();
@@ -197,12 +220,13 @@ public final class GatewayIngress implements AeronPathAgent {
         command.clientOidStrategyId = strategyId;
         command.exchangeId = exchangeId;
         command.securityId = securityId;
-        command.side = decoder.side();
-        command.price = decoder.price();
+        command.side = side;
+        command.price = price;
         command.size = decoder.size();
         command.timeInForce = decoder.timeInForce();
         command.orderType = decoder.orderType();
         command.postOnly = decoder.flags().postOnly();
+        this.cross.add(session.slot, counter, listingKey, side, price);
         lane.commit(index);
         return true;
     }
@@ -212,11 +236,14 @@ public final class GatewayIngress implements AeronPathAgent {
         if (session.state != GatewaySession.ACTIVE) {
             return RejectReason.SESSION_NOT_REGISTERED;
         }
-        if (!this.status.takesOrders()) {
+        if (!this.status.takesOrders() || !this.kills.read()) {
             return RejectReason.GATEWAY_NOT_READY;
         }
         if (!session.leases(listingKey)) {
             return RejectReason.LISTING_NOT_LEASED;
+        }
+        if (this.kills.rules().covers(session.account.accountId(), listingKey, session.strategyId, session.slot)) {
+            return RejectReason.HALTED;
         }
         if (session.account.state() != AccountState.READY) {
             return RejectReason.GATEWAY_DEGRADED;
@@ -252,6 +279,7 @@ public final class GatewayIngress implements AeronPathAgent {
         command.reset();
         command.kind = LaneCommand.CANCEL;
         command.sessionSlot = session.slot;
+        this.cross.cancelSent(session.slot, counter);
         command.clientOidCounter = counter;
         command.clientOidStrategyId = strategyId;
         command.exchangeId = decoder.exchangeId();
@@ -275,6 +303,11 @@ public final class GatewayIngress implements AeronPathAgent {
         if (refusal != null) {
             return this.rejects.cancelReject(session.slot, counter, strategyId, exchangeId, securityId, refusal);
         }
+        final long price = decoder.price();
+        if (this.cross.checkAmend(session.slot, counter, price) != CrossIndex.CLEAR) {
+            return this.rejects.cancelReject(
+                    session.slot, counter, strategyId, exchangeId, securityId, RejectReason.SELF_TRADE);
+        }
         final ManyToOneRingBuffer<LaneCommand> lane = session.account.commands();
         final int index = lane.tryClaim();
         if (index < 0) {
@@ -288,9 +321,10 @@ public final class GatewayIngress implements AeronPathAgent {
         command.clientOidStrategyId = strategyId;
         command.exchangeId = exchangeId;
         command.securityId = securityId;
-        command.price = decoder.price();
+        command.price = price;
         command.size = decoder.size();
         command.postOnly = decoder.flags().postOnly();
+        this.cross.amend(session.slot, counter, price);
         lane.commit(index);
         return true;
     }

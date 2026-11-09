@@ -9,6 +9,7 @@ import group.gnometrading.orchestrator.gateway.control.GatewayControl;
 import group.gnometrading.orchestrator.gateway.control.SessionRegistry;
 import group.gnometrading.orchestrator.gateway.control.SessionsFile;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
+import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.utils.CauseChain;
 import java.io.IOException;
@@ -51,7 +52,8 @@ public final class GatewayRestart {
             final GatewayControl.Listings listings,
             final SessionRegistry registry,
             final long nowNanos,
-            final long nowMillis)
+            final long nowMillis,
+            final CrossIndex cross)
             throws IOException {
         final List<SessionsFile.Entry> entries = new ArrayList<>();
         final SessionsFile sessionsFile = SessionsFile.open(directory.resolve("sessions.jsonl"), nowMillis, entries);
@@ -80,6 +82,12 @@ public final class GatewayRestart {
             loadedByAccount.put(account.accountId(), loaded);
             for (final OrderContext ctx : open) {
                 if (recoverOrder(logger, account, listings, loaded, ctx)) {
+                    cross.restore(
+                            ctx.sessionSlot,
+                            ctx.clientOidCounter,
+                            PublishedMap.listingKey(ctx.exchangeId, ctx.securityId),
+                            ctx.side,
+                            ctx.limitPrice);
                     counters.computeIfAbsent(ctx.sessionSlot, slot -> new HashSet<>())
                             .add(ctx.clientOidCounter);
                     owners.putIfAbsent(ctx.sessionSlot, new int[] {account.accountId(), ctx.clientOidStrategyId});

@@ -10,6 +10,7 @@ import group.gnometrading.gateways.account.reader.AccountConnection;
 import group.gnometrading.gateways.account.reader.AccountReader;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.AccountState;
+import group.gnometrading.gateways.account.reader.PublishedMap;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.gateways.ratelimit.AccountBudget;
 import group.gnometrading.logging.LogMessage;
@@ -17,10 +18,15 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.networking.http.AsyncHTTPConnections;
 import group.gnometrading.networking.http.HTTPConnector;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.CrossKey;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.runtime.GatewayErrorHandler;
 import group.gnometrading.orchestrator.runtime.GatewayRunners;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
+import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.utils.CauseChain;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import org.agrona.ErrorHandler;
@@ -28,7 +34,7 @@ import org.agrona.ErrorHandler;
 /**
  * One venue account an order gateway holds, and every thread it runs on: the lane sending every session's orders on its
  * own HTTP connections, the connector keeping those open, the account's event socket (reader, writer and supervisor),
- * and on Polymarket Intl the heartbeat keeper. Sessions' commands go in on {@link #commands()}; every report, tagged
+ * and the venue's heartbeat keeper where it has one. Sessions' commands go in on {@link #commands()}; every report, tagged
  * with its session's slot, comes out on {@link #reports()}.
  *
  * <p>A lane or connector that fails stops the process: orders would sit unsent or unanswered with nothing to notice. The
@@ -49,6 +55,7 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
     private final ManyToOneRingBuffer<LaneCommand> commands;
     private final ManyToOneRingBuffer<AccountReport> reports;
     private final Markets markets;
+    private final CrossKeys crossKeys;
     private final VenueOrderQuery orderQuery;
     private final GnomeAgent heartbeats;
     private final AsyncHTTPConnections heartbeatConnections;
@@ -69,7 +76,8 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
         this.connector = parts.connector;
         this.commands = parts.commands;
         this.reports = parts.reports;
-        this.markets = parts.markets;
+        this.markets = published(parts.markets, parts.crossKeys);
+        this.crossKeys = parts.crossKeys;
         this.orderQuery = parts.orderQuery;
         this.heartbeats = parts.heartbeats;
         this.heartbeatConnections = parts.heartbeatConnections;
@@ -94,6 +102,37 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
         public VenueOrderQuery orderQuery;
         public GnomeAgent heartbeats;
         public AsyncHTTPConnections heartbeatConnections;
+        // Where each listing loaded on the account publishes its cross key; every account of the gateway shares one.
+        public CrossKeys crossKeys;
+    }
+
+    /** The venue's markets, each listing's cross key published as it loads, for the self-trade check. */
+    private static Markets published(final Markets venue, final CrossKeys crossKeys) {
+        if (crossKeys == null) {
+            return venue;
+        }
+        return new Markets() {
+            @Override
+            public CrossKey load(final Listing listing, final FeeTimeline fees) throws IOException {
+                final CrossKey key = venue.load(listing, fees);
+                crossKeys.put(
+                        PublishedMap.listingKey(
+                                listing.exchange().exchangeId(),
+                                listing.security().securityId()),
+                        key);
+                return key;
+            }
+
+            @Override
+            public void addSession(final long slot, final String sessionId) {
+                venue.addSession(slot, sessionId);
+            }
+
+            @Override
+            public void removeSession(final long slot) {
+                venue.removeSession(slot);
+            }
+        };
     }
 
     /** Starts every thread: the socket first, so the account catches up while the lane's connections open. */
@@ -139,6 +178,11 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
         return this.account.accountId();
     }
 
+    @Override
+    public int exchangeId() {
+        return this.account.exchangeId();
+    }
+
     public String name() {
         return this.name;
     }
@@ -167,6 +211,11 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
     @Override
     public Markets markets() {
         return this.markets;
+    }
+
+    /** Where the account's listings publish their cross keys; null if it was built without. */
+    public CrossKeys crossKeys() {
+        return this.crossKeys;
     }
 
     public AccountLane<?> lane() {

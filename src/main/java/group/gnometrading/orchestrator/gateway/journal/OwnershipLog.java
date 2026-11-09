@@ -23,7 +23,7 @@ import org.agrona.IoUtil;
 /**
  * Which session owns each order an account has at the venue, kept on local disk so a restarted gateway knows its
  * orders and whose they are. The lane records an order before anything of it is sent ({@link AccountLane.Ownership}),
- * its venue id once known, and its end. The page cache outlives the process, so a crash loses nothing recorded.
+ * its venue id once known, its terms again after an amend the venue took, and its end. The page cache outlives the process, so a crash loses nothing recorded.
  *
  * <p>One memory-mapped file per account. Each record is its length, a CRC32 of the rest, and the rest: kind, session
  * slot and counter, then for an ADD the order's terms, correlation id and venue id. A reader stops at the first record
@@ -34,7 +34,8 @@ import org.agrona.IoUtil;
  */
 public final class OwnershipLog implements AccountLane.Ownership, AutoCloseable {
 
-    private static final long MAGIC = 0x474E4F4D4F574E31L;
+    // Changes with the record layout: a log in another layout reads as empty rather than with every field shifted.
+    private static final long MAGIC = 0x474E4F4D4F574E32L;
     private static final int HEADER = Long.BYTES;
     private static final byte ADD = 1;
     private static final byte VENUE_ID = 2;
@@ -84,6 +85,12 @@ public final class OwnershipLog implements AccountLane.Ownership, AutoCloseable 
         final int start = begin(out, ADD, ctx);
         writeAdd(out, ctx);
         end(out, start);
+    }
+
+    /** Recorded whole again: a later ADD for the same order replaces the earlier one when the log is read. */
+    @Override
+    public void amended(final OrderContext ctx) {
+        added(ctx);
     }
 
     @Override
@@ -145,6 +152,7 @@ public final class OwnershipLog implements AccountLane.Ownership, AutoCloseable 
         out.putShort(ctx.flags);
         out.putLong(ctx.originalQty);
         out.putLong(ctx.limitPrice);
+        out.putLong(ctx.venuePrice);
         out.putLong(ctx.submittedAtMillis);
         out.put((byte) (ctx.awaitsFinalFill ? 1 : 0));
         writeBytes(out, ctx.correlationIdBytes, ctx.correlationIdLength);
@@ -263,6 +271,7 @@ public final class OwnershipLog implements AccountLane.Ownership, AutoCloseable 
         ctx.originalQty = in.getLong();
         ctx.leavesQty = ctx.originalQty;
         ctx.limitPrice = in.getLong();
+        ctx.venuePrice = in.getLong();
         ctx.submittedAtMillis = in.getLong();
         ctx.awaitsFinalFill = in.get() == 1;
         ctx.correlationIdLength = readBytes(in, ctx.correlationIdBytes);

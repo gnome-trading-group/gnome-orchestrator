@@ -78,7 +78,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-schemas</artifactId>
-            <version>2.4.1</version>
+            <version>2.5.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -88,13 +88,13 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>3.0.0</version>
+            <version>3.1.1</version>
         </dependency>
         <!-- The account path's fakes, for the order gateway's in-process tests. -->
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>3.0.0</version>
+            <version>3.1.1</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>
@@ -163,6 +163,12 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>apigateway</artifactId>
         </dependency>
+        <!-- The exit harness's emergency scenario starts the deployed EmergencyCancel. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>lambda</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -173,7 +179,19 @@
                     <execution>
                         <id>default-test</id>
                         <configuration>
-                            <excludedGroups>allocation</excludedGroups>
+                            <excludedGroups>allocation,timing</excludedGroups>
+                        </configuration>
+                    </execution>
+                    <!-- Tests of timing on real sockets and threads, which a busy machine can fail: run on demand,
+                         on a quiet one, with mvn test-compile surefire:test@timing. -->
+                    <execution>
+                        <id>timing</id>
+                        <phase>none</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <groups>timing</groups>
                         </configuration>
                     </execution>
                     <!-- Allocation tests in a JVM of their own, without assertions as sessions run: Disruptor's

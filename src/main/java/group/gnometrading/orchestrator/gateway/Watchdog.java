@@ -10,8 +10,8 @@ import java.util.function.LongSupplier;
 
 /**
  * Exits the process when a thread on the order path stops making progress: ingress, egress, a lane or an account's
- * reader whose passes haven't moved for the stall time. A hung lane would leave Kalshi and Polymarket US orders resting
- * with nothing to cancel them, and the container's health check takes over a minute to act; exiting lets ECS restart
+ * reader whose passes haven't moved for the stall time. A hung lane would leave orders resting with nothing to cancel
+ * them on a venue without a dead-man switch, and the container's health check takes over a minute to act; exiting lets ECS restart
  * the gateway at once. A thread that is waiting on purpose (a reader paused while its socket reconnects) is excused.
  */
 public final class Watchdog {

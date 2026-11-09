@@ -329,7 +329,7 @@ public final class GatewayControl implements GnomeAgent {
         }
         final GatewaySession session = sessionFor(hello, account);
         account.markets().addSession(session.slot, session.sessionId);
-        introduce(session, this.lastRecord.rateWeight(), hello.maxQueueNanos());
+        introduce(session, this.lastRecord.rateWeight(), hello);
         // Handed to egress with the welcome, which switches to it: nothing goes out on it before the welcome.
         final Publication reply = this.replies.open(hello.replyIp(), hello.replyPort());
         final Publication previous = this.repliesOpened.put(session.slot, reply);
@@ -894,10 +894,11 @@ public final class GatewayControl implements GnomeAgent {
     }
 
     /**
-     * Tells the session's lane its share of the account's budget and how long its orders may wait for it, before any
-     * order of this hello reaches the lane: ingress forwards none until the session is linked, after this.
+     * Tells the session's lane its share of the account's budget, how long its orders may wait for it, and the caps it
+     * asked for (the lane holds it to the gateway's), before any order of this hello reaches the lane: ingress
+     * forwards none until the session is linked, after this.
      */
-    private void introduce(final GatewaySession session, final int weight, final long maxQueueNanos) {
+    private void introduce(final GatewaySession session, final int weight, final Hello hello) {
         final ManyToOneRingBuffer<LaneCommand> lane = session.account.commands();
         final int index = claim(lane);
         final LaneCommand command = lane.indexAt(index);
@@ -905,7 +906,9 @@ public final class GatewayControl implements GnomeAgent {
         command.kind = LaneCommand.SESSION;
         command.sessionSlot = session.slot;
         command.weight = weight;
-        command.maxQueueNanos = maxQueueNanos;
+        command.maxQueueNanos = hello.maxQueueNanos();
+        command.maxOpenOrders = hello.maxOpenOrders();
+        command.maxNewPerSecond = hello.maxNewPerSecond();
         lane.commit(index);
     }
 

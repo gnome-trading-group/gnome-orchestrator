@@ -54,6 +54,8 @@ import group.gnometrading.orchestrator.credentials.KalshiCredentials;
 import group.gnometrading.orchestrator.credentials.PolymarketIntlCredentials;
 import group.gnometrading.orchestrator.credentials.PolymarketUsCredentials;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.CrossKey;
+import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.sm.Listing;
@@ -86,10 +88,9 @@ public final class VenueAccounts {
             GatewaySettings settings,
             EpochClock epochClock,
             EpochNanoClock nanoClock,
-            ProcessExit exit) {}
+            ProcessExit exit,
+            CrossKeys crossKeys) {}
 
-    // Kalshi's self-trade prevention for every order: as the session's own order entry sends it.
-    private static final String KALSHI_SELF_TRADE_PREVENTION = "maker";
     // Polymarket US catch-up looks orders up this many at a time, each on a client and signer of its own.
     private static final int PM_US_CATCH_UP_QUERIES = 4;
     // Two, so a beat with no answer is sent again at once on a connection already open.
@@ -155,7 +156,7 @@ public final class VenueAccounts {
         final KalshiLaneVenue venue = new KalshiLaneVenue(
                 this.context.logger(),
                 new KalshiAuthSigner(creds.apiKey(), creds.privateKey()),
-                KALSHI_SELF_TRADE_PREVENTION);
+                KalshiVenue.SELF_TRADE_PREVENTION);
         final KalshiAccountProtocol protocol = new KalshiAccountProtocol(
                 new KalshiAuthSigner(creds.apiKey(), creds.privateKey()),
                 budget.client(RequestClass.CATCH_UP),
@@ -166,10 +167,12 @@ public final class VenueAccounts {
         final HTTPClient loadClient = budget.client(RequestClass.BACKGROUND);
         final AccountLink.Markets markets = new AccountLink.Markets() {
             @Override
-            public void load(final Listing listing, final FeeTimeline fees) throws IOException {
+            public CrossKey load(final Listing listing, final FeeTimeline fees) throws IOException {
                 venue.loadMarket(listing, loadClient, apiHost, loadSigner, System::currentTimeMillis);
                 protocol.addMarket(
                         listing.exchange().exchangeId(), listing.security().securityId(), fees);
+                return CrossKey.of(
+                        listing.exchange().exchangeId(), KalshiVenue.crossMarketOf(listing.exchangeSecurityId()));
             }
 
             @Override
@@ -234,6 +237,7 @@ public final class VenueAccounts {
             final long securityId = listing.security().securityId();
             venue.addMarket(exchangeId, securityId, new PolymarketUsMarket(listing, info));
             protocol.addMarket(exchangeId, securityId, listing);
+            return CrossKey.of(exchangeId, PolymarketUsVenue.crossMarketOf(listing.exchangeSecurityId()));
         };
         return assemble(
                 account,
@@ -291,6 +295,7 @@ public final class VenueAccounts {
             final long securityId = listing.security().securityId();
             venue.addMarket(exchangeId, securityId, PolymarketIntlMarket.of(listing, info));
             protocol.addMarket(exchangeId, securityId, exchangeSecurityId.substring(colon + 1), fees);
+            return CrossKey.of(exchangeId, PolymarketIntlVenue.crossMarketOf(exchangeSecurityId, info));
         };
         final String name = name(account);
         final AsyncHTTPConnections heartbeatConnections = AsyncHTTPConnections.builder(HTTPProtocol.HTTPS, clobHost)
@@ -353,6 +358,7 @@ public final class VenueAccounts {
         parts.logger = this.context.logger();
         parts.exit = this.context.exit();
         parts.markets = markets;
+        parts.crossKeys = this.context.crossKeys();
         parts.orderQuery = orderQuery;
         parts.commands = new ManyToOneRingBuffer<>(LaneCommand[]::new, LaneCommand::new, COMMAND_QUEUE);
         parts.reports = new ManyToOneRingBuffer<>(AccountReport[]::new, AccountReport::new, REPORT_QUEUE);
@@ -381,6 +387,10 @@ public final class VenueAccounts {
                 parts.commands,
                 notices,
                 released);
+        parts.lane.caps(new AccountLane.Caps(
+                this.context.properties().getIntProperty("gateway.session.max.open.orders"),
+                this.context.properties().getIntProperty("gateway.session.max.new.per.second"),
+                this.context.properties().getIntProperty("gateway.account.max.open.orders")));
         parts.reader =
                 new AccountReader(protocol, this.context.nanoClock(), maxOrders, notices, released, parts.reports);
         final WebSocketClient ws = new WebSocketClientBuilder()

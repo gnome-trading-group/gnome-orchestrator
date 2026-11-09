@@ -94,7 +94,8 @@ class GatewayLoadCheck {
                 "load-gateway-" + model,
                 PORT,
                 new GatewayFixture.Setup(
-                        GatewayFixture.account(venue.venue, SyntheticVenue.limits(model, SHARE), 4096, 16, maxBatch),
+                        List.of(GatewayFixture.account(
+                                venue.venue, SyntheticVenue.limits(model, SHARE), 4096, 16, maxBatch)),
                         List.of(GatewayFixture.listing()),
                         venue.venue.registry(),
                         this.state,

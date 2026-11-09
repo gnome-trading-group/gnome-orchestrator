@@ -228,7 +228,9 @@ public final class SessionOrders {
                         sessionId,
                         properties.getIntProperty("strategy.id"),
                         properties.getIntProperty("order.gateway.cod.timeout.ms"),
-                        properties.getIntProperty("order.gateway.max.queue.ms")),
+                        properties.getIntProperty("order.gateway.max.queue.ms"),
+                        optionalInt(properties, "order.gateway.max.open.orders"),
+                        optionalInt(properties, "order.gateway.max.new.per.second")),
                 properties.getIntProperty("order.gateway.max.orders"),
                 System::nanoTime,
                 clock);
@@ -420,5 +422,10 @@ public final class SessionOrders {
             this.sessionAccounts = SessionAccounts.fetch(registry.get(), properties.getStringProperty("session.id"));
         }
         return this.sessionAccounts;
+    }
+
+    /** A whole-number property the session may leave out: 0, which asks for nothing of its own. */
+    private static int optionalInt(final Properties properties, final String key) {
+        return properties.hasProperty(key) ? properties.getIntProperty(key) : 0;
     }
 }

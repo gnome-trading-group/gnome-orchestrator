@@ -13,9 +13,12 @@ import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
 import group.gnometrading.orchestrator.gateway.core.ReplayRing;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.schemas.OrderExecutionReportDecoder;
+import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.SbeMessage;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
+import group.gnometrading.schemas.gateway.OrderState;
 import group.gnometrading.schemas.gateway.OrderStatusDecoder;
 import group.gnometrading.schemas.gateway.OrderStatusEncoder;
 import io.aeron.Publication;
@@ -49,6 +52,7 @@ public final class GatewayEgress implements AeronPathAgent {
     private final LongSupplier nanoClock;
     private final EpochNanoClock wallClock;
     private final JournalRecorder journal;
+    private final CrossIndex cross;
     private final MessageConsumer<AccountReport> reportHandler = this::onReport;
     private final MessageConsumer<GatewayMessage> controlHandler = this::onControl;
     private final SequenceValue reserved = new SequenceValue();
@@ -85,7 +89,8 @@ public final class GatewayEgress implements AeronPathAgent {
             final ManyToOneRingBuffer<GatewayMessage> fromControl,
             final LongSupplier nanoClock,
             final EpochNanoClock wallClock,
-            final JournalRecorder journal) {
+            final JournalRecorder journal,
+            final CrossIndex cross) {
         this.sessions = sessions;
         this.status = status;
         this.reportRings = reportRings;
@@ -93,12 +98,14 @@ public final class GatewayEgress implements AeronPathAgent {
         this.nanoClock = nanoClock;
         this.wallClock = wallClock;
         this.journal = journal;
+        this.cross = cross;
         this.statuses = new OrderStatuses();
     }
 
     @Override
     public int doWork() {
         this.handled = 0;
+        this.cross.flush();
         this.fromControl.read(this.controlHandler, Integer.MAX_VALUE);
         for (int i = 0; i < this.reportRings.size(); i++) {
             this.reportRings.get(i).read(this.reportHandler, REPORTS_PER_PASS);
@@ -149,6 +156,8 @@ public final class GatewayEgress implements AeronPathAgent {
 
     private void onReport(final AccountReport report) {
         this.handled++;
+        // Before routing: an order whose session is gone still rests until its end comes, and blocks until then.
+        tellCross(report);
         final GatewaySession session = this.sessions.bySlot(report.sessionSlot);
         if (session == null) {
             this.unrouted = this.unrouted + 1;
@@ -183,6 +192,9 @@ public final class GatewayEgress implements AeronPathAgent {
                         .wrap(replay.buffer(), replay.offset(sequence) + SbeMessage.HEADER_LENGTH)
                         .reportSeq(sequence);
                 session.totals.status(this.orderStatusDecoder, sequence);
+                if (ended(this.orderStatusDecoder.state())) {
+                    this.cross.ended(session.slot, this.orderStatusDecoder.clientOidCounter());
+                }
             }
             final long sequence = replay.newest();
             this.journal.record(session.slot, replay.buffer(), replay.offset(sequence), replay.length(sequence));
@@ -210,6 +222,36 @@ public final class GatewayEgress implements AeronPathAgent {
         if (!session.unnumbered.offer(message.buffer, 0, message.length)) {
             this.unnumberedFull = this.unnumberedFull + 1;
         }
+    }
+
+    /** Tells the self-trade index what a report changes: an order that ended, or an amend the venue took. */
+    private void tellCross(final AccountReport report) {
+        final OrderExecutionReportDecoder decoder = report.report.decoder;
+        final long counter = report.report.getClientOidCounter();
+        switch (decoder.execType()) {
+            case NEW -> this.cross.amendAccepted(report.sessionSlot, counter);
+            case CANCEL_REJECT -> this.cross.requestRefused(report.sessionSlot, counter);
+            case FILL, CANCEL, REJECT, EXPIRE -> {
+                if (ended(decoder.orderStatus())) {
+                    this.cross.ended(report.sessionSlot, counter);
+                }
+            }
+            default -> {}
+        }
+    }
+
+    private static boolean ended(final OrderStatus status) {
+        return status == OrderStatus.FILLED
+                || status == OrderStatus.CANCELED
+                || status == OrderStatus.REJECTED
+                || status == OrderStatus.EXPIRED;
+    }
+
+    private static boolean ended(final OrderState state) {
+        return state == OrderState.FILLED
+                || state == OrderState.CANCELED
+                || state == OrderState.REJECTED
+                || state == OrderState.EXPIRED;
     }
 
     /** @return how many messages went out */
