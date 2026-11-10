@@ -232,7 +232,7 @@ security group, log group; the name is historical, renaming recreates the VPC) a
 (launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; only live roles can read `gnome/accounts/*`),
 and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
 exchange code; run in the exchange's region, `sm.exchange.region`, where its gateway runs; reads only that region's
-`gnome/accounts/*/trading`; 5-minute timeout, 2 at once, never retried). Started from the controller's Treasury
+`gnome/accounts/*/trading`; 5-minute timeout, never retried, dropped unless started within a minute). Started from the controller's Treasury
 (registry `POST /venue-accounts/emergency-cancel`, async) or by `aws lambda invoke` (registry runbook
 `stop-or-kill.md`).
 

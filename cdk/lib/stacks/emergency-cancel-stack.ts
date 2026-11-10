@@ -66,9 +66,8 @@ export class EmergencyCancelStack extends cdk.Stack {
       // A few thousand orders cancelled one by one, waiting out the venue's rate limit where it says to.
       timeout: cdk.Duration.minutes(5),
       memorySize: 256,
-      reservedConcurrentExecutions: 2,
       retryAttempts: 0,
-      // An async call held back by the concurrency limit would otherwise wait up to six hours and then cancel
+      // An async call throttled by the account's concurrency would otherwise wait up to six hours and then cancel
       // everything with nobody watching: one not started within a minute is dropped, onto the failure queue.
       maxEventAge: cdk.Duration.seconds(60),
       onFailure: new destinations.SqsDestination(new sqs.Queue(this, 'EmergencyCancelFailures', {
