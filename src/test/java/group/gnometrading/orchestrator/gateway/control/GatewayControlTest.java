@@ -21,6 +21,7 @@ import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.aeron.HostAddress;
 import group.gnometrading.orchestrator.gateway.FakeOrderQuery;
+import group.gnometrading.orchestrator.gateway.RecordingAlerts;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
 import group.gnometrading.orchestrator.gateway.core.CrossKey;
 import group.gnometrading.orchestrator.gateway.core.CrossKeys;
@@ -68,6 +69,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -105,6 +107,7 @@ class GatewayControlTest {
             .aeron()
             .addSubscription(AeronChannels.gatewayReply("localhost", REPLY_PORT), AeronStreamIds.GATEWAY_REPLY);
 
+    private final RecordingAlerts alerts = new RecordingAlerts();
     private final TestAccount account = new TestAccount();
     private final SessionTable sessions = new SessionTable();
     private final List<LaneCommand> sessionCommands = new ArrayList<>();
@@ -237,6 +240,7 @@ class GatewayControlTest {
         final Listing listing = this.listing;
         return new GatewayControl(
                 new NullLogger(),
+                this.alerts,
                 this.sessions,
                 this.status,
                 Map.of(ACCOUNT_ID, this.account),
@@ -512,28 +516,53 @@ class GatewayControlTest {
     }
 
     @Test
-    void aPlannedStopCancelsEverySessionSaysGoodbyeAndWaitsForTheLanesToEmpty() throws Exception {
+    void aPlannedStopCancelsEverySessionAndSaysGoodbyeOnlyAfterTheCancelsReports() throws Exception {
         awaitReady();
         hello(0, 0);
         awaitWelcome();
+        this.received.clear();
         this.account.working = 2;
-        final Thread emptying = new Thread(() -> {
+        // As in the gateway: control's thread stopped, egress still running while the stop waits.
+        final AtomicBoolean stopped = new AtomicBoolean();
+        final Thread egressThread = new Thread(() -> {
+            while (!stopped.get()) {
+                this.egress.doWork();
+                Thread.onSpinWait();
+            }
+        });
+        final Thread venue = new Thread(() -> {
             try {
                 Thread.sleep(200);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            report(1, ExecType.CANCEL, group.gnometrading.schemas.OrderStatus.CANCELED, 0, 0, 0, 0);
+            report(2, ExecType.CANCEL, group.gnometrading.schemas.OrderStatus.CANCELED, 0, 0, 0, 0);
             this.account.working = 0;
         });
-        emptying.start();
-        assertTrue(this.control.stop(TimeUnit.SECONDS.toNanos(5)));
-        emptying.join();
+        egressThread.start();
+        venue.start();
+        try {
+            assertTrue(this.control.stop(TimeUnit.SECONDS.toNanos(5)));
+        } finally {
+            venue.join();
+            stopped.set(true);
+            egressThread.join();
+        }
         assertEquals(GatewayState.STOPPING, this.status.state());
         assertEquals(LaneCommand.CANCEL_SESSION, drainCommands().get(0).kind);
         await(
                 () -> nonHeartbeats().stream()
                         .anyMatch(message -> message.templateId() == SessionGoodbyeDecoder.TEMPLATE_ID),
                 "the goodbye");
+        assertEquals(
+                List.of(
+                        OrderExecutionReportDecoder.TEMPLATE_ID,
+                        OrderExecutionReportDecoder.TEMPLATE_ID,
+                        SessionGoodbyeDecoder.TEMPLATE_ID),
+                nonHeartbeats().stream().map(Received::templateId).toList(),
+                "both cancels heard before the goodbye, which comes last");
+        assertEquals(GatewaySession.UNLINKED, this.sessions.bySlot(SLOT).state);
         assertTrue(this.advertised.contains(GatewayState.STOPPING));
         final int stopping = this.advertised.indexOf(GatewayState.STOPPING);
         assertArrayEquals(
@@ -602,6 +631,10 @@ class GatewayControlTest {
                         .toList(),
                 "its cancel sent again, and the order it doesn't know cancelled");
         assertTrue(commands.stream().allMatch(command -> command.kind == LaneCommand.CANCEL));
+        assertEquals(
+                List.of("FIRING GATEWAY_UNATTRIBUTED_ORDERS " + SESSION_ID + ":2"),
+                this.alerts.said,
+                "the order nobody knew raised, as its fills may be missing from the ledger");
     }
 
     @Test
@@ -670,6 +703,38 @@ class GatewayControlTest {
         assertEquals(1_000_000, byCounter.get(3L).cumulativeQty());
         assertEquals(List.of("s42-3"), this.account.query.cancelled);
         assertEquals(OrderState.REJECTED, byCounter.get(4L).state(), "the venue never had it");
+    }
+
+    @Test
+    void aSessionNewToTheGatewayHasTheOrdersItHoldsOpenSettledAsTheVenueHasThem() throws Exception {
+        // As after a stop whose cancel reports never reached it: the gateway that took them is gone, this one holds
+        // nothing of the session's.
+        this.account.query.orders.put("s42-1", new VenueOrder("s42-1", "v-1", 0, 0, 0, true));
+        this.account.query.orders.put("s42-2", new VenueOrder("s42-2", "v-2", 0, 0, 0, false));
+        awaitReady();
+        hello(7, 1);
+        helloOrders(0, true, new long[] {1, OrderState.NEW.value(), 1}, new long[] {2, OrderState.NEW.value(), 1});
+        await(() -> statuses().size() == 2, "a status for each order it holds open");
+        for (final Received received : statuses()) {
+            assertEquals(OrderState.CANCELED, status(received).state(), "ended at the venue, or cancelled there now");
+        }
+        assertEquals(List.of("s42-2"), this.account.query.cancelled, "only the one still resting is cancelled");
+    }
+
+    @Test
+    void aSessionTheGatewayHoldsIsntLookedUpAtTheVenueWhenItSaysHelloAgain() throws Exception {
+        awaitReady();
+        hello(0, 0);
+        awaitWelcome();
+        report(1);
+        await(() -> reports().size() == 1, "the report");
+
+        reconnect();
+        hello(1, 1);
+        helloOrders(0, true, new long[] {1, OrderState.NEW.value(), 1});
+        runFor(200);
+        assertTrue(this.account.query.cancelled.isEmpty());
+        assertEquals(0, this.account.query.lookups.get(), "its orders are this gateway's own");
     }
 
     @Test

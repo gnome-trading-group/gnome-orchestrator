@@ -8,12 +8,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** A venue's orders held in memory, by the id execution reports carry: what a test says the venue has. */
 public final class FakeOrderQuery implements VenueOrderQuery {
 
     public final Map<String, VenueOrder> orders = new ConcurrentHashMap<>();
     public final List<String> cancelled = new CopyOnWriteArrayList<>();
+    public final AtomicInteger lookups = new AtomicInteger();
 
     @Override
     public List<VenueOrder> listOpenOrders(final Listing listing) {
@@ -23,6 +25,7 @@ public final class FakeOrderQuery implements VenueOrderQuery {
     @Override
     public Optional<VenueOrder> getOrder(
             final Listing listing, final String exchangeOrderId, final long createdAfterMs) {
+        this.lookups.incrementAndGet();
         return Optional.ofNullable(this.orders.get(exchangeOrderId));
     }
 

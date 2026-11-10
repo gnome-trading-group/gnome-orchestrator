@@ -302,6 +302,32 @@ class GatewayInProcessTest {
     }
 
     @Test
+    void aPlannedStopCancelsASessionsRestingOrdersAndItHearsEachEndBeforeTheGoodbye() throws Exception {
+        this.first.order(1);
+        this.first.order(2);
+        await(() -> posts() == 2, "both orders at the venue");
+        this.venue.transport().push("ACK s42-1");
+        this.venue.transport().push("ACK s42-2");
+        await(() -> this.first.reports().size() == 2, "both resting");
+
+        final ScheduledExecutorService stopping = Executors.newSingleThreadScheduledExecutor();
+        try {
+            final var stopped = stopping.submit(() -> this.gateway.plannedStop(TimeUnit.SECONDS.toNanos(10)));
+            await(() -> deletes().size() == 2, "both cancelled at the venue");
+            this.venue.transport().push("CANCEL s42-1");
+            this.venue.transport().push("CANCEL s42-2");
+            assertTrue(stopped.get(15, TimeUnit.SECONDS), "the lanes emptied and every session was told");
+        } finally {
+            stopping.shutdownNow();
+        }
+
+        await(() -> this.first.link.state == GatewayLink.DOWN, "the goodbye");
+        assertEquals(4, this.first.reports().size(), "both ends heard before the link went: " + this.first.reports());
+        assertEquals(ExecType.CANCEL, this.first.reports().get(2).decoder.execType());
+        assertEquals(ExecType.CANCEL, this.first.reports().get(3).decoder.execType());
+    }
+
+    @Test
     void aStartingSessionAsksTheVenueThroughTheGatewayWithNoKeyOfItsOwn() throws Exception {
         final VenueOrder resting = new VenueOrder("x-1", "v-x-1", UNIT, 400_000_000L, 7, false);
         final VenueOrder ended = new VenueOrder("x-2", "v-x-2", 3 * UNIT, 1_200_000_000L, 9, true);

@@ -4,6 +4,7 @@ import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.orchestrator.gateway.core.GatewayAlerts;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.KillRules;
 import group.gnometrading.orchestrator.gateway.core.Kills;
@@ -39,6 +40,8 @@ public final class GatewayKills implements Runnable {
     /** How long the kills may go unread before that is logged. */
     public static final long STALE_NANOS = TimeUnit.SECONDS.toNanos(30);
 
+    static final String STALE_ALERT = "GATEWAY_KILLS_STALE";
+
     /** A listing's key from its registry id, or 0 if the security master doesn't have it. */
     @FunctionalInterface
     public interface ListingKeys {
@@ -46,6 +49,7 @@ public final class GatewayKills implements Runnable {
     }
 
     private final Logger logger;
+    private final GatewayAlerts alerts;
     private final KillSource source;
     private final Kills kills;
     private final SessionTable sessions;
@@ -62,12 +66,14 @@ public final class GatewayKills implements Runnable {
 
     public GatewayKills(
             final Logger logger,
+            final GatewayAlerts alerts,
             final KillSource source,
             final Kills kills,
             final SessionTable sessions,
             final ListingKeys listingKeys,
             final LongSupplier nanoClock) {
         this.logger = logger;
+        this.alerts = alerts;
         this.source = source;
         this.kills = kills;
         this.sessions = sessions;
@@ -102,6 +108,7 @@ public final class GatewayKills implements Runnable {
             if (this.staleSaid) {
                 this.staleSaid = false;
                 this.logger.logf(LogMessage.DEBUG, "Gateway kills: read again");
+                this.alerts.resolved(STALE_ALERT, "");
             }
         } catch (Exception e) {
             if (!this.staleSaid && now - this.readAtNanos > STALE_NANOS) {
@@ -111,6 +118,15 @@ public final class GatewayKills implements Runnable {
                         "GATEWAY_KILLS_STALE: kill switches unread for %d s, the last ones kept: %s",
                         TimeUnit.NANOSECONDS.toSeconds(now - this.readAtNanos),
                         CauseChain.of(e));
+                this.alerts.firing(
+                        STALE_ALERT,
+                        "",
+                        "Gateway can't read the kill switches: a kill turned on now won't halt its sessions",
+                        Map.of(
+                                "unreadSeconds",
+                                Long.toString(TimeUnit.NANOSECONDS.toSeconds(now - this.readAtNanos)),
+                                "error",
+                                String.valueOf(CauseChain.of(e))));
             }
         }
     }

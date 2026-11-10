@@ -21,6 +21,7 @@ import group.gnometrading.orchestrator.aeron.HostAddress;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.AwsModule;
+import group.gnometrading.orchestrator.aws.RegistryEndpoint;
 import group.gnometrading.orchestrator.aws.SecretCache;
 import group.gnometrading.orchestrator.aws.SecurityMasterModule;
 import group.gnometrading.orchestrator.di.Named;
@@ -38,6 +39,7 @@ import group.gnometrading.orchestrator.gateway.control.KillSource;
 import group.gnometrading.orchestrator.gateway.control.SessionRegistry;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
 import group.gnometrading.orchestrator.gateway.core.CrossKeys;
+import group.gnometrading.orchestrator.gateway.core.GatewayAlerts;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
@@ -51,6 +53,7 @@ import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
+import group.gnometrading.orchestrator.runtime.AlertsApi;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
@@ -93,6 +96,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     private static final int REJECT_QUEUE = 4096;
     // Of ECS's stop timeout: this long for the lanes to empty after every order is cancelled.
     private static final long STOP_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
+    // How long a failing gateway waits for its alert to be taken before it halts.
+    private static final long FATAL_ALERT_WAIT_MILLIS = 2_000;
     private static final long CONTROL_STALL_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     @Provides
@@ -132,7 +137,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         AgentRuntimeInstaller.installStandard(logger, idle);
 
         final GatewaySettings settings = GatewaySettings.of(properties);
-        final ProcessExit exit = exit(logger);
+        final IngestGatewayAlerts alerts = alerts(logger, properties, settings);
+        final ProcessExit exit = exit(logger, alerts);
         final CrossKeys crossKeys = new CrossKeys();
         final List<GatewayAccount> accounts = buildAccounts(settings, properties, logger, exit, crossKeys);
         final int crossCapacity = settings.maxOrders() * Math.max(1, accounts.size());
@@ -201,6 +207,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 restart(logger, properties, settings, accounts, listings, registry, cross);
         final GatewayControl control = new GatewayControl(
                 logger,
+                alerts,
                 sessions,
                 status,
                 links,
@@ -240,8 +247,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 control,
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway control failed: %s", CauseChain.of(error)));
         logger.logf(LogMessage.DEBUG, "Gateway %s: taking sessions on %s:%d", settings.key(), ip, port);
-        reportAdmissions(logger, accounts, admissions);
-        pollKills(logger, properties, kills, sessions, getInstance(SecurityMaster.class));
+        reportAdmissions(logger, alerts, accounts, admissions);
+        pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class));
         reportDrops(logger, ingress, egress, sessions, cross);
         reportSelfTrades(logger, cross);
         final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, controlRunner, accounts)
@@ -270,6 +277,15 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         serveHealth(accounts);
     }
 
+    /** Where the gateway raises its alerts: the alerts API the reconciler names, with the registry's key. */
+    private IngestGatewayAlerts alerts(
+            final Logger logger, final Properties properties, final GatewaySettings settings) {
+        final String url =
+                properties.hasProperty("alerts.api.url") ? properties.getStringProperty("alerts.api.url") : null;
+        return new IngestGatewayAlerts(
+                logger, AlertsApi.of(url, getInstance(RegistryEndpoint.class).apiKey()), settings.key());
+    }
+
     /** Each lane's decisions, journaled when the journal is on; set before any lane starts. */
     private static List<LaneAdmissions> admissions(final List<GatewayAccount> accounts, final GatewayJournal journal) {
         final List<LaneAdmissions> admissions = new ArrayList<>();
@@ -285,11 +301,17 @@ public class OrderGatewayOrchestrator extends Orchestrator {
 
     /**
      * Each minute, per account: what its lane sent and how long requests waited for the budget, and the venue's 429s,
-     * which the budget exists to prevent.
+     * which the budget exists to prevent. A minute with 429s, or with requests the venue never answered, raises an
+     * alert for the account, resolved by the next minute without.
      */
     private static void reportAdmissions(
-            final Logger logger, final List<GatewayAccount> accounts, final List<LaneAdmissions> admissions) {
+            final Logger logger,
+            final GatewayAlerts alerts,
+            final List<GatewayAccount> accounts,
+            final List<LaneAdmissions> admissions) {
         final long[] refusalsSeen = new long[accounts.size()];
+        final AccountAlert rateLimited = new AccountAlert(alerts, "GATEWAY_VENUE_RATE_LIMITED", accounts.size());
+        final AccountAlert unanswered = new AccountAlert(alerts, "GATEWAY_ORDERS_UNANSWERED", accounts.size());
         DaemonThreads.scheduler("gateway-admissions")
                 .scheduleAtFixedRate(
                         () -> {
@@ -298,15 +320,28 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                 final GatewayAccount account = accounts.get(i);
                                 final String minute = admissions.get(i).lastMinute(now);
                                 final long refusals = account.venueRefusals();
-                                if (refusals != refusalsSeen[i]) {
+                                final long newRefusals = refusals - refusalsSeen[i];
+                                if (newRefusals > 0) {
                                     logger.logf(
                                             LogMessage.VENUE_RATE_LIMITED,
                                             "Gateway %s: the venue answered 429 %d times in the last minute (%d in all)",
                                             account.name(),
-                                            refusals - refusalsSeen[i],
+                                            newRefusals,
                                             refusals);
                                     refusalsSeen[i] = refusals;
                                 }
+                                rateLimited.minute(
+                                        i,
+                                        account,
+                                        newRefusals,
+                                        "the venue answered " + newRefusals + " requests with 429 in the last minute");
+                                final long never = admissions.get(i).lastUnanswered(now);
+                                unanswered.minute(
+                                        i,
+                                        account,
+                                        never,
+                                        never
+                                                + " orders, amends or cancels the venue never answered in the last minute");
                                 if (minute != null) {
                                     logger.logf(LogMessage.DEBUG, "Gateway %s: %s", account.name(), minute);
                                 }
@@ -376,6 +411,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
      */
     private void pollKills(
             final Logger logger,
+            final GatewayAlerts alerts,
             final Properties properties,
             final Kills kills,
             final SessionTable sessions,
@@ -385,6 +421,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 : KillSource.over(getInstance(RegistryConnection.class));
         final GatewayKills gatewayKills = new GatewayKills(
                 logger,
+                alerts,
                 source,
                 kills,
                 sessions,
@@ -609,7 +646,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         close(logger, controlRunner);
         try {
             if (!control.stop(STOP_TIMEOUT_NANOS)) {
-                logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway stopping with orders still working");
+                logger.logf(
+                        LogMessage.UNKNOWN_ERROR,
+                        "Gateway stopping with orders still working or sessions not yet told");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -665,13 +704,22 @@ public class OrderGatewayOrchestrator extends Orchestrator {
      * that failed should leave them resting for its restart to take back (and a stuck thread could keep the planned stop
      * from ever finishing). On a thread of its own, so the failing agent's thread isn't the one halting.
      */
-    private static ProcessExit exit(final Logger logger) {
+    private static ProcessExit exit(final Logger logger, final IngestGatewayAlerts alerts) {
         final AtomicBoolean exiting = new AtomicBoolean();
+        // Each process's exit is its own alert, so one that keeps failing after restarts says so every time.
+        final String process = Long.toString(System.currentTimeMillis());
         return (status, cause) -> {
             logger.logf(LogMessage.FATAL_ERROR_EXITING, "Gateway exiting: %s", CauseChain.of(cause));
             if (exiting.compareAndSet(false, true)) {
                 new Thread(
                                 () -> {
+                                    final String reason = String.valueOf(CauseChain.of(cause));
+                                    alerts.firingAndWait(
+                                            "GATEWAY_FATAL",
+                                            process,
+                                            "Gateway exiting on an error: " + reason,
+                                            Map.of("reason", reason),
+                                            FATAL_ALERT_WAIT_MILLIS);
                                     if (logger instanceof AsyncLogger async) {
                                         async.close();
                                     }
@@ -681,5 +729,38 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         .start();
             }
         };
+    }
+
+    /** One alert type per account, raised for a minute that saw any and resolved by the next that saw none. */
+    private static final class AccountAlert {
+        private final GatewayAlerts alerts;
+        private final String type;
+        private final boolean[] firing;
+
+        AccountAlert(final GatewayAlerts alerts, final String type, final int accounts) {
+            this.alerts = alerts;
+            this.type = type;
+            this.firing = new boolean[accounts];
+        }
+
+        void minute(final int index, final GatewayAccount account, final long count, final String what) {
+            if (count > 0) {
+                this.firing[index] = true;
+                this.alerts.firing(
+                        this.type,
+                        account.name(),
+                        "Gateway account " + account.name() + ": " + what,
+                        Map.of(
+                                "account",
+                                account.name(),
+                                "accountId",
+                                Integer.toString(account.accountId()),
+                                "count",
+                                Long.toString(count)));
+            } else if (this.firing[index]) {
+                this.firing[index] = false;
+                this.alerts.resolved(this.type, account.name());
+            }
+        }
     }
 }

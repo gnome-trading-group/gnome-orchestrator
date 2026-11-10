@@ -39,6 +39,7 @@ import group.gnometrading.orchestrator.gateway.control.SessionRegistry;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
 import group.gnometrading.orchestrator.gateway.core.CrossKey;
 import group.gnometrading.orchestrator.gateway.core.CrossKeys;
+import group.gnometrading.orchestrator.gateway.core.GatewayAlerts;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
@@ -184,6 +185,7 @@ public final class GatewayFixture implements AutoCloseable {
     private final GatewayKills gatewayKills;
     private final Path killsFile;
     private GnomeAgentRunner journalRunner;
+    private boolean stopped;
 
     /**
      * What a gateway is built from: its one account, the listings it may trade, the registry it checks hellos against,
@@ -291,6 +293,7 @@ public final class GatewayFixture implements AutoCloseable {
         this.killsFile = setup.stateDirectory().resolve("kills.json");
         this.gatewayKills = new GatewayKills(
                 new NullLogger(),
+                GatewayAlerts.NONE,
                 KillSource.file(this.killsFile),
                 this.kills,
                 this.sessions,
@@ -309,6 +312,7 @@ public final class GatewayFixture implements AutoCloseable {
         this.gatewayKills.run();
         this.control = new GatewayControl(
                 new NullLogger(),
+                GatewayAlerts.NONE,
                 this.sessions,
                 status,
                 links(this.accounts),
@@ -582,8 +586,30 @@ public final class GatewayFixture implements AutoCloseable {
         return session != null && session.state == GatewaySession.ACTIVE;
     }
 
-    /** Stops every thread as a crash would: nothing is cancelled and no session told. */
+    /**
+     * Stops as SIGTERM does: control's thread first, then every session's orders cancelled and each session told while
+     * ingress and egress still run, then everything else.
+     *
+     * @return what the stop returned: whether the lanes emptied and every goodbye went out in time
+     */
+    public boolean plannedStop(final long timeoutNanos) throws Exception {
+        final GnomeAgentRunner controlRunner = this.runners.stream()
+                .filter(runner -> runner.getAgent() == this.control)
+                .findFirst()
+                .orElseThrow();
+        controlRunner.close();
+        this.runners.remove(controlRunner);
+        final boolean stopped = this.control.stop(timeoutNanos);
+        kill();
+        return stopped;
+    }
+
+    /** Stops every thread as a crash would: nothing is cancelled and no session told. Once; again does nothing. */
     public void kill() {
+        if (this.stopped) {
+            return;
+        }
+        this.stopped = true;
         for (int i = this.runners.size() - 1; i >= 0; i--) {
             try {
                 this.runners.get(i).close();

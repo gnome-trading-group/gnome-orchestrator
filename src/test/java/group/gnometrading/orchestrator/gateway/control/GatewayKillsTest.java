@@ -10,6 +10,7 @@ import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.account.reader.PublishedMap;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.orchestrator.gateway.RecordingAlerts;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.Kills;
@@ -38,6 +39,7 @@ class GatewayKillsTest {
     private final Account account = new Account();
     private final SessionTable sessions = new SessionTable();
     private final Kills kills = new Kills();
+    private final RecordingAlerts alerts = new RecordingAlerts();
     private GatewayKills gatewayKills;
     private Path file;
 
@@ -46,6 +48,7 @@ class GatewayKillsTest {
         this.sessions.add(session(43, "session-b", 4));
         this.gatewayKills = new GatewayKills(
                 new NullLogger(),
+                this.alerts,
                 source,
                 this.kills,
                 this.sessions,
@@ -56,6 +59,32 @@ class GatewayKillsTest {
     private void startOnFile() {
         this.file = this.directory.resolve("kills.json");
         start(KillSource.file(this.file));
+    }
+
+    @Test
+    void killsUnreadForThirtySecondsRaiseAnAlertOnceThatTheNextGoodReadResolves() {
+        final boolean[] down = {false};
+        start(() -> {
+            if (down[0]) {
+                throw new IOException("registry down");
+            }
+            return List.of();
+        });
+        this.gatewayKills.run();
+        down[0] = true;
+        this.nowNanos[0] += GatewayKills.STALE_NANOS / 2;
+        this.gatewayKills.run();
+        assertTrue(this.alerts.said.isEmpty(), "not yet stale");
+
+        this.nowNanos[0] += GatewayKills.STALE_NANOS;
+        this.gatewayKills.run();
+        this.nowNanos[0] += TimeUnit.SECONDS.toNanos(1);
+        this.gatewayKills.run();
+        assertEquals(List.of("FIRING GATEWAY_KILLS_STALE"), this.alerts.said, "raised once");
+
+        down[0] = false;
+        this.gatewayKills.run();
+        assertEquals(List.of("FIRING GATEWAY_KILLS_STALE", "RESOLVED GATEWAY_KILLS_STALE"), this.alerts.said);
     }
 
     @Test

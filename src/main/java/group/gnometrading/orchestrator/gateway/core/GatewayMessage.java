@@ -21,7 +21,7 @@ public final class GatewayMessage {
     /** For a session, numbered with its reports and kept for replay (an order status). */
     public static final int NUMBERED = 3;
 
-    /** For a session, ahead of anything numbered (a welcome, a re-hello request, a goodbye). */
+    /** For a session, ahead of anything numbered (a welcome, a re-hello request). */
     public static final int UNNUMBERED = 4;
 
     /**
@@ -29,6 +29,12 @@ public final class GatewayMessage {
      * ring): what is held is skipped, and an order status for each of its orders follows the welcome instead.
      */
     public static final int RESYNC = 5;
+
+    /**
+     * For a session, the last thing it is sent (a planned stop's goodbye): after every report held for it, and only once
+     * the accounts' report rings are empty, so its orders' ends reach it before it hears the gateway is going.
+     */
+    public static final int LAST = 6;
 
     public int kind;
     public int image;

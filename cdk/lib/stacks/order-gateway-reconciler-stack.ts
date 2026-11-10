@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -62,7 +63,7 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
     });
     fn.addEventSource(new SqsEventSource(queue, { batchSize: 10 }));
 
-    new events.Rule(this, 'GatewayReconcilerTick', {
+    const tick = new events.Rule(this, 'GatewayReconcilerTick', {
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
       targets: [new targets.SqsQueue(queue, {
         messageGroupId: ORDER_GATEWAYS.reconcilerGroup,
@@ -79,6 +80,7 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       resources: [
         `arn:aws:ssm:${PRIMARY_REGION}:${this.account}:parameter/gnome/orchestrator/latest-version`,
         `arn:aws:ssm:${PRIMARY_REGION}:${this.account}:parameter/gnome/registry/api-url`,
+        `arn:aws:ssm:${PRIMARY_REGION}:${this.account}:parameter/gnome/alerting/api-url`,
       ],
     }));
     // What each gateway says of itself: sessions linked, orders working.
@@ -86,6 +88,17 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       actions: ['dynamodb:GetItem'],
       resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
       conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
+    }));
+    // What its alerts keep between ticks, on one item of its own.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway-reconciler#*'] } },
+    }));
+    // Its alerts, onto gnome-registry's alert bus.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['events:PutEvents'],
+      resources: [`arn:aws:events:${PRIMARY_REGION}:${this.account}:event-bus/gnome-alerts`],
     }));
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ecs:DescribeServices', 'ecs:CreateService', 'ecs:UpdateService'],
@@ -107,5 +120,44 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       resources: [`arn:aws:iam::${this.account}:role/gnome-order-gateway-*`],
       conditions: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } },
     }));
+
+    // Named <Service>-<What>-<Severity>: gnome-registry's alert router takes the severity from the suffix and the
+    // runbook (docs/runbooks/cloudwatch/GatewayReconciler.md) from the prefix.
+    const alarm = (what: string, metric: cloudwatch.Metric, props: Partial<cloudwatch.CreateAlarmOptions>) =>
+      metric.createAlarm(this, `GatewayReconciler${what}Alarm`, {
+        alarmName: `GatewayReconciler-${what}-Error`,
+        threshold: 1,
+        evaluationPeriods: 5,
+        datapointsToAlarm: 3,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        ...props,
+      });
+    const minute = cdk.Duration.minutes(1);
+    alarm('TickFailing', new cloudwatch.Metric({
+      namespace: 'AWS/Events',
+      metricName: 'FailedInvocations',
+      dimensionsMap: { RuleName: tick.ruleName },
+      statistic: 'Sum',
+      period: minute,
+    }), {
+      alarmDescription: 'The minute schedule can\'t send the gateway reconciler its tick.',
+    });
+    alarm('NotRunning', fn.metricInvocations({ statistic: 'Sum', period: cdk.Duration.minutes(5) }), {
+      alarmDescription: 'The gateway reconciler hasn\'t run for 5 minutes.',
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    });
+    alarm('Errors', fn.metricErrors({ statistic: 'Sum', period: minute }), {
+      alarmDescription: 'The gateway reconciler\'s runs keep failing.',
+    });
+    alarm('QueueStuck', queue.metricApproximateAgeOfOldestMessage({ statistic: 'Maximum', period: minute }), {
+      alarmDescription: 'A message has waited 5 minutes on the gateway reconciler\'s queue: one failing holds its group.',
+      threshold: 300,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3,
+    });
   }
 }

@@ -47,6 +47,9 @@ public final class GatewaySession {
     // Egress's: the newest report sequence sent, and unnumbered messages waiting to go before any report.
     public long sentSeq;
     public final PendingMessages unnumbered = new PendingMessages(16, ReplayRing.SLOT_LENGTH);
+    // Egress's: the message to send once everything else has gone, and whether it has; the control thread waits on it.
+    public final PendingMessages last = new PendingMessages(1, ReplayRing.SLOT_LENGTH);
+    public volatile boolean lastSent;
 
     public GatewaySession(
             final long slot,

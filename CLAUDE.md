@@ -116,7 +116,8 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     listings they name, opens reply publications, sends the welcome and replay, cancels a silent or deaf session's
     orders (lane `CANCEL_SESSION`) and asks it to hello again, evicts a session that sends something unreadable
     (refused 5 min), keeps the state (STARTING/READY/DEGRADED) and writes `order-gateway#<key>` to `service-endpoints`
-    every 15 s. SIGTERM is a planned stop: every session's orders cancelled and a goodbye sent before anything closes.
+    every 15 s. SIGTERM is a planned stop: every session's orders cancelled, then, once the lanes are empty, a goodbye
+    sent last (after those cancels' reports) before anything closes.
   - Caps: `gateway.session.max.open.orders` (200) and `gateway.session.max.new.per.second` (50) per session,
     `gateway.account.max.open.orders` (2,000) per account, in each lane (`AccountLane.Caps`); a session's hello may
     ask for less (`order.gateway.max.open.orders`, `order.gateway.max.new.per.second`, session properties), never
@@ -173,6 +174,8 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     reports themselves, and is reconciled: an order it lists that the log never had is reported REJECTED, one it is
     cancelling is cancelled again, one it doesn't list is cancelled (`GATEWAY_UNATTRIBUTED_EVENTS`). A session not back
     within 10 s of READY plus its cod timeout has its orders cancelled. A hello past its replay ring gets statuses too.
+    A session new to the gateway (not recovered, not held) that lists open orders has each looked up at the venue and
+    reported as the venue has it, still-resting ones cancelled: they were another gateway's.
   - Tests: `GatewayFixture` (test scope, from gnome-gateways' test jar) runs a whole gateway in process on a fake
     venue; `session/orders/GatewayInProcessTest` drives sessions through it, restart included.
   - Whether it runs is not its own decision: the gateway reconciler (`cdk/lambda/gateway_reconciler`) starts and stops
@@ -319,8 +322,8 @@ earlier sessions). A session already stopped before startup exits 0 without repo
 before a failure are usually the cause (`FATAL_ERROR_EXITING`). Collectors: `/ecs/collector-<region>`, prefix
 `collector` (gnome-market-data).
 
-**Alerts.** This process sends only two, to `ALERTS_API_URL` (launcher sets it from SSM `/gnome/alerting/api-url`;
-unset means no alerts):
+**Alerts.** A session sends only two, to `ALERTS_API_URL` (launcher sets it from SSM `/gnome/alerting/api-url`;
+unset means no alerts; posted through `runtime/AlertsApi`):
 - `FATAL_ERROR` - any agent error, gateway that can't reconnect, failed startup, or uncaught exception. Also PATCHes
   `failureReason`, then exits 1. Check the log stream tail and the failure reason.
 - `SESSION_EXITED` - INFO on a graceful exit; WARNING when positions were left (too small, rejected, timed out).
@@ -330,7 +333,19 @@ unset means no alerts):
   `BOOK_RESYNCS`, `MARKET_DATA_BAD`, `MARKET_DATA_BAD_HELD`, `LEDGER_FAILING`, `LEDGER_FENCED`, `RISK_STALE`, `RISK_UNGUARDED`, `POLICY_UNBUILDABLE`,
   `LATCHES_DROPPED`, `HOST_CPU_HIGH`, `HOST_MEMORY_LOW`, `DISK_LOW`, `JOURNAL_BACKLOG`,
   `SILENT`; lifecycle ones (`START_STUCK`, `STOP_STUCK`, `FAILED`) come from other monitor rules.
-- This repo defines no CloudWatch alarms. Collectors have no alerting from here either.
+- An order gateway raises what only it sees (`core/GatewayAlerts`, posted by `IngestGatewayAlerts` to the
+  `ALERTS_API_URL` the reconciler puts in its revision), keyed `<TYPE>:<gateway key>[:<account or order>]`:
+  `GATEWAY_KILLS_STALE` (kills unread 30 s; resolved by the next read), `GATEWAY_VENUE_RATE_LIMITED` and
+  `GATEWAY_ORDERS_UNANSWERED` (per account, a minute with any; resolved by a minute without),
+  `GATEWAY_UNATTRIBUTED_ORDERS` (a restart cancelled an order its session didn't know) and `GATEWAY_FATAL` (sent,
+  waiting up to 2 s, before a failing gateway halts; one per process).
+- The gateway reconciler raises, per gateway, on the `gnome-alerts` bus (`cdk/lambda/gateway_reconciler/alerts.ts`,
+  firing keys and per-gateway memory on the `service-endpoints` item `order-gateway-reconciler#alerts`):
+  `GATEWAY_START_STUCK` (running, not READY or DEGRADED 6 min after it started), `GATEWAY_DOWN` (its endpoint expired
+  while it last showed sessions linked or orders working, without being asked to stop; CRITICAL with orders working),
+  `GATEWAY_DEGRADED` (2 ticks), `GATEWAY_RECONCILE_FAILED` (3 ticks). CloudWatch alarms on the reconciler itself,
+  `GatewayReconciler-{TickFailing,NotRunning,Errors,QueueStuck}-Error`, are this repo's only alarms. Catalog and
+  runbooks are gnome-registry's. Collectors have no alerting from here.
 
 **Runbooks** (gnome-registry): `docs/runbooks/alerts/<TYPE>.md` for every alert type above;
 `docs/runbooks/procedures/inspect-session.md` (controller, logs, instance) and

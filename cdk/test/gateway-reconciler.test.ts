@@ -100,6 +100,7 @@ function deps(rows: GatewayRow[], regions: Record<string, FakeRegion>, activity:
     liveGateways: async () => rows,
     activity: async (key) => activity[key] ?? null,
     latestVersion: async () => '1.32.1',
+    alertsApiUrl: async () => 'https://alerts.example/',
     ecs: (region) => regions[region].ecs,
     ec2: (region) => regions[region].ec2,
     nowMs: () => NOW,
@@ -137,6 +138,7 @@ describe('the gateway reconciler', () => {
       { name: 'STAGE', value: 'dev' },
       { name: 'GATEWAY_KEY', value: KALSHI },
       { name: 'ORCHESTRATOR_VERSION', value: '1.32.1' },
+      { name: 'ALERTS_API_URL', value: 'https://alerts.example/' },
     ]);
     expect(east.sent.find((s) => s.command === 'CreateServiceCommand')!.input).toMatchObject({
       cluster: CLUSTER,

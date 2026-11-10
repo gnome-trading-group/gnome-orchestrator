@@ -37,8 +37,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  * the ring for the next pass and holds up no other session. A session with no link yet keeps collecting in its ring.
  *
  * <p>The control thread's messages for a session come through here too, so they stay in order with its reports: an
- * order status is numbered like a report; a welcome, re-hello request or goodbye goes ahead of anything numbered, and a
- * welcome says from which sequence to replay. A heartbeat goes to every linked session every 100 ms. Allocates nothing.
+ * order status is numbered like a report; a welcome or re-hello request goes ahead of anything numbered, and a welcome
+ * says from which sequence to replay; a planned stop's goodbye goes after everything, once the report rings are empty.
+ * A heartbeat goes to every linked session every 100 ms. Allocates nothing.
  */
 public final class GatewayEgress implements AeronPathAgent {
 
@@ -107,8 +108,12 @@ public final class GatewayEgress implements AeronPathAgent {
         this.handled = 0;
         this.cross.flush();
         this.fromControl.read(this.controlHandler, Integer.MAX_VALUE);
+        // A ring that gave a full pass's worth may hold more, which a session's last message must not go ahead of.
+        boolean drained = true;
         for (int i = 0; i < this.reportRings.size(); i++) {
+            final int before = this.handled;
             this.reportRings.get(i).read(this.reportHandler, REPORTS_PER_PASS);
+            drained &= this.handled - before < REPORTS_PER_PASS;
         }
         int work = this.handled;
         final long now = this.nanoClock.getAsLong();
@@ -119,7 +124,7 @@ public final class GatewayEgress implements AeronPathAgent {
         }
         final GatewaySession[] all = this.sessions.all();
         for (int i = 0; i < all.length; i++) {
-            work += send(all[i], beat);
+            work += send(all[i], beat, drained);
         }
         return work;
     }
@@ -177,30 +182,16 @@ public final class GatewayEgress implements AeronPathAgent {
             return;
         }
         if (message.kind == GatewayMessage.NUMBERED) {
-            final ReplayRing replay = session.replay;
-            if (SbeMessage.templateId(message.buffer, 0) != OrderStatusEncoder.TEMPLATE_ID) {
-                replay.append(message.buffer, 0, message.length, 0);
-            } else {
-                this.orderStatusDecoder.wrap(
-                        message.buffer,
-                        SbeMessage.HEADER_LENGTH,
-                        OrderStatusDecoder.BLOCK_LENGTH,
-                        OrderStatusDecoder.SCHEMA_VERSION);
-                final long sequence =
-                        replay.append(message.buffer, 0, message.length, this.orderStatusDecoder.clientOidCounter());
-                this.orderStatus
-                        .wrap(replay.buffer(), replay.offset(sequence) + SbeMessage.HEADER_LENGTH)
-                        .reportSeq(sequence);
-                session.totals.status(this.orderStatusDecoder, sequence);
-                if (ended(this.orderStatusDecoder.state())) {
-                    this.cross.ended(session.slot, this.orderStatusDecoder.clientOidCounter());
-                }
-            }
-            final long sequence = replay.newest();
-            this.journal.record(session.slot, replay.buffer(), replay.offset(sequence), replay.length(sequence));
+            appendNumbered(session, message);
             return;
         }
         this.journal.record(session.slot, message.buffer, 0, message.length);
+        if (message.kind == GatewayMessage.LAST) {
+            if (!session.last.offer(message.buffer, 0, message.length)) {
+                this.unnumberedFull = this.unnumberedFull + 1;
+            }
+            return;
+        }
         if (message.reply != null) {
             session.reply = message.reply;
             message.reply = null;
@@ -222,6 +213,31 @@ public final class GatewayEgress implements AeronPathAgent {
         if (!session.unnumbered.offer(message.buffer, 0, message.length)) {
             this.unnumberedFull = this.unnumberedFull + 1;
         }
+    }
+
+    /** An order status or other numbered message: held for replay with the session's reports, numbered like them. */
+    private void appendNumbered(final GatewaySession session, final GatewayMessage message) {
+        final ReplayRing replay = session.replay;
+        if (SbeMessage.templateId(message.buffer, 0) != OrderStatusEncoder.TEMPLATE_ID) {
+            replay.append(message.buffer, 0, message.length, 0);
+        } else {
+            this.orderStatusDecoder.wrap(
+                    message.buffer,
+                    SbeMessage.HEADER_LENGTH,
+                    OrderStatusDecoder.BLOCK_LENGTH,
+                    OrderStatusDecoder.SCHEMA_VERSION);
+            final long sequence =
+                    replay.append(message.buffer, 0, message.length, this.orderStatusDecoder.clientOidCounter());
+            this.orderStatus
+                    .wrap(replay.buffer(), replay.offset(sequence) + SbeMessage.HEADER_LENGTH)
+                    .reportSeq(sequence);
+            session.totals.status(this.orderStatusDecoder, sequence);
+            if (ended(this.orderStatusDecoder.state())) {
+                this.cross.ended(session.slot, this.orderStatusDecoder.clientOidCounter());
+            }
+        }
+        final long sequence = replay.newest();
+        this.journal.record(session.slot, replay.buffer(), replay.offset(sequence), replay.length(sequence));
     }
 
     /** Tells the self-trade index what a report changes: an order that ended, or an amend the venue took. */
@@ -254,14 +270,44 @@ public final class GatewayEgress implements AeronPathAgent {
                 || state == OrderState.EXPIRED;
     }
 
-    /** @return how many messages went out */
-    private int send(final GatewaySession session, final boolean beat) {
+    /**
+     * @param drained whether this pass read every report waiting, so nothing more for the session is on its way
+     * @return how many messages went out
+     */
+    private int send(final GatewaySession session, final boolean beat, final boolean drained) {
         final Publication reply = session.reply;
         if (reply == null) {
             return 0;
         }
+        int sent = sendUnnumbered(session.unnumbered, reply);
+        if (!session.unnumbered.isEmpty()) {
+            return sent;
+        }
+        sent += sendReplay(session, reply);
+        if (session.sentSeq < session.replay.newest()) {
+            return sent;
+        }
+        final PendingMessages last = session.last;
+        if (drained && !last.isEmpty()) {
+            if (reply.offer(last.buffer(), last.headOffset(), last.headLength()) < 0) {
+                return sent;
+            }
+            last.pop();
+            session.lastSent = true;
+            sent++;
+        }
+        if (beat && session.state == GatewaySession.ACTIVE) {
+            final int length = encodeHeartbeat(session);
+            if (reply.offer(this.heartbeatBuffer, 0, length) >= 0) {
+                sent++;
+            }
+        }
+        return sent;
+    }
+
+    /** @return how many went out; any left are for a later pass, the publication being back-pressured */
+    private static int sendUnnumbered(final PendingMessages unnumbered, final Publication reply) {
         int sent = 0;
-        final PendingMessages unnumbered = session.unnumbered;
         while (!unnumbered.isEmpty()) {
             if (reply.offer(unnumbered.buffer(), unnumbered.headOffset(), unnumbered.headLength()) < 0) {
                 return sent;
@@ -269,6 +315,12 @@ public final class GatewayEgress implements AeronPathAgent {
             unnumbered.pop();
             sent++;
         }
+        return sent;
+    }
+
+    /** @return how many went out; any left are for a later pass, the publication being back-pressured */
+    private int sendReplay(final GatewaySession session, final Publication reply) {
+        int sent = 0;
         final ReplayRing replay = session.replay;
         while (session.sentSeq < replay.newest()) {
             final long next = session.sentSeq + 1;
@@ -286,12 +338,6 @@ public final class GatewayEgress implements AeronPathAgent {
             session.sentSeq = next;
             session.totals.sent(next, replay.counter(next));
             sent++;
-        }
-        if (beat && session.state == GatewaySession.ACTIVE) {
-            final int length = encodeHeartbeat(session);
-            if (reply.offer(this.heartbeatBuffer, 0, length) >= 0) {
-                sent++;
-            }
         }
         return sent;
     }

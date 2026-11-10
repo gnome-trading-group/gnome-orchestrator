@@ -15,6 +15,7 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
+import group.gnometrading.orchestrator.gateway.core.GatewayAlerts;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
@@ -51,6 +52,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import org.agrona.collections.LongHashSet;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -134,6 +136,7 @@ public final class GatewayControl implements GnomeAgent {
     private static final int MESSAGES_PER_PASS = 64;
 
     private final Logger logger;
+    private final GatewayAlerts alerts;
     private final SessionTable sessions;
     private final GatewayStatus status;
     private final Map<Integer, AccountLink> accounts;
@@ -200,6 +203,7 @@ public final class GatewayControl implements GnomeAgent {
     @SuppressWarnings("checkstyle:ParameterNumber")
     public GatewayControl(
             final Logger logger,
+            final GatewayAlerts alerts,
             final SessionTable sessions,
             final GatewayStatus status,
             final Map<Integer, AccountLink> accounts,
@@ -214,6 +218,7 @@ public final class GatewayControl implements GnomeAgent {
             final LongSupplier wallMillis,
             final Restart restart) {
         this.logger = logger;
+        this.alerts = alerts;
         this.sessions = sessions;
         this.status = status;
         this.accounts = accounts;
@@ -325,6 +330,7 @@ public final class GatewayControl implements GnomeAgent {
             refuse(hello, HelloRefusal.WRONG_ACCOUNT, now);
             return;
         }
+        final boolean known = this.sessions.bySlot(hello.sessionSeq()) != null;
         final GatewaySession session = sessionFor(hello, account);
         account.markets().addSession(session.slot, session.sessionId);
         introduce(session, this.lastRecord.rateWeight(), hello);
@@ -352,17 +358,8 @@ public final class GatewayControl implements GnomeAgent {
         this.links.put(session.slot, link);
         session.state = GatewaySession.ACTIVE;
         record(hello, now);
-        final Recovered recovered = this.recovered.remove(session.slot);
         this.orphanDeadlines.remove(session.slot);
-        if (recovered != null) {
-            resync(session, reply);
-            reconcile(session, recovered, hello);
-        } else if (hello.lastReportSeq() > 0 && hello.lastReportEpoch() != this.status.epoch) {
-            // Its numbering is another gateway's: nothing to resume from, so where each order stands instead.
-            resync(session, reply);
-        } else {
-            sendWelcome(session, hello, reply);
-        }
+        welcome(session, hello, reply, known);
         this.logger.logf(
                 LogMessage.DEBUG,
                 "Gateway: session %s (slot %d) linked on image %d, replies to %s:%d",
@@ -371,6 +368,33 @@ public final class GatewayControl implements GnomeAgent {
                 image,
                 hello.replyIp(),
                 hello.replyPort());
+    }
+
+    /**
+     * Welcomes a session just linked, and squares the orders it holds open with this gateway's: those a restart
+     * recovered are reconciled; those of a session this gateway never had are another gateway's, whose ends may never
+     * have reached it (a stop it didn't hear out, a crash with no state left), so each is looked up and reported as the
+     * venue has it.
+     */
+    private void welcome(
+            final GatewaySession session, final Hello hello, final Publication reply, final boolean known) {
+        final Recovered recovered = this.recovered.remove(session.slot);
+        if (recovered != null) {
+            resync(session, reply);
+            reconcile(session, recovered, hello);
+            return;
+        }
+        if (hello.lastReportSeq() > 0 && hello.lastReportEpoch() != this.status.epoch) {
+            // Its numbering is another gateway's: nothing to resume from, so where each order stands instead.
+            resync(session, reply);
+        } else {
+            sendWelcome(session, hello, reply);
+        }
+        if (!known) {
+            for (final Hello.Order order : hello.orders()) {
+                settleUnheld(session, order);
+            }
+        }
     }
 
     /** The hello's session as the gateway holds it, or a new one if it holds none. */
@@ -577,6 +601,12 @@ public final class GatewayControl implements GnomeAgent {
                         session.sessionId,
                         counter);
                 cancelOne(session, counter, 0, 0);
+                this.alerts.firing(
+                        "GATEWAY_UNATTRIBUTED_ORDERS",
+                        session.sessionId + ":" + counter,
+                        "Gateway cancelled order " + counter + " that its session " + session.sessionId
+                                + " didn't know: any fills it had may be missing from the ledger",
+                        Map.of("session", String.valueOf(session.sessionId), "order", Long.toString(counter)));
             }
         }
     }
@@ -1016,16 +1046,25 @@ public final class GatewayControl implements GnomeAgent {
     // ----- planned stop -----
 
     /**
-     * Stops taking orders, cancels every session's orders and says goodbye, then waits until the lanes hold nothing or
-     * {@code timeoutNanos} passes. Call with the control thread stopped.
+     * Stops taking orders and cancels every session's orders, waits until the lanes hold nothing, then says goodbye to
+     * each linked session after the reports of those cancels (egress sends it last) and unlinks every session. A session
+     * that heard the goodbye first would drop its link with its orders still open as far as it knows. Gives up waiting
+     * once {@code timeoutNanos} passes. Call with the control thread stopped and ingress and egress running.
      *
-     * @return whether every lane emptied in time
+     * @return whether every lane emptied and every goodbye went out in time
      */
     public boolean stop(final long timeoutNanos) throws InterruptedException {
+        final long deadline = this.nanoClock.getAsLong() + timeoutNanos;
         this.status.state(GatewayState.STOPPING);
         this.advertiser.advertise(GatewayState.STOPPING, linkedSessions(), workingOrders());
-        for (final GatewaySession session : this.sessions.all()) {
+        final GatewaySession[] all = this.sessions.all();
+        for (final GatewaySession session : all) {
             cancelAll(session);
+        }
+        final boolean emptied = waitUntil(
+                () -> this.accounts.values().stream().allMatch(account -> account.workingOrders() == 0), deadline);
+        final List<GatewaySession> told = new ArrayList<>();
+        for (final GatewaySession session : all) {
             if (session.state == GatewaySession.ACTIVE) {
                 final int length = MessageHeaderEncoder.ENCODED_LENGTH
                         + new SessionGoodbyeEncoder()
@@ -1033,18 +1072,25 @@ public final class GatewayControl implements GnomeAgent {
                                 .sessionSeq(session.slot)
                                 .reason(GoodbyeReason.PLANNED_STOP)
                                 .encodedLength();
-                toEgress(GatewayMessage.UNNUMBERED, session.slot, -1, length);
+                toEgress(GatewayMessage.LAST, session.slot, -1, length);
+                told.add(session);
             }
+        }
+        final boolean saidGoodbye = waitUntil(() -> told.stream().allMatch(session -> session.lastSent), deadline);
+        for (final GatewaySession session : all) {
             unlink(session);
         }
-        final long deadline = this.nanoClock.getAsLong() + timeoutNanos;
-        while (this.nanoClock.getAsLong() - deadline < 0) {
-            if (this.accounts.values().stream().allMatch(account -> account.workingOrders() == 0)) {
-                return true;
+        return emptied && saidGoodbye;
+    }
+
+    private boolean waitUntil(final BooleanSupplier condition, final long deadline) throws InterruptedException {
+        while (!condition.getAsBoolean()) {
+            if (this.nanoClock.getAsLong() - deadline >= 0) {
+                return false;
             }
             Thread.sleep(50);
         }
-        return false;
+        return true;
     }
 
     private void sendAnswer(final long slot, final UnsafeBuffer buffer, final int length) {

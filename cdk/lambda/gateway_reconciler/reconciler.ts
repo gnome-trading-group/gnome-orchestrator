@@ -1,12 +1,14 @@
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
-import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, GetItemCommand, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { AllocateAddressCommand, DescribeAddressesCommand, EC2Client } from '@aws-sdk/client-ec2';
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import {
   CreateServiceCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, KeyValuePair,
   RegisterTaskDefinitionCommand, UpdateServiceCommand,
 } from '@aws-sdk/client-ecs';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { platformRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
+import { Alert, AlertState, EMPTY_STATE, evaluate, Observation } from './alerts';
 
 // Decides which live order gateways run, and makes AWS match: the only writer of the gateways' ECS services and
 // Elastic IPs, run one tick at a time (a FIFO queue with one message group into a Lambda with one concurrent run, and a
@@ -32,11 +34,17 @@ export interface GatewayNames {
 // How long a gateway nobody has asked for keeps running: well past a linked session's minute between asks.
 export const WANT_WINDOW_MS = 30 * 60 * 1000;
 const LATEST_VERSION_PARAMETER = '/gnome/orchestrator/latest-version';
+// Where gateways raise their own alerts (gnome-registry's AlertingStack publishes it).
+const ALERTS_API_URL_PARAMETER = '/gnome/alerting/api-url';
 // Where the registry API is (gnome-registry's ApiStack publishes it).
 const REGISTRY_API_URL_PARAMETER = '/gnome/registry/api-url';
 // The table gateways write their endpoint to, in its one region (gnome-shared-cdk SERVICE_ENDPOINTS).
 const ENDPOINTS_TABLE = 'service-endpoints';
 const ENDPOINTS_REGION = 'us-east-1';
+// What the alerts keep between ticks: one item beside the gateways' own, with no expiry.
+const ALERT_STATE_ID = 'order-gateway-reconciler#alerts';
+// gnome-registry's alert bus, in this account and region (its alerts/model.ts).
+const ALERT_BUS = 'gnome-alerts';
 
 export interface GatewayRow {
   gateway_key: string;
@@ -60,9 +68,12 @@ export interface ReconcileDeps {
   liveGateways(): Promise<GatewayRow[]>;
   activity(gatewayKey: string, nowMs: number): Promise<Activity | null>;
   latestVersion(): Promise<string>;
+  alertsApiUrl(): Promise<string>;
   ecs(region: string): Client;
   ec2(region: string): Client;
   nowMs(): number;
+  // Told what the tick saw of each gateway, for its alerts.
+  observed?(observation: Observation): void;
 }
 
 export type Outcome = 'started' | 'created' | 'stopped' | 'running' | 'stopped already';
@@ -87,15 +98,18 @@ export async function reconcile(deps: ReconcileDeps): Promise<Map<string, Outcom
   for (const row of await deps.liveGateways()) {
     if (row.mode !== 'live') continue;
     try {
-      outcomes.set(row.gateway_key, await reconcileOne(row, deps));
+      const seen = await reconcileOne(row, deps);
+      outcomes.set(row.gateway_key, seen.outcome!);
+      deps.observed?.(seen);
     } catch (error) {
       console.error(`Gateway ${row.gateway_key}: couldn't reconcile`, error);
+      deps.observed?.({ gatewayKey: row.gateway_key, region: row.region, activity: null, error: String(error) });
     }
   }
   return outcomes;
 }
 
-async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Outcome> {
+async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Observation> {
   if (!platformRegions().includes(row.region)) {
     throw new Error(`${row.gateway_key} trades from ${row.region}, where no gateway can run`);
   }
@@ -106,20 +120,23 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Outco
   const current = (described.services ?? []).find((s: any) => s.status === 'ACTIVE');
   const running = current != null && current.desiredCount > 0;
   const now = deps.nowMs();
-  const wanted = shouldRun(row, await deps.activity(row.gateway_key, now), running, now);
-  if (!wanted) {
-    if (!running) return 'stopped already';
+  const activity = await deps.activity(row.gateway_key, now);
+  const seen = (outcome: Outcome): Observation => ({
+    gatewayKey: row.gateway_key, region: row.region, outcome, activity, serviceEvent: current?.events?.[0]?.message,
+  });
+  if (!shouldRun(row, activity, running, now)) {
+    if (!running) return seen('stopped already');
     await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 0 }));
-    return 'stopped';
+    return seen('stopped');
   }
   // A running gateway keeps its release: a new pin or release reaches it at its next start.
-  if (running) return 'running';
+  if (running) return seen('running');
   const version = row.orchestrator_version ?? await deps.latestVersion();
   await ensureAddress(deps.ec2(row.region), names, row.gateway_key);
-  const taskDefinition = await revision(ecs, names, row.gateway_key, version);
+  const taskDefinition = await revision(ecs, names, row.gateway_key, version, await deps.alertsApiUrl());
   if (current) {
     await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, taskDefinition, desiredCount: 1 }));
-    return 'started';
+    return seen('started');
   }
   await ecs.send(new CreateServiceCommand({
     cluster: names.cluster,
@@ -130,11 +147,19 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Outco
     // One host per gateway and fixed ports: the old task stops before a new one starts.
     deploymentConfiguration: { minimumHealthyPercent: 0, maximumPercent: 100 },
   }));
-  return 'created';
+  return seen('created');
 }
 
-/** The gateway's own revision: the base task definition as deployed, with its key and release; reused when unchanged. */
-async function revision(ecs: Client, names: GatewayNames, gatewayKey: string, version: string): Promise<string> {
+// What each gateway's revision sets over the base's environment.
+const GATEWAY_ENVIRONMENT = new Set(['GATEWAY_KEY', 'ORCHESTRATOR_VERSION', 'ALERTS_API_URL']);
+
+/**
+ * The gateway's own revision: the base task definition as deployed, with its key, its release and where it raises
+ * alerts; reused when unchanged.
+ */
+async function revision(
+  ecs: Client, names: GatewayNames, gatewayKey: string, version: string, alertsApiUrl: string,
+): Promise<string> {
   const base = (await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: names.baseFamily }))).taskDefinition;
   if (!base) throw new Error(`No ${names.baseFamily} task definition: the gateway stack isn't deployed there`);
   const wanted = {
@@ -145,10 +170,10 @@ async function revision(ecs: Client, names: GatewayNames, gatewayKey: string, ve
     containerDefinitions: base.containerDefinitions.map((container: any) => ({
       ...container,
       environment: [
-        ...(container.environment ?? []).filter((e: KeyValuePair) =>
-          e.name !== 'GATEWAY_KEY' && e.name !== 'ORCHESTRATOR_VERSION'),
+        ...(container.environment ?? []).filter((e: KeyValuePair) => !GATEWAY_ENVIRONMENT.has(e.name ?? '')),
         { name: 'GATEWAY_KEY', value: gatewayKey },
         { name: 'ORCHESTRATOR_VERSION', value: version },
+        { name: 'ALERTS_API_URL', value: alertsApiUrl },
       ],
     })),
     volumes: base.volumes,
@@ -270,15 +295,63 @@ const lambdaDeps: Omit<ReconcileDeps, 'names'> = {
     };
   },
   latestVersion: () => parameter(LATEST_VERSION_PARAMETER),
+  alertsApiUrl: () => parameter(ALERTS_API_URL_PARAMETER),
   ecs: (region) => new ECSClient({ region }),
   ec2: (region) => new EC2Client({ region }),
   nowMs: () => Date.now(),
 };
 
+const events = new EventBridgeClient({ region: ENDPOINTS_REGION });
+
+async function loadAlertState(): Promise<AlertState> {
+  try {
+    const item = (await dynamo.send(new GetItemCommand({
+      TableName: ENDPOINTS_TABLE, Key: { service_id: { S: ALERT_STATE_ID } }, ConsistentRead: true,
+    }))).Item;
+    return item?.state?.S ? JSON.parse(item.state.S) as AlertState : EMPTY_STATE;
+  } catch (error) {
+    // Started afresh: alerts the last tick left firing are raised again if they still hold, or wait for a person.
+    console.error('Couldn\'t read the alert state; starting afresh', error);
+    return EMPTY_STATE;
+  }
+}
+
+async function saveAlertState(state: AlertState) {
+  await dynamo.send(new PutItemCommand({
+    TableName: ENDPOINTS_TABLE,
+    Item: { service_id: { S: ALERT_STATE_ID }, kind: { S: 'order-gateway-reconciler' }, state: { S: JSON.stringify(state) } },
+  }));
+}
+
+/** An alert as gnome-registry's AlertEvent, onto its bus; a failure is logged and the next tick sends it again. */
+async function publish(action: 'FIRING' | 'RESOLVED', key: string, type: string, alert?: Alert) {
+  const detail = {
+    action, key, type, source: 'ingest', mode: 'live',
+    title: alert?.title ?? `${type} cleared`,
+    labels: alert?.labels ?? {},
+    stateAt: new Date().toISOString(),
+  };
+  try {
+    await events.send(new PutEventsCommand({
+      Entries: [{ EventBusName: ALERT_BUS, Source: 'gnome.alerts', DetailType: 'Alert', Detail: JSON.stringify(detail) }],
+    }));
+  } catch (error) {
+    console.error(`Couldn't publish alert ${key}`, error);
+  }
+}
+
 /** Woken by the queue (a wake-up from gateways/ensure, or the minute's tick); every message means one tick. */
 export const handler = async () => {
-  const outcomes = await reconcile({ ...lambdaDeps, names: environmentNames() });
+  const previous = await loadAlertState();
+  const observations: Observation[] = [];
+  const outcomes = await reconcile({ ...lambdaDeps, names: environmentNames(), observed: (seen) => observations.push(seen) });
   for (const [gateway, outcome] of outcomes) {
     if (outcome !== 'running' && outcome !== 'stopped already') console.log(`Gateway ${gateway}: ${outcome}`);
   }
+  const { firing, state } = evaluate(observations, previous, Date.now());
+  for (const [key, alert] of firing) await publish('FIRING', key, alert.type, alert);
+  for (const [key, type] of Object.entries(previous.firing)) {
+    if (!firing.has(key)) await publish('RESOLVED', key, type);
+  }
+  await saveAlertState(state);
 };

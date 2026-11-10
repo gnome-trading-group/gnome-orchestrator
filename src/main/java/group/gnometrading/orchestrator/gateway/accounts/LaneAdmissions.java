@@ -174,6 +174,12 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         this.minuteEndsNanos = now + MINUTE_NANOS;
     }
 
+    /** Requests the venue never answered in the last full minute; 0 once that minute ended over two minutes ago. */
+    public long lastUnanswered(final long now) {
+        final long ended = this.lastMinuteEndedNanos;
+        return ended == 0 || now - ended > 2 * MINUTE_NANOS ? 0 : this.lastUnanswered;
+    }
+
     /**
      * The last full minute as a status line, or null if it ended over two minutes ago: a lane that decided nothing since
      * has nothing to say. Allocates; for a side thread.

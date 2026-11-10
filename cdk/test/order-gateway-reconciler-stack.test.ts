@@ -30,3 +30,32 @@ describe('the gateway reconciler stack', () => {
     });
   });
 });
+
+describe('the gateway reconciler\'s alarms', () => {
+  const app = new cdk.App();
+  const template = Template.fromStack(new OrderGatewayReconcilerStack(app, 'Alarms', {
+    env: { account: '123456789012', region: PRIMARY_REGION },
+    registryApiKeyId: 'key-id',
+  }));
+
+  it('are named so the alert router finds their runbook and severity', () => {
+    for (const what of ['TickFailing', 'NotRunning', 'Errors', 'QueueStuck']) {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `GatewayReconciler-${what}-Error` });
+    }
+  });
+
+  it('count a silent reconciler as not running', () => {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'GatewayReconciler-NotRunning-Error',
+      MetricName: 'Invocations',
+      ComparisonOperator: 'LessThanThreshold',
+      TreatMissingData: 'breaching',
+    });
+  });
+
+  it('lets it keep its alert state on its own item and raise alerts on the registry\'s bus', () => {
+    const statements = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(statements).toContain('order-gateway-reconciler#*');
+    expect(statements).toContain('event-bus/gnome-alerts');
+  });
+});
