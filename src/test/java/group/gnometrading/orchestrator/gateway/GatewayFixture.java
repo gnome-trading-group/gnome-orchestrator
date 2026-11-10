@@ -317,10 +317,10 @@ public final class GatewayFixture implements AutoCloseable {
                 registry,
                 listings,
                 GatewayControl.Replies.over(this.aeron.aeron()),
-                state -> {},
+                (state, linkedSessions, workingOrders) -> {},
                 System::nanoTime,
                 1024,
-                GatewayControl.Idle.NEVER,
+                System::currentTimeMillis,
                 new GatewayControl.Restart(
                         restart.sessionsFile(), restart.sessions(), TimeUnit.SECONDS.toNanos(10), restart.loaded()));
     }

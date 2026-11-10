@@ -34,7 +34,9 @@ class ServiceEndpointsTest {
             AeronPorts.SHARD_CONTROL,
             "ACTIVE",
             "1.24.0",
-            WRITTEN);
+            WRITTEN,
+            0,
+            0);
 
     ServiceEndpointsTest() {
         when(this.dynamo.putItem(any(PutItemRequest.class))).thenAnswer(call -> {

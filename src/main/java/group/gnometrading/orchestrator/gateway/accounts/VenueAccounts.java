@@ -306,7 +306,9 @@ public final class VenueAccounts {
                         name,
                         this.context.logger(),
                         heartbeatConnections,
-                        new HTTPConnector(List.of(heartbeatConnections), HTTPConnector.Listener.NONE),
+                        new HTTPConnector(
+                                List.of(heartbeatConnections),
+                                new ConnectorLog(this.context.logger(), name + " heartbeats", System::nanoTime)),
                         authHeaders(creds),
                         laneAlive,
                         System::nanoTime,
@@ -371,7 +373,8 @@ public final class VenueAccounts {
                 .withConnections(this.context.settings().laneConnections())
                 .captureHeaders(budget.limits().capturedHeaders())
                 .build();
-        parts.connector = new HTTPConnector(List.of(parts.connections), HTTPConnector.Listener.NONE);
+        parts.connector = new HTTPConnector(
+                List.of(parts.connections), new ConnectorLog(this.context.logger(), parts.name, System::nanoTime));
         parts.budget = budget.budget();
         parts.lane = new AccountLane<>(
                 parts.name,

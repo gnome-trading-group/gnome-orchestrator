@@ -8,12 +8,8 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import { lookupPlatformNetwork, PRIMARY_REGION, SERVICE_ENDPOINTS, Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { join } from 'path';
+import { ORDER_GATEWAYS } from '../config';
 
-// The names the registry's gateways/ensure route starts gateways by (gnome-registry gateway-ensure.ts).
-export const ORDER_GATEWAY_CLUSTER = 'order-gateways';
-export const ORDER_GATEWAY_BASE_FAMILY = 'order-gateway';
-export const ORDER_GATEWAY_CAPACITY_PROVIDER = 'order-gateway-hosts';
-export const ORDER_GATEWAY_SERVICE_PREFIX = 'order-gateway-';
 
 // Provisional until the gateways are sized under load: two cores and 4 GiB, as a gateway's ingress, egress, Aeron driver,
 // and each account's lane and reader all wake every few tens of microseconds; not burstable (credits would run out in
@@ -30,14 +26,14 @@ interface Props extends cdk.StackProps {
 }
 
 /**
- * Where a region's live order gateways run, with nothing about which: like market-data shards, the registry decides.
- * Its gateways/ensure route, called as a live session launches and while it waits, starts the gateway the session's
- * venue needs in the venue's region (account_master.gateway), as an ECS service from the base task definition here
- * with its key and release filled in; the capacity provider then brings up a host for it. A gateway idle long enough
- * sets its own service to zero and stops, so a region without live sessions runs nothing.
+ * Where a region's live order gateways run, with nothing about which: as market-data shards are run by their reconciler,
+ * gateways are run by the gateway reconciler (OrderGatewayReconcilerStack), from what sessions want (the registry's
+ * gateway rows). It runs a gateway in its venue's region as an ECS service from the base task definition here, with its
+ * key and release filled in, and the capacity provider brings up a host for it; once nobody wants it and it reports no
+ * session or order, it sets the service to zero, so a region without live sessions runs nothing.
  *
  * Fixed ports keep one gateway per host. Each host is on demand in the platform network; a gateway attaches its own
- * Elastic IP, which the start route allocates (Polymarket US counts its limit per IP, and an allowlist would name it).
+ * Elastic IP, which the reconciler allocates (Polymarket US counts its limit per IP, and an allowlist would name it).
  */
 export class OrderGatewayStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
@@ -45,7 +41,7 @@ export class OrderGatewayStack extends cdk.Stack {
     const { vpc, securityGroup } = lookupPlatformNetwork(this);
 
     const cluster = new ecs.Cluster(this, 'OrderGatewayCluster', {
-      clusterName: ORDER_GATEWAY_CLUSTER,
+      clusterName: ORDER_GATEWAYS.cluster,
       vpc,
       containerInsightsV2: ecs.ContainerInsights.DISABLED,
     });
@@ -75,14 +71,14 @@ export class OrderGatewayStack extends cdk.Stack {
       newInstancesProtectedFromScaleIn: true,
     });
     cluster.addAsgCapacityProvider(new ecs.AsgCapacityProvider(this, 'GatewayHostProvider', {
-      capacityProviderName: ORDER_GATEWAY_CAPACITY_PROVIDER,
+      capacityProviderName: ORDER_GATEWAYS.capacityProvider,
       autoScalingGroup: hosts,
       enableManagedScaling: true,
       enableManagedTerminationProtection: true,
       targetCapacityPercent: 100,
     }));
 
-    // Named, so the start route may pass them to the services it creates.
+    // Named, so the gateway reconciler may pass them to the services it creates.
     const taskRole = new iam.Role(this, 'GatewayTaskRole', {
       roleName: `gnome-order-gateway-task-${this.region}`,
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
@@ -105,11 +101,6 @@ export class OrderGatewayStack extends cdk.Stack {
       resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
       conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
     }));
-    // An idle gateway sets its own service to zero before it stops, or ECS would start it again.
-    taskRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['ecs:UpdateService'],
-      resources: [`arn:aws:ecs:${this.region}:${this.account}:service/${ORDER_GATEWAY_CLUSTER}/${ORDER_GATEWAY_SERVICE_PREFIX}*`],
-    }));
     // Its Elastic IP, found by its tag and attached to whichever host it runs on.
     taskRole.addToPolicy(new iam.PolicyStatement({
       actions: ['ec2:DescribeAddresses', 'ec2:AssociateAddress'],
@@ -129,7 +120,7 @@ export class OrderGatewayStack extends cdk.Stack {
     });
 
     const task = new ecs.Ec2TaskDefinition(this, 'GatewayTask', {
-      family: ORDER_GATEWAY_BASE_FAMILY,
+      family: ORDER_GATEWAYS.baseFamily,
       networkMode: ecs.NetworkMode.HOST,
       taskRole,
       executionRole,

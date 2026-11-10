@@ -1,5 +1,6 @@
 package group.gnometrading.orchestrator.gateway.control;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -67,7 +68,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -90,7 +90,6 @@ class GatewayControlTest {
     private static final long SECURITY_ID = 7;
     private static final int LISTING_ID = 70;
     private static final long COD_MILLIS = 300;
-    private static final long IDLE_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
 
     private final AeronRuntime gatewayAeron =
             AeronRuntime.launch("control-gateway", AeronProfile.GATEWAY, Throwable::printStackTrace);
@@ -120,8 +119,8 @@ class GatewayControlTest {
             new AtomicReference<>(record("RUNNING"));
     private boolean registryDown;
     private final List<GatewayState> advertised = new ArrayList<>();
-    private final AtomicLong wantedAt = new AtomicLong();
-    private volatile boolean idled;
+    // Per advertisement: sessions linked, orders working.
+    private final List<long[]> advertisedActivity = new ArrayList<>();
     private final List<Received> received = new ArrayList<>();
     private GatewayIngress ingress;
     private CrossIndex cross;
@@ -261,11 +260,13 @@ class GatewayControlTest {
                     }
                 },
                 GatewayControl.Replies.over(this.gatewayAeron.aeron()),
-                this.advertised::add,
+                (state, linkedSessions, workingOrders) -> {
+                    this.advertised.add(state);
+                    this.advertisedActivity.add(new long[] {linkedSessions, workingOrders});
+                },
                 System::nanoTime,
                 64,
-                new GatewayControl.Idle(
-                        IDLE_NANOS, this.wantedAt::get, System::currentTimeMillis, () -> this.idled = true),
+                System::currentTimeMillis,
                 new GatewayControl.Restart(this.sessionsFile, recovered, helloGraceNanos, loaded));
     }
 
@@ -534,40 +535,11 @@ class GatewayControlTest {
                         .anyMatch(message -> message.templateId() == SessionGoodbyeDecoder.TEMPLATE_ID),
                 "the goodbye");
         assertTrue(this.advertised.contains(GatewayState.STOPPING));
-    }
-
-    @Test
-    void aGatewayWithNoSessionAndNoOrderForTheIdleTimeStops() throws Exception {
-        awaitReady();
-        await(() -> this.idled, "the idle stop");
-    }
-
-    @Test
-    void aLinkedSessionOrAWorkingOrderKeepsTheGatewayUp() throws Exception {
-        awaitReady();
-        hello(0, 0);
-        awaitWelcome();
-        final long until = System.nanoTime() + IDLE_NANOS * 2;
-        while (System.nanoTime() < until) {
-            heartbeat(this.egress.heartbeatSeq());
-            runFor(20);
-        }
-        assertFalse(this.idled, "a session is linked");
-
-        this.sessions.bySlot(SLOT).state = GatewaySession.UNLINKED;
-        this.account.working = 1;
-        runFor(TimeUnit.NANOSECONDS.toMillis(IDLE_NANOS * 2));
-        assertFalse(this.idled, "an order is working");
-    }
-
-    @Test
-    void aGatewayAskedForSinceItWentQuietStaysUp() throws Exception {
-        awaitReady();
-        this.wantedAt.set(Long.MAX_VALUE);
-        runFor(TimeUnit.NANOSECONDS.toMillis(IDLE_NANOS * 2));
-        assertFalse(this.idled);
-        this.wantedAt.set(0);
-        await(() -> this.idled, "the idle stop once nobody asks");
+        final int stopping = this.advertised.indexOf(GatewayState.STOPPING);
+        assertArrayEquals(
+                new long[] {1, 2},
+                this.advertisedActivity.get(stopping),
+                "in use as it stopped: one session linked, two orders working");
     }
 
     @Test

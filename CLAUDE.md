@@ -25,8 +25,9 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   `local`: put its item in the dev `collection-shards` table first (`shard_id` `local`, numeric `generation`,
   `streams` and `publish` as packed big-endian int32s, see `DynamoAssignment.pack`). `strategy` has no lease: its
   `MARKET_DATA_LOCAL_SHARD=collector:40000` stands in for one, so its listings' book streams must be in both lists.
-- CDK: `cd cdk && npm ci && npx cdk synth` (needs an npm token for `@gnome-trading-group` packages). Deploys only
-  happen through the pipeline; do not `cdk deploy` by hand.
+- CDK: `cd cdk && npm ci && npx cdk synth` (needs an npm token for `@gnome-trading-group` packages; the gateway
+  stacks look up the platform network, so a local synth needs `--profile pipelines`). `npm test` runs the gateway
+  reconciler's tests. Deploys only happen through the pipeline; do not `cdk deploy` by hand.
 
 ## Layout
 
@@ -174,8 +175,11 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     within 10 s of READY plus its cod timeout has its orders cancelled. A hello past its replay ring gets statuses too.
   - Tests: `GatewayFixture` (test scope, from gnome-gateways' test jar) runs a whole gateway in process on a fake
     venue; `session/orders/GatewayInProcessTest` drives sessions through it, restart included.
-  - Idle stop: `gateway.idle.minutes` with no session and no working order, and no `wanted_at` since, exits into the
-    planned stop. 0 (the default) never stops, until something also keeps ECS from starting it again.
+  - Whether it runs is not its own decision: the gateway reconciler (`cdk/lambda/gateway_reconciler`) starts and stops
+    it. Its endpoint item
+    (every 15 s) carries `linked_sessions` and `working_orders`, which the reconciler reads; scaled to zero, ECS sends
+    SIGTERM and the planned stop runs. Sessions say they want it through `POST /gateways/ensure` (`GatewayLinks`: every
+    10 s until linked, then every minute).
 - `aeron/` - the Aeron layer shards, sessions and order gateways share:
   `AeronRuntime` (embedded media driver + client per process, `AeronProfile` per host kind), `AeronPathIdle` (how long
   Aeron-path agents and drivers park; `AeronPathAgent` marks them), `AeronChannels`
@@ -246,11 +250,13 @@ live ones can read `order-gateway#*` items in `service-endpoints`), `<Stage>-Orc
 scaling from zero (capacity provider `order-gateway-hosts`), base task definition `order-gateway` (a Java 17 runtime and
 `cdk/lib/stacks/gateway-docker/gateway-start.sh`, which runs `java -jar <release> gateway`: the jar's manifest carries
 the module access gnomepy's JVM args give sessions), state on a host volume, logs in
-`/gnome/order-gateway/<region>`. The registry's `POST /gateways/ensure?gatewayKey=` starts a gateway in its row's
-region as service `order-gateway-<key with : as ->` from its own revision (key and release filled in) and allocates its
-Elastic IP (tag `gnome:order-gateway`), which `gateway-start.sh` attaches at boot; the launcher calls it for each live
-venue and a waiting session every 10 s. A gateway idle `gateway.idle.minutes` (30) sets its service to zero and
-stops),
+`/gnome/order-gateway/<region>`), and `<Stage>-OrchestratorOrderGatewayReconcilerStack` (us-east-1 only): the gateway
+reconciler, Lambda `GatewayReconciler` (`cdk/lambda/gateway_reconciler`, TypeScript; one tick at a time from FIFO queue
+`gateway-reconciler.fifo`, woken by the registry's `POST /gateways/ensure`, which the launcher and sessions call, and
+every minute; names in `cdk/lib/config.ts` `ORDER_GATEWAYS`, given to the Lambda in its environment). It reads the registry's gateway rows and runs a gateway while it was wanted in
+the last 30 minutes or reports sessions or orders, in its row's region, as service `order-gateway-<key with : as ->` from
+its own revision (key and release filled in), and allocates its Elastic IP (tag `gnome:order-gateway`), which
+`gateway-start.sh` attaches at boot; otherwise it sets the service to zero),
 and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
 exchange code; run in the exchange's region, `sm.exchange.region`, where its gateway runs; reads only that region's
 `gnome/accounts/*/trading`; 5-minute timeout, never retried, dropped unless started within a minute). Started from the controller's Treasury

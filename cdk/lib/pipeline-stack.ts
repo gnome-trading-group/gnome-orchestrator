@@ -10,6 +10,7 @@ import { AmiStack } from './stacks/ami-stack';
 import { Ec2Stack } from './stacks/ec2-stack';
 import { EmergencyCancelStack } from './stacks/emergency-cancel-stack';
 import { OrderGatewayStack } from './stacks/order-gateway-stack';
+import { OrderGatewayReconcilerStack } from './stacks/order-gateway-reconciler-stack';
 import { SessionLogStack } from './stacks/session-log-stack';
 import { StorageStack } from './stacks/storage-stack';
 import { readFileSync } from 'fs';
@@ -60,6 +61,10 @@ class AppStage extends cdk.Stage {
       });
       // Built once per account and copied to every region, rather than built in each.
       if (region === PRIMARY_REGION) {
+        new OrderGatewayReconcilerStack(this, 'OrchestratorOrderGatewayReconcilerStack', {
+          env,
+          registryApiKeyId: config.registryApiKeyId,
+        });
         new AmiStack(this, 'OrchestratorAmiStack', {
           env,
           regions: config.regions,

@@ -22,6 +22,10 @@ import org.agrona.ErrorHandler;
  *
  * <p>An error while the session is already shutting down (an operator's stop: sockets closing under their readers) is
  * the stop itself, so it exits without saying anything.
+ *
+ * <p>The report and the exit run on a thread of their own, never the failing one: {@code System.exit} waits for the
+ * shutdown hook, which closes the session by joining every agent's thread, so an agent thread waiting in it would
+ * never be joined and the process would never end. The failing thread returns at once.
  */
 public final class SessionFatalHandler implements ProcessExit {
 
@@ -69,10 +73,16 @@ public final class SessionFatalHandler implements ProcessExit {
             return;
         }
         logger.logf(LogMessage.FATAL_ERROR_EXITING, "Session error: %s", cause);
-        if (!shuttingDown) {
-            report(cause);
-        }
-        halt.accept(status);
+        final Thread thread = new Thread(
+                () -> {
+                    if (!shuttingDown) {
+                        report(cause);
+                    }
+                    halt.accept(status);
+                },
+                "session-fatal-exit");
+        thread.setDaemon(false);
+        thread.start();
     }
 
     /** Ends the process without reporting anything: for a session that should never have started. */

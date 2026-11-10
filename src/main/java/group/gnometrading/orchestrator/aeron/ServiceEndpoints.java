@@ -31,6 +31,8 @@ public final class ServiceEndpoints {
     static final String VERSION = "version";
     static final String WRITTEN_AT = "written_at_ns";
     static final String EXPIRES_AT = "expires_at";
+    static final String LINKED_SESSIONS = "linked_sessions";
+    static final String WORKING_ORDERS = "working_orders";
 
     private final DynamoDbClient dynamo;
     private final String table;
@@ -56,6 +58,8 @@ public final class ServiceEndpoints {
         item.put(STATE, AttributeValue.fromS(endpoint.state()));
         item.put(VERSION, AttributeValue.fromS(endpoint.version()));
         item.put(WRITTEN_AT, AttributeValue.fromN(Long.toString(endpoint.writtenAtNanos())));
+        item.put(LINKED_SESSIONS, AttributeValue.fromN(Integer.toString(endpoint.linkedSessions())));
+        item.put(WORKING_ORDERS, AttributeValue.fromN(Long.toString(endpoint.workingOrders())));
         final long writtenAtSeconds = TimeUnit.NANOSECONDS.toSeconds(endpoint.writtenAtNanos());
         item.put(EXPIRES_AT, AttributeValue.fromN(Long.toString(writtenAtSeconds + TTL_SECONDS)));
         this.dynamo.putItem(
@@ -89,6 +93,14 @@ public final class ServiceEndpoints {
                 Integer.parseInt(item.get(PORT).n()),
                 item.get(STATE).s(),
                 item.get(VERSION).s(),
-                Long.parseLong(item.get(WRITTEN_AT).n()));
+                Long.parseLong(item.get(WRITTEN_AT).n()),
+                (int) number(item, LINKED_SESSIONS),
+                number(item, WORKING_ORDERS));
+    }
+
+    /** A count the item may lack, as one written by an older release does: 0. */
+    private static long number(final Map<String, AttributeValue> item, final String name) {
+        final AttributeValue value = item.get(name);
+        return value == null ? 0 : Long.parseLong(value.n());
     }
 }

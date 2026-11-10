@@ -21,12 +21,23 @@ import java.util.function.LongSupplier;
  * ingress publication, which block on the media driver. A link the client has taken down (or never had up) is opened
  * again, a second at most between attempts: its old publication and subscription are taken from the client first and
  * closed, the gateway found, a reply subscription opened on a port the driver picks (the hello names it), then the
- * ingress publication. Runs on a scheduled thread of its own; allocates freely.
+ * ingress publication. It also tells the registry the session wants each gateway, every {@link #WANT_WAITING_NANOS}
+ * while the link isn't ready and every {@link #WANT_READY_NANOS} once it is: gateways run only while sessions want them,
+ * so one that is stopped, or stopping, is started, and one in use is never stopped. Runs on a scheduled thread of its
+ * own; allocates freely.
  */
 public final class GatewayLinks implements Runnable, AutoCloseable {
 
     /** Where a gateway takes sessions. */
     record Endpoint(String ip, int port) {}
+
+    /** Tells the registry the session wants the gateway; a failure is the caller's to log, and is said again. */
+    @FunctionalInterface
+    interface Wanting {
+        Wanting NONE = gatewayKey -> {};
+
+        void want(String gatewayKey) throws Exception;
+    }
 
     /** Finds a gateway by its key; null while it isn't up. */
     @FunctionalInterface
@@ -35,6 +46,10 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
     }
 
     static final long RETRY_NANOS = TimeUnit.SECONDS.toNanos(1);
+    // While a link waits for its gateway, which may be starting from nothing.
+    static final long WANT_WAITING_NANOS = TimeUnit.SECONDS.toNanos(10);
+    // Once linked: well inside the time the registry keeps a gateway nobody has asked for.
+    static final long WANT_READY_NANOS = TimeUnit.MINUTES.toNanos(1);
     private static final long PORT_WAIT_NANOS = TimeUnit.SECONDS.toNanos(2);
     // Long enough for the client to have finished any pass that still holds the old publication or subscription.
     private static final long HANDOVER_MILLIS = 50;
@@ -45,7 +60,9 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
     private final List<GatewayLink> links;
     private final Resolver resolver;
     private final LongSupplier nanoClock;
+    private final Wanting wanting;
     private final Map<GatewayLink, Long> retryAt = new HashMap<>();
+    private final Map<GatewayLink, Long> wantAt = new HashMap<>();
     // Tests make a session deaf by advertising a reply port nothing listens on.
     volatile IntUnaryOperator advertisedReplyPort = IntUnaryOperator.identity();
 
@@ -56,6 +73,18 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
             final List<GatewayLink> links,
             final Resolver resolver,
             final LongSupplier nanoClock) {
+        this(logger, aeron, localIp, links, resolver, Wanting.NONE, nanoClock);
+    }
+
+    GatewayLinks(
+            final Logger logger,
+            final Aeron aeron,
+            final String localIp,
+            final List<GatewayLink> links,
+            final Resolver resolver,
+            final Wanting wanting,
+            final LongSupplier nanoClock) {
+        this.wanting = wanting;
         this.logger = logger;
         this.aeron = aeron;
         this.localIp = localIp;
@@ -67,6 +96,7 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
     @Override
     public void run() {
         for (final GatewayLink link : this.links) {
+            want(link);
             try {
                 tend(link);
             } catch (Exception e) {
@@ -77,6 +107,24 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
                         CauseChain.of(e));
                 this.retryAt.put(link, this.nanoClock.getAsLong() + RETRY_NANOS);
             }
+        }
+    }
+
+    private void want(final GatewayLink link) {
+        final long now = this.nanoClock.getAsLong();
+        final Long due = this.wantAt.get(link);
+        if (due != null && now - due < 0) {
+            return;
+        }
+        this.wantAt.put(link, now + (link.state == GatewayLink.READY ? WANT_READY_NANOS : WANT_WAITING_NANOS));
+        try {
+            this.wanting.want(link.gatewayKey);
+        } catch (Exception e) {
+            this.logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Couldn't tell the registry gateway %s is wanted: %s",
+                    link.gatewayKey,
+                    CauseChain.of(e));
         }
     }
 

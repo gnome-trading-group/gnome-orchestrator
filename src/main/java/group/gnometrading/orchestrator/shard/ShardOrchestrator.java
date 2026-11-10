@@ -412,7 +412,9 @@ public class ShardOrchestrator extends Orchestrator {
                     AeronPorts.SHARD_CONTROL,
                     state,
                     identity.version(),
-                    wallClock.nanoTime()));
+                    wallClock.nanoTime(),
+                    0,
+                    0));
         } catch (Exception error) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to write the shard's endpoint: %s", CauseChain.of(error));
         }

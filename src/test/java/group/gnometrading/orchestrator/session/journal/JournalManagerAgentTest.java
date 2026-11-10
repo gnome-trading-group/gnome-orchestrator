@@ -82,6 +82,38 @@ class JournalManagerAgentTest {
     }
 
     @Test
+    void aMarketDataBacklogBeyondTheReorderWindowDoesNotStrandAnEarlierOrder() throws Exception {
+        GlobalSequence sessionSequence = new GlobalSequence();
+        Map<SequencedRingBuffer<?>, JournalSource> sources = new IdentityHashMap<>();
+        // Registered first, so every pass reads market data before orders, as in a session; big enough to hold a
+        // backlog past the writer's window, as a stalled journal thread lets it build in a burst.
+        int backlog = JournalWriter.REORDER_BUFFER_CAPACITY + 100;
+        SequencedRingBuffer<Mbp10Schema> marketData =
+                new SequencedRingBuffer<>(Mbp10Schema::new, sessionSequence, Integer.highestOneBit(backlog) << 1);
+        sources.put(marketData, JournalSource.STRATEGY_MARKET_DATA);
+        SequencedRingBuffer<Intent> omsOrders = buffer(Intent::new, sessionSequence, sources, JournalSource.OMS_ORDER);
+        JournalManagerAgent agent = agent(sessionSequence, sources);
+        agent.onStart();
+
+        publish(omsOrders);
+        for (int i = 0; i < backlog; i++) {
+            publish(marketData);
+        }
+        int drained;
+        do {
+            drained = agent.doWork();
+        } while (drained > 0);
+        agent.onClose();
+
+        List<Long> recorded = new ArrayList<>();
+        readSealed((seq, sourceId, templateId, buffer, length) -> recorded.add(seq));
+        assertEquals(backlog + 1, recorded.size());
+        for (int i = 0; i < recorded.size(); i++) {
+            assertEquals(i + 1L, recorded.get(i));
+        }
+    }
+
+    @Test
     void closeJournalsWhatWasPublishedAfterTheLastPass() throws Exception {
         GlobalSequence sessionSequence = new GlobalSequence();
         Map<SequencedRingBuffer<?>, JournalSource> sources = new IdentityHashMap<>();

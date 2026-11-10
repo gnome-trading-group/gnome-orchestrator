@@ -26,6 +26,14 @@ import org.agrona.concurrent.EpochClock;
  */
 public final class JournalManagerAgent implements GnomeAgent {
 
+    /**
+     * The most events taken from one buffer per pass. The writer only holds events a bounded distance ahead of the
+     * oldest one still missing, and draining a busy buffer whole (market data in a burst) after a stall could carry it
+     * that far past an order or report waiting in another; a few per buffer per pass keeps them level, at no cost in
+     * throughput since the agent only idles after a pass that found nothing.
+     */
+    static final int PASS_LIMIT = 64;
+
     private final JournalWriter writer;
     private final SequencedPoller[] pollers;
     private final JournalSegmentSealer sealer;
@@ -81,7 +89,7 @@ public final class JournalManagerAgent implements GnomeAgent {
     private int drain() throws Exception {
         int work = 0;
         for (SequencedPoller poller : pollers) {
-            work += poller.poll();
+            work += poller.poll(PASS_LIMIT);
         }
         return work;
     }

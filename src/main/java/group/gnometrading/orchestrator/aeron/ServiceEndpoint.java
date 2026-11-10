@@ -12,6 +12,8 @@ package group.gnometrading.orchestrator.aeron;
  * @param state what it says about itself, e.g. {@code ACTIVE}, {@code READY}, {@code STOPPING}
  * @param version the orchestrator version it runs
  * @param writtenAtNanos when it last wrote the item, epoch nanoseconds
+ * @param linkedSessions an order gateway's sessions linked or saying hello; 0 for a shard
+ * @param workingOrders an order gateway's orders working; 0 for a shard
  */
 public record ServiceEndpoint(
         Kind kind,
@@ -22,7 +24,9 @@ public record ServiceEndpoint(
         int port,
         String state,
         String version,
-        long writtenAtNanos) {
+        long writtenAtNanos,
+        int linkedSessions,
+        long workingOrders) {
 
     public enum Kind {
         SHARD("shard"),

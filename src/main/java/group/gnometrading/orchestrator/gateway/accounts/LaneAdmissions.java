@@ -39,6 +39,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
     private long connectionsBusy;
     private long held;
     private long expired;
+    private long expiredWithoutConnection;
     private long dropped;
     private long minuteEndsNanos;
 
@@ -51,6 +52,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
     private volatile long lastOrderMaxMicros;
     private volatile long lastHeld;
     private volatile long lastExpired;
+    private volatile long lastExpiredWithoutConnection;
     private volatile long lastDropped;
     private volatile long lastOrderAnswerP50Micros;
     private volatile long lastOrderAnswerP99Micros;
@@ -111,6 +113,12 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         this.connectionsBusy++;
     }
 
+    @Override
+    public void refusedWithoutConnection() {
+        rollMinute();
+        this.expiredWithoutConnection++;
+    }
+
     private void rollMinute() {
         final long now = this.nanoClock.getAsLong();
         if (now - this.minuteEndsNanos >= 0) {
@@ -144,6 +152,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         this.lastOrderMaxMicros = this.orderWaits.maxMicros();
         this.lastHeld = this.held;
         this.lastExpired = this.expired;
+        this.lastExpiredWithoutConnection = this.expiredWithoutConnection;
         this.lastDropped = this.dropped;
         this.lastOrderAnswerP50Micros = this.orderAnswers.percentileMicros(0.5);
         this.lastOrderAnswerP99Micros = this.orderAnswers.percentileMicros(0.99);
@@ -160,6 +169,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         this.orderWaits.reset();
         this.held = 0;
         this.expired = 0;
+        this.expiredWithoutConnection = 0;
         this.dropped = 0;
         this.minuteEndsNanos = now + MINUTE_NANOS;
     }
@@ -175,7 +185,8 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         }
         return String.format(
                 "%d cancels sent (waited p99 %d us, max %d us), %d orders and amends sent (waited p99 %d us, max %d us),"
-                        + " %d held for the budget, %d refused for waiting too long, %d dropped by a cancel;"
+                        + " %d held for the budget, %d refused for waiting too long (%d with no connection open),"
+                        + " %d dropped by a cancel;"
                         + " venue answered orders in p50 %d us, p99 %d us, cancels in p50 %d us, p99 %d us, %d never;"
                         + " every connection in use %d times",
                 this.lastCancels,
@@ -186,6 +197,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
                 this.lastOrderMaxMicros,
                 this.lastHeld,
                 this.lastExpired,
+                this.lastExpiredWithoutConnection,
                 this.lastDropped,
                 this.lastOrderAnswerP50Micros,
                 this.lastOrderAnswerP99Micros,

@@ -23,3 +23,19 @@ export const CONFIGS: { [stage in Stage]?: OrchestratorConfig } = {
     registryApiKeyId: 'mj0thnxe96',
   },
 };
+
+/**
+ * What order gateways are run by, shared by the gateway stack, the gateway reconciler (given them in its environment)
+ * and gateway-start.sh (which finds its address by `addressTag`). gnome-registry's gateways/ensure wakes the reconciler
+ * on `reconcilerQueue`, by name.
+ */
+export const ORDER_GATEWAYS = {
+  cluster: 'order-gateways',
+  baseFamily: 'order-gateway',
+  capacityProvider: 'order-gateway-hosts',
+  servicePrefix: 'order-gateway-',
+  addressTag: 'gnome:order-gateway',
+  reconcilerQueue: 'gateway-reconciler.fifo',
+  // One message group, so the reconciler's ticks never overlap.
+  reconcilerGroup: 'reconcile',
+} as const;

@@ -1,7 +1,5 @@
 package group.gnometrading.orchestrator.gateway;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.account.GatewayAccounts;
@@ -59,17 +57,11 @@ import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.fee.FeeTimeline;
-import group.gnometrading.strings.ViewString;
 import group.gnometrading.utils.CauseChain;
 import io.aeron.Subscription;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.net.InetAddress;
-import java.net.URLEncoder;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -86,8 +78,6 @@ import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
-import software.amazon.awssdk.services.ecs.EcsClient;
-import software.amazon.awssdk.services.ecs.model.UpdateServiceRequest;
 
 /**
  * An order gateway ({@code GATEWAY_KEY}): one process per venue holding that venue's trading accounts for every live
@@ -99,10 +89,6 @@ import software.amazon.awssdk.services.ecs.model.UpdateServiceRequest;
 public class OrderGatewayOrchestrator extends Orchestrator {
 
     private static final int HEALTH_PORT = 8080;
-    // Where the registry's gateways/ensure runs each gateway: its cluster, and its service, by its key (orchestrator
-    // cdk order-gateway-stack.ts, gnome-registry gateway-ensure.ts).
-    private static final String ECS_CLUSTER = "order-gateways";
-    private static final String ECS_SERVICE_PREFIX = "order-gateway-";
     private static final int CONTROL_QUEUE = 1024;
     private static final int REJECT_QUEUE = 4096;
     // Of ECS's stop timeout: this long for the lanes to empty after every order is cancelled.
@@ -226,7 +212,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 advertiser(logger, settings, properties, ip, port),
                 System::nanoTime,
                 properties.getIntProperty("gateway.replay.reports"),
-                idle(properties, settings),
+                System::currentTimeMillis,
                 new GatewayControl.Restart(
                         restart.sessionsFile(),
                         restart.sessions(),
@@ -552,74 +538,6 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         return new Watchdog(logger, checkIns, System::nanoTime, exit);
     }
 
-    /**
-     * Stopping when idle: its ECS service is set to zero first, so ECS doesn't start it again, then the exit is the
-     * planned stop of the shutdown hook. The registry's gateways/ensure starts it again when a session wants it. Off
-     * while {@code gateway.idle.minutes} is 0.
-     */
-    private GatewayControl.Idle idle(final Properties properties, final GatewaySettings settings) {
-        final long minutes = properties.getLongProperty("gateway.idle.minutes");
-        if (minutes <= 0) {
-            return GatewayControl.Idle.NEVER;
-        }
-        final RegistryConnection registry = getInstance(RegistryConnection.class);
-        final Logger logger = getInstance(Logger.class);
-        final ObjectMapper mapper = new ObjectMapper();
-        return new GatewayControl.Idle(
-                TimeUnit.MINUTES.toNanos(minutes),
-                () -> wantedAtMillis(registry, mapper, settings.key()),
-                System::currentTimeMillis,
-                // On a thread of its own: the shutdown hook's planned stop closes the control thread that calls this.
-                () -> new Thread(
-                                () -> {
-                                    stopService(logger, settings.key());
-                                    System.exit(0);
-                                },
-                                "gateway-idle-exit")
-                        .start());
-    }
-
-    /**
-     * Sets the gateway's own ECS service to zero tasks. A failure is logged and the gateway stops anyway: ECS starts it
-     * again, and it stops again once idle.
-     */
-    private static void stopService(final Logger logger, final String gatewayKey) {
-        final String service = ECS_SERVICE_PREFIX + gatewayKey.replace(':', '-');
-        try (EcsClient ecs = EcsClient.create()) {
-            ecs.updateService(UpdateServiceRequest.builder()
-                    .cluster(ECS_CLUSTER)
-                    .service(service)
-                    .desiredCount(0)
-                    .build());
-            logger.logf(LogMessage.DEBUG, "Gateway %s idle: service %s set to zero", gatewayKey, service);
-        } catch (RuntimeException e) {
-            logger.logf(
-                    LogMessage.UNKNOWN_ERROR,
-                    "Gateway %s idle, but its service %s couldn't be set to zero: %s",
-                    gatewayKey,
-                    service,
-                    CauseChain.of(e));
-        }
-    }
-
-    /** When a session last asked for the gateway, from its registry row; 0 if never. */
-    private static long wantedAtMillis(
-            final RegistryConnection registry, final ObjectMapper mapper, final String gatewayKey) {
-        final ByteBuffer body = registry.get(
-                new ViewString("/api/gateways?gatewayKey=" + URLEncoder.encode(gatewayKey, StandardCharsets.UTF_8)));
-        final byte[] bytes = new byte[body.remaining()];
-        body.get(bytes);
-        try {
-            final JsonNode rows = mapper.readTree(bytes);
-            final JsonNode wanted = rows.isEmpty() ? null : rows.get(0).get("wanted_at");
-            return wanted == null || wanted.isNull()
-                    ? 0
-                    : OffsetDateTime.parse(wanted.asText()).toInstant().toEpochMilli();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-    }
-
     private static GatewayControl.Listings listings(final SecurityMaster securityMaster) {
         return new GatewayControl.Listings() {
             @Override
@@ -646,7 +564,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
         final String instance = instance();
         final String version = properties.getStringProperty("orchestrator.version");
-        return state -> {
+        return (state, linkedSessions, workingOrders) -> {
             try {
                 endpoints.put(new ServiceEndpoint(
                         ServiceEndpoint.Kind.ORDER_GATEWAY,
@@ -657,7 +575,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         port,
                         state.name(),
                         version,
-                        wallClock.nanoTime()));
+                        wallClock.nanoTime(),
+                        linkedSessions,
+                        workingOrders));
             } catch (Exception e) {
                 logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to write the gateway's endpoint: %s", CauseChain.of(e));
             }

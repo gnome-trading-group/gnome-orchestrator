@@ -61,8 +61,6 @@ public final class SessionOrders {
     private static final long PAPER_TRADING_DEFAULT_SEED = 0x9E3779B97F4A7C15L;
     // How long startup recovery waits for the gateway's answer, which waits on the venue and the account's read budget.
     private static final long RECOVERY_QUERY_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
-    // How often a session waiting for its gateways asks the registry to start them.
-    private static final long ENSURE_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(10);
 
     /** The router's copy of each order and execution report, one pair of buffers per listing. */
     public record RoutedBuffers(
@@ -81,7 +79,6 @@ public final class SessionOrders {
     private GatewayLinks gatewayLinks;
     private ScheduledExecutorService gatewayControl;
     private List<GatewayLink> links = List.of();
-    private boolean localGateway;
 
     public SessionOrders(
             Logger logger,
@@ -209,13 +206,14 @@ public final class SessionOrders {
         String local = properties.hasProperty("order.gateway.local")
                 ? properties.getStringProperty("order.gateway.local").trim()
                 : "";
-        this.localGateway = !local.isEmpty();
         this.gatewayLinks = new GatewayLinks(
                 logger,
                 aeron.aeron(),
                 local.isEmpty() ? HostAddress.privateIp() : "127.0.0.1",
                 links,
                 local.isEmpty() ? endpointsResolver() : localResolver(local),
+                // A local run names its gateway, which nothing starts for it.
+                local.isEmpty() ? this::want : GatewayLinks.Wanting.NONE,
                 System::nanoTime);
         this.gatewayControl = DaemonThreads.scheduler("gateway-links");
         this.gatewayControl.scheduleWithFixedDelay(gatewayLinks, 0, 100, TimeUnit.MILLISECONDS);
@@ -223,18 +221,14 @@ public final class SessionOrders {
         return new Wiring(List.of(client), null);
     }
 
-    /** Asks the registry to start the gateway, or keep it up; a failure is logged and asked again next time. */
-    private void ensure(String gatewayKey) {
-        try {
-            registry.get()
-                    .post(
-                            new ViewString("/api/gateways/ensure?gatewayKey="
-                                    + URLEncoder.encode(gatewayKey, StandardCharsets.UTF_8)),
-                            new byte[0],
-                            0);
-        } catch (RuntimeException e) {
-            logger.logf(LogMessage.UNKNOWN_ERROR, "Couldn't ask the registry to start gateway %s: %s", gatewayKey, e);
-        }
+    /** Tells the registry the session wants the gateway: it starts one that isn't running and keeps it running. */
+    private void want(String gatewayKey) {
+        registry.get()
+                .post(
+                        new ViewString("/api/gateways/ensure?gatewayKey="
+                                + URLEncoder.encode(gatewayKey, StandardCharsets.UTF_8)),
+                        new byte[0],
+                        0);
     }
 
     /** The session's slot at every gateway: its registry {@code session_seq}, never reused. */
@@ -280,26 +274,15 @@ public final class SessionOrders {
 
     /**
      * Waits until every order gateway link is ready, so the strategy's first orders aren't refused as the session
-     * starts, asking the registry every {@link #ENSURE_INTERVAL_NANOS} to start each gateway not yet ready: gateways
-     * run only while sessions want them, and one may be stopping as this session starts. Without gateways there is
-     * nothing to wait for.
+     * starts; the links' control thread meanwhile asks the registry for any gateway not running. Without gateways there
+     * is nothing to wait for.
      *
      * @throws IllegalStateException if they aren't ready in time: a live session that can't reach its gateway can't
      *     trade
      */
     public void awaitGateways(long timeoutNanos) throws InterruptedException {
         long deadline = System.nanoTime() + timeoutNanos;
-        long nextEnsure = System.nanoTime();
         while (!links.stream().allMatch(link -> link.state == GatewayLink.READY)) {
-            // A local run names its gateway, which nothing starts for it.
-            if (!localGateway && System.nanoTime() - nextEnsure >= 0) {
-                nextEnsure = System.nanoTime() + ENSURE_INTERVAL_NANOS;
-                for (GatewayLink link : links) {
-                    if (link.state != GatewayLink.READY) {
-                        ensure(link.gatewayKey);
-                    }
-                }
-            }
             if (System.nanoTime() - deadline > 0) {
                 throw new IllegalStateException("Order gateways not ready: "
                         + links.stream()

@@ -58,6 +58,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -451,9 +452,13 @@ public class SessionOrchestrator extends Orchestrator {
      * which reconnects first: a dropped socket is routine there.
      */
     private static ErrorHandler sessionErrorHandler(final Logger logger) {
+        final AtomicBoolean exiting = new AtomicBoolean();
         return error -> {
             logger.logf(LogMessage.FATAL_ERROR_EXITING, "Agent error: %s", error);
-            System.exit(1);
+            // Off the agent's thread, which the shutdown hook joins: it would never be joined if it waited in exit.
+            if (exiting.compareAndSet(false, true)) {
+                new Thread(() -> System.exit(1), "session-exit-on-error").start();
+            }
         };
     }
 

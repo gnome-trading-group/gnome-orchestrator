@@ -66,7 +66,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  *   <li>A session silent past its cancel-on-disconnect timeout, or one that stops echoing the gateway's heartbeats (its
  *       replies aren't arriving), has every order cancelled, is unlinked, and is told to say hello again.
  *   <li>A message that can't be read evicts its session the same way, and refuses its hellos for 5 minutes.
- *   <li>The gateway's state (READY once every account is, DEGRADED while any isn't) and its endpoint record.
+ *   <li>The gateway's state (READY once every account is, DEGRADED while any isn't) and its endpoint record, with how
+ *       many sessions are linked and orders working: whether it is in use, which the registry's reconciler reads to
+ *       decide whether it runs.
  *   <li>A planned stop: every session's orders cancelled and a goodbye sent, waiting for the lanes to empty.
  * </ul>
  */
@@ -82,7 +84,12 @@ public final class GatewayControl implements GnomeAgent {
     /** Records where sessions reach the gateway, and its state; called every {@link #ADVERTISE_INTERVAL_NANOS}. */
     @FunctionalInterface
     public interface Advertiser {
-        void advertise(GatewayState state);
+        /**
+         * @param linkedSessions sessions linked or saying hello now
+         * @param workingOrders orders working on every account it holds: with either above zero it is in use, which
+         *     whatever decides whether it runs (the registry's gateway reconciler) reads from its endpoint
+         */
+        void advertise(GatewayState state, int linkedSessions, long workingOrders);
     }
 
     /** Opens the publication a session's replies go on; blocks on the media driver. */
@@ -94,15 +101,6 @@ public final class GatewayControl implements GnomeAgent {
             return (ip, port) ->
                     aeron.addPublication(AeronChannels.gatewayReply(ip, port), AeronStreamIds.GATEWAY_REPLY);
         }
-    }
-
-    /**
-     * When the gateway counts as idle and stops: no session linked or saying hello and no order working for
-     * {@code afterNanos}, and no session has asked for it (the registry's {@code wanted_at}) since that began. Zero never
-     * stops.
-     */
-    public record Idle(long afterNanos, LongSupplier wantedAtMillis, LongSupplier wallMillis, Runnable onIdle) {
-        public static final Idle NEVER = new Idle(0, () -> 0, System::currentTimeMillis, () -> {});
     }
 
     /**
@@ -147,7 +145,7 @@ public final class GatewayControl implements GnomeAgent {
     private final Advertiser advertiser;
     private final LongSupplier nanoClock;
     private final int replayCapacity;
-    private final Idle idle;
+    private final LongSupplier wallMillis;
     private final SessionsFile sessionsFile;
     private final long helloGraceNanos;
     // Per slot, a recovered session not yet reconciled: its orders as the ownership log has them.
@@ -181,9 +179,6 @@ public final class GatewayControl implements GnomeAgent {
     private boolean everReady;
     private long nextTickNanos;
     private long nextAdvertiseNanos;
-    private long idleSinceNanos = -1;
-    private long idleSinceMillis;
-    private boolean idleFired;
 
     /** What this thread tracks of a linked session: its timeout, and when its echo of our heartbeats last moved. */
     private static final class Link {
@@ -216,7 +211,7 @@ public final class GatewayControl implements GnomeAgent {
             final Advertiser advertiser,
             final LongSupplier nanoClock,
             final int replayCapacity,
-            final Idle idle,
+            final LongSupplier wallMillis,
             final Restart restart) {
         this.logger = logger;
         this.sessions = sessions;
@@ -230,10 +225,10 @@ public final class GatewayControl implements GnomeAgent {
         this.advertiser = advertiser;
         this.nanoClock = nanoClock;
         this.replayCapacity = replayCapacity;
-        this.idle = idle;
+        this.wallMillis = wallMillis;
         this.helloPages = new HelloPages(logger, nanoClock);
         this.venueQueries =
-                new VenueQueries(logger, sessions, registry, listings, this::sendAnswer, nanoClock, idle.wallMillis());
+                new VenueQueries(logger, sessions, registry, listings, this::sendAnswer, nanoClock, wallMillis);
         this.sessionsFile = restart.sessionsFile();
         this.helloGraceNanos = restart.helloGraceNanos();
         restart.loaded().forEach((accountId, keys) -> this.loaded.put(accountId, new HashSet<>(keys)));
@@ -601,7 +596,7 @@ public final class GatewayControl implements GnomeAgent {
         }
         try {
             final VenueOrderQuery query = session.account.orderQuery();
-            final long since = this.idle.wallMillis().getAsLong() - VenueQueries.LOOKBACK_MILLIS;
+            final long since = this.wallMillis.getAsLong() - VenueQueries.LOOKBACK_MILLIS;
             Optional<VenueOrder> found = query.getOrder(listing, order.exchangeOrderId(), since);
             if (found.isEmpty()) {
                 this.logger.logf(
@@ -679,7 +674,7 @@ public final class GatewayControl implements GnomeAgent {
                     hello.strategyId(),
                     hello.venueAccountId(),
                     TimeUnit.NANOSECONDS.toMillis(hello.codTimeoutNanos()),
-                    this.idle.wallMillis().getAsLong(),
+                    this.wallMillis.getAsLong(),
                     record.status(),
                     record.mode(),
                     record.listingIds(),
@@ -766,66 +761,29 @@ public final class GatewayControl implements GnomeAgent {
         updateState();
         if (now - this.nextAdvertiseNanos >= 0) {
             this.nextAdvertiseNanos = now + ADVERTISE_INTERVAL_NANOS;
-            this.advertiser.advertise(this.status.state());
+            this.advertiser.advertise(this.status.state(), linkedSessions(), workingOrders());
         }
-        checkIdle(now);
         return work;
     }
 
-    private void checkIdle(final long now) {
-        if (this.idle.afterNanos() <= 0 || this.idleFired) {
-            return;
-        }
-        if (!quiet()) {
-            this.idleSinceNanos = -1;
-            return;
-        }
-        if (this.idleSinceNanos < 0) {
-            this.idleSinceNanos = now;
-            this.idleSinceMillis = this.idle.wallMillis().getAsLong();
-            return;
-        }
-        if (now - this.idleSinceNanos < this.idle.afterNanos()) {
-            return;
-        }
-        long wantedAt;
-        try {
-            wantedAt = this.idle.wantedAtMillis().getAsLong();
-        } catch (RuntimeException e) {
-            // Unsure whether a session is on its way: stay up and look again after another idle spell.
-            this.logger.logf(
-                    LogMessage.UNKNOWN_ERROR, "Gateway: can't read when it was last wanted: %s", CauseChain.of(e));
-            wantedAt = Long.MAX_VALUE;
-        }
-        if (wantedAt >= this.idleSinceMillis) {
-            this.idleSinceNanos = now;
-            this.idleSinceMillis = this.idle.wallMillis().getAsLong();
-            return;
-        }
-        this.idleFired = true;
-        this.logger.logf(
-                LogMessage.DEBUG,
-                "Gateway: idle for %d minutes and not wanted since; stopping",
-                TimeUnit.NANOSECONDS.toMinutes(now - this.idleSinceNanos));
-        this.idle.onIdle().run();
-    }
-
-    /** No session linked or saying hello, and no order working. */
-    private boolean quiet() {
-        if (this.helloPages.anyPending()) {
-            return false;
-        }
+    /** Sessions linked or saying hello. */
+    private int linkedSessions() {
+        int linked = this.helloPages.anyPending() ? 1 : 0;
         for (final GatewaySession session : this.sessions.all()) {
             if (session.state != GatewaySession.UNLINKED) {
-                return false;
+                linked++;
             }
         }
+        return linked;
+    }
+
+    /** Orders working on every account the gateway holds. */
+    private long workingOrders() {
+        long working = 0;
         for (final AccountLink account : this.accounts.values()) {
-            if (account.workingOrders() != 0) {
-                return false;
-            }
+            working += account.workingOrders();
         }
-        return true;
+        return working;
     }
 
     /**
@@ -1065,7 +1023,7 @@ public final class GatewayControl implements GnomeAgent {
      */
     public boolean stop(final long timeoutNanos) throws InterruptedException {
         this.status.state(GatewayState.STOPPING);
-        this.advertiser.advertise(GatewayState.STOPPING);
+        this.advertiser.advertise(GatewayState.STOPPING, linkedSessions(), workingOrders());
         for (final GatewaySession session : this.sessions.all()) {
             cancelAll(session);
             if (session.state == GatewaySession.ACTIVE) {
