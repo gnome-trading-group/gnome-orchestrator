@@ -1,6 +1,7 @@
-# An order gateway's container: a Java 17 runtime, the AWS CLI its start script uses, and that script. The release runs
-# from its own jar, whose manifest carries the module access it needs.
-FROM eclipse-temurin:17-jre-jammy
+# An order gateway's container: a Java 17 runtime on Ubuntu 24.04 (the native socket library needs its C++ runtime),
+# the AWS CLI its start script uses, and that script. The release runs from its own jar, whose manifest carries the
+# module access it needs.
+FROM eclipse-temurin:17-jre-noble
 
 # wget is not used by the start script: the ECS container health check runs it.
 RUN apt-get update \

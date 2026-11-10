@@ -242,7 +242,7 @@ regions), and per region in us-east-1, ap-northeast-1, eu-west-1: `<Stage>-Orche
 security group, log group; the name is historical, renaming recreates the VPC) and `<Stage>-OrchestratorEc2Stack-<region>`
 (launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; no session role can read `gnome/accounts/*`;
 live ones can read `order-gateway#*` items in `service-endpoints`), `<Stage>-OrchestratorOrderGatewayStack-<region>`
-(where live order gateways run, with nothing about which: ECS cluster `order-gateways`, on-demand `c7a.medium` hosts
+(where live order gateways run, with nothing about which: ECS cluster `order-gateways`, on-demand `c7a.large` hosts
 scaling from zero (capacity provider `order-gateway-hosts`), base task definition `order-gateway` (a Java 17 runtime and
 `cdk/lib/stacks/gateway-docker/gateway-start.sh`, which runs `java -jar <release> gateway`: the jar's manifest carries
 the module access gnomepy's JVM args give sessions), state on a host volume, logs in

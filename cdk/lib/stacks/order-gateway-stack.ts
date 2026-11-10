@@ -15,9 +15,10 @@ export const ORDER_GATEWAY_BASE_FAMILY = 'order-gateway';
 export const ORDER_GATEWAY_CAPACITY_PROVIDER = 'order-gateway-hosts';
 export const ORDER_GATEWAY_SERVICE_PREFIX = 'order-gateway-';
 
-// Provisional until the gateways are sized under load: not burstable (credits would run out in a burst of orders)
-// and not Graviton (the native socket library is x86 only).
-const INSTANCE_TYPE = 'c7a.medium';
+// Provisional until the gateways are sized under load: two cores and 4 GiB, as a gateway's ingress, egress, Aeron driver,
+// and each account's lane and reader all wake every few tens of microseconds; not burstable (credits would run out in
+// a burst of orders) and not Graviton (the native socket library is x86 only).
+const INSTANCE_TYPE = 'c7a.large';
 // More than the gateways a region will hold for a while; the start route can start no more than this many at once.
 const MAX_HOSTS = 4;
 // Where a gateway keeps what outlives its process: each account's ownership log and the sessions it accepted.
