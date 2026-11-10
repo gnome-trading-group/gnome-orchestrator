@@ -58,7 +58,8 @@ if [ "${STRATEGY_TYPE:-java}" = "python" ]; then
 fi
 
 unset GH_TOKEN
-# JVM flags live in gnomepy so the Java and Python launch paths cannot drift apart.
-mapfile -t JVM_ARGS < <("$VENV/bin/python" -c 'from gnomepy.java._jvm import STRATEGY_JVM_ARGS; print("\n".join(STRATEGY_JVM_ARGS))')
+# The jar's manifest gives it the module access it needs (java -jar applies it); the session's other JVM options live
+# in gnomepy, so the Java and Python launch paths cannot drift apart.
+mapfile -t JVM_OPTIONS < <("$VENV/bin/python" -c 'from gnomepy.java._jvm import STRATEGY_JVM_OPTIONS; print("\n".join(STRATEGY_JVM_OPTIONS))')
 echo "start-session: starting ${ORCHESTRATOR_ROLE:-session} ${STRATEGY_CLASS:-}"
-exec java "${JVM_ARGS[@]}" -cp "$APP_JAR" group.gnometrading.orchestrator.Main "${ORCHESTRATOR_ROLE:-session}"
+exec java "${JVM_OPTIONS[@]}" -jar "$APP_JAR" "${ORCHESTRATOR_ROLE:-session}"

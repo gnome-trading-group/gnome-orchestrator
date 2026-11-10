@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.session.orders;
 
 import group.gnometrading.concurrent.ThreadProfile;
+import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.orchestrator.aeron.HostAddress;
 import group.gnometrading.orchestrator.aeron.PendingMessages;
@@ -19,6 +20,7 @@ import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.SbeMessage;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.gateway.CancelEndedEncoder;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatDecoder;
 import group.gnometrading.schemas.gateway.GatewayMessageLimits;
 import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
@@ -26,12 +28,15 @@ import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
 import group.gnometrading.schemas.gateway.Mode;
 import group.gnometrading.schemas.gateway.OrderState;
 import group.gnometrading.schemas.gateway.OrderStatusDecoder;
+import group.gnometrading.schemas.gateway.QueryStatus;
 import group.gnometrading.schemas.gateway.ReHelloRequiredDecoder;
 import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersEncoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeDecoder;
+import group.gnometrading.schemas.gateway.VenueQueryEncoder;
+import group.gnometrading.schemas.gateway.VenueQueryResultDecoder;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import io.aeron.Publication;
@@ -130,6 +135,11 @@ public final class GatewayClient implements AeronPathAgent {
     private final SessionHelloOrdersEncoder helloOrders = new SessionHelloOrdersEncoder();
     private final SessionHeartbeatEncoder heartbeat = new SessionHeartbeatEncoder();
     private final UnsafeBuffer scratch = new UnsafeBuffer(new byte[MAX_MESSAGE]);
+    private final VenueQueryEncoder venueQuery = new VenueQueryEncoder();
+    private final CancelEndedEncoder cancelEnded = new CancelEndedEncoder();
+    private final VenueQueryResultDecoder queryResult = new VenueQueryResultDecoder();
+    // A starting session's question for the venue, set by the starting thread before trading; null otherwise.
+    private volatile GatewayQuery query;
     private final GatewayOrders.Entry[] helloEntries;
     private final Consumer<GatewayOrders.Entry> helloCollector = this::collect;
     private int helloCount;
@@ -172,8 +182,120 @@ public final class GatewayClient implements AeronPathAgent {
             }
             work += step(link);
         }
+        final GatewayQuery pending = this.query;
+        if (pending != null && !pending.sent) {
+            work += sendQuery(pending);
+        }
         work += this.omsOrders.poll();
         return work;
+    }
+
+    /**
+     * Asks the venue, through the gateway, once the query's link is ready; startup recovery's, one at a time, before
+     * the OMS sends anything.
+     *
+     * @return false if another query is still waiting for its answer
+     */
+    boolean ask(final GatewayQuery question) {
+        if (this.query != null) {
+            return false;
+        }
+        this.query = question;
+        return true;
+    }
+
+    /** Gives up on a query whose answer didn't come: a late one is ignored. */
+    void forget(final GatewayQuery question) {
+        if (this.query == question) {
+            this.query = null;
+        }
+    }
+
+    private int sendQuery(final GatewayQuery question) {
+        final GatewayLink link = this.byExchange.get(question.exchangeId);
+        if (link == null) {
+            this.query = null;
+            question.answered(QueryStatus.FAILED);
+            return 1;
+        }
+        final Publication publication = link.publication;
+        if (link.state != GatewayLink.READY || publication == null) {
+            return 0;
+        }
+        final int length;
+        if (question.isCancel()) {
+            this.cancelEnded
+                    .wrapAndApplyHeader(this.scratch, 0, this.headerEncoder)
+                    .sessionSeq(this.identity.sessionSeq())
+                    .queryId(question.queryId)
+                    .exchangeId(question.exchangeId)
+                    .securityId(question.securityId)
+                    .exchangeOrderId(question.exchangeOrderId);
+            length = MessageHeaderEncoder.ENCODED_LENGTH + this.cancelEnded.encodedLength();
+        } else {
+            this.venueQuery
+                    .wrapAndApplyHeader(this.scratch, 0, this.headerEncoder)
+                    .sessionSeq(this.identity.sessionSeq())
+                    .queryId(question.queryId)
+                    .kind(question.kind)
+                    .exchangeId(question.exchangeId)
+                    .securityId(question.securityId)
+                    .exchangeOrderId(question.exchangeOrderId);
+            length = MessageHeaderEncoder.ENCODED_LENGTH + this.venueQuery.encodedLength();
+        }
+        if (publication.offer(this.scratch, 0, length) > 0) {
+            question.sent = true;
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * A query sent on a link that then went down, or whose gateway forgot the session, goes again once the link is
+     * ready: the gateway that had it may never answer.
+     */
+    private void askAgain(final GatewayLink link) {
+        final GatewayQuery question = this.query;
+        if (question != null && question.exchangeId == link.exchangeId && question.sent) {
+            question.sent = false;
+            question.orders.clear();
+        }
+    }
+
+    private static boolean ended(final OrderState state) {
+        return state == OrderState.FILLED
+                || state == OrderState.CANCELED
+                || state == OrderState.REJECTED
+                || state == OrderState.EXPIRED;
+    }
+
+    /** One page of the answer to the query waiting for it; the last page hands it back. */
+    private void onQueryResult() {
+        final GatewayQuery question = this.query;
+        if (question == null || question.queryId != this.queryResult.queryId()) {
+            return;
+        }
+        final QueryStatus status = this.queryResult.status();
+        final short last = this.queryResult.last();
+        for (final VenueQueryResultDecoder.OrdersDecoder row : this.queryResult.orders()) {
+            final long notional = row.cumulativeNotional();
+            final long fees = row.fees();
+            final OrderState state = row.state();
+            final long filled = row.cumulativeQty();
+            final String exchangeOrderId = row.exchangeOrderId();
+            final String venueOrderId = row.venueOrderId();
+            question.orders.add(new VenueOrder(
+                    exchangeOrderId,
+                    venueOrderId.isEmpty() ? exchangeOrderId : venueOrderId,
+                    filled,
+                    notional,
+                    fees,
+                    ended(state)));
+        }
+        if (last == 1) {
+            this.query = null;
+            question.answered(status);
+        }
     }
 
     @Override
@@ -465,6 +587,7 @@ public final class GatewayClient implements AeronPathAgent {
      */
     private void down(final GatewayLink link) {
         link.state = GatewayLink.DOWN;
+        askAgain(link);
         final PendingMessages pending = link.pending;
         for (int i = pending.size(); i > 0; i--) {
             final UnsafeBuffer buffer = pending.buffer();
@@ -579,9 +702,14 @@ public final class GatewayClient implements AeronPathAgent {
                 if (link.state == GatewayLink.READY || link.state == GatewayLink.HELLO_SENT) {
                     link.helloPage = 0;
                     link.state = GatewayLink.CONNECTING;
+                    askAgain(link);
                 }
             }
             case SessionGoodbyeDecoder.TEMPLATE_ID -> down(link);
+            case VenueQueryResultDecoder.TEMPLATE_ID -> {
+                this.queryResult.wrap(buffer, body, this.header.blockLength(), this.header.version());
+                onQueryResult();
+            }
             default -> {}
         }
     }

@@ -86,6 +86,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 
 /**
  * Manual live check of the order gateway's account path, run by hand; not a unit test. One account, one lane, one
@@ -173,7 +177,7 @@ public final class AccountLiveSmoke {
     // ----- venues -----
 
     private static boolean kalshi(final String[] tickers, final int orders) throws Exception {
-        final KalshiCredentials creds = KalshiLiveSmoke.credentials(
+        final KalshiCredentials creds = kalshiCredentials(
                 System.getProperty("aws.profile", "dev"),
                 System.getProperty("secret", "gnome/accounts/steady-heron-01/trading"));
         final Logger logger = new ConsoleLogger(new SystemEpochNanoClock());
@@ -225,7 +229,7 @@ public final class AccountLiveSmoke {
     }
 
     private static boolean polymarketUs(final String[] slugs, final int orders) throws Exception {
-        final PolymarketUsCredentials creds = PolymarketUsLiveSmoke.credentials();
+        final PolymarketUsCredentials creds = polymarketUsCredentials();
         final Logger logger = new ConsoleLogger(new SystemEpochNanoClock());
         final PolymarketUsLaneVenue venue =
                 new PolymarketUsLaneVenue(logger, new PolymarketUsAuthSigner(creds.apiKey(), creds.privateKey()));
@@ -690,7 +694,7 @@ public final class AccountLiveSmoke {
             for (int i = runners.size() - 1; i >= 1; i--) {
                 runners.get(i).close();
             }
-            KalshiLiveSmoke.closeTimed(name + " event socket", socket);
+            closeTimed(name + " event socket", socket);
             runners.get(0).close();
             connections.close();
             if (heartbeatConnections != null) {
@@ -896,5 +900,36 @@ public final class AccountLiveSmoke {
             throw new IllegalArgumentException("-D" + property + " is required");
         }
         return value;
+    }
+
+    // ----- credentials, read with a person's AWS profile -----
+
+    private static KalshiCredentials kalshiCredentials(final String profile, final String secretId) {
+        return KalshiCredentials.fromJson(secret(profile, secretId));
+    }
+
+    private static PolymarketUsCredentials polymarketUsCredentials() {
+        final String secretId = System.getProperty("secret");
+        if (secretId == null) {
+            throw new IllegalArgumentException("-Dsecret=gnome/accounts/<label>/trading is required");
+        }
+        return PolymarketUsCredentials.fromJson(secret(System.getProperty("aws.profile", "dev"), secretId));
+    }
+
+    private static String secret(final String profile, final String secretId) {
+        try (SecretsManagerClient secrets = SecretsManagerClient.builder()
+                .region(Region.of(System.getenv().getOrDefault("AWS_REGION", "us-east-1")))
+                .credentialsProvider(ProfileCredentialsProvider.create(profile))
+                .build()) {
+            return secrets.getSecretValue(
+                            GetSecretValueRequest.builder().secretId(secretId).build())
+                    .secretString();
+        }
+    }
+
+    private static void closeTimed(final String what, final AutoCloseable runners) throws Exception {
+        final long start = System.nanoTime();
+        runners.close();
+        System.out.println("== Closed " + what + " in " + (System.nanoTime() - start) / 1_000_000 + " ms");
     }
 }

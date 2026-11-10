@@ -9,6 +9,7 @@ import { CONFIGS, GITHUB_BRANCH, GITHUB_REPO, OrchestratorConfig } from './confi
 import { AmiStack } from './stacks/ami-stack';
 import { Ec2Stack } from './stacks/ec2-stack';
 import { EmergencyCancelStack } from './stacks/emergency-cancel-stack';
+import { OrderGatewayStack } from './stacks/order-gateway-stack';
 import { SessionLogStack } from './stacks/session-log-stack';
 import { StorageStack } from './stacks/storage-stack';
 import { readFileSync } from 'fs';
@@ -50,6 +51,12 @@ class AppStage extends cdk.Stage {
       new EmergencyCancelStack(this, `OrchestratorEmergencyCancelStack-${region}`, {
         env,
         stage: config.account.stage,
+      });
+      // Every region can run order gateways; which run, and where, is the registry's to decide.
+      new OrderGatewayStack(this, `OrchestratorOrderGatewayStack-${region}`, {
+        env,
+        stage: config.account.stage,
+        registryApiKeyId: config.registryApiKeyId,
       });
       // Built once per account and copied to every region, rather than built in each.
       if (region === PRIMARY_REGION) {

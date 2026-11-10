@@ -3,7 +3,6 @@ package group.gnometrading.orchestrator.session;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
-import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -15,7 +14,6 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
-import group.gnometrading.orchestrator.runtime.GatewayRunners;
 import group.gnometrading.orchestrator.session.journal.SessionJournal;
 import group.gnometrading.orchestrator.session.lifecycle.SessionHeartbeatAgent;
 import group.gnometrading.orchestrator.session.marketdata.MarketData;
@@ -50,10 +48,23 @@ record SessionAgents(
     // The request line and headers sent ahead of the heartbeat's body (host, API key, content type and length).
     private static final int HEARTBEAT_REQUEST_HEADER_BYTES = 4 * 1024;
 
+    /**
+     * Starts order entry ahead of everything else: a live session's gateway client must be welcomed before startup
+     * recovery, which asks the venue through it. Nothing reaches it until the OMS starts.
+     */
+    static List<GnomeAgentRunner> startOrderEntry(List<GnomeAgent> outboundAgents, ErrorHandler errorHandler) {
+        List<GnomeAgentRunner> outboundRunners = new ArrayList<>(outboundAgents.size());
+        for (GnomeAgent outbound : outboundAgents) {
+            outboundRunners.add(startOn(outbound, errorHandler));
+        }
+        return outboundRunners;
+    }
+
+    /** @param outboundRunners order entry, already started by {@link #startOrderEntry} */
     static SessionAgents start(
             MarketData marketData,
             OmsAgent omsAgent,
-            List<GnomeAgent> outboundAgents,
+            List<GnomeAgentRunner> outboundRunners,
             ListingRouter routerAgent,
             StrategyAgent strategy,
             LedgerAgent ledgerAgent,
@@ -76,10 +87,6 @@ record SessionAgents(
             throw new IllegalStateException("Market data didn't start", e);
         }
         GnomeAgentRunner omsRunner = startOn(omsAgent, errorHandler);
-        List<GnomeAgentRunner> outboundRunners = new ArrayList<>(outboundAgents.size());
-        for (GnomeAgent outbound : outboundAgents) {
-            outboundRunners.add(startOn(outbound, errorHandler));
-        }
         GnomeAgentRunner routerRunner = routerAgent == null ? null : startOn(routerAgent, errorHandler);
         GnomeAgentRunner strategyRunner = startOn(strategy, errorHandler);
         GnomeAgentRunner ledgerRunner = ledgerAgent == null ? null : startOn(ledgerAgent, errorHandler);
@@ -100,7 +107,6 @@ record SessionAgents(
      */
     static void close(
             final SessionAgents started,
-            final List<GatewayRunners> venueGateways,
             final GnomeAgentRunner journalRunner,
             final GnomeAgentRunner heartbeatRunner,
             final Logger logger) {
@@ -113,9 +119,6 @@ record SessionAgents(
         closeQuietly(started.router(), logger);
         for (GnomeAgentRunner outbound : started.outboundAgents()) {
             closeQuietly(outbound, logger);
-        }
-        for (GatewayRunners gateway : venueGateways) {
-            closeQuietly(gateway, "outbound gateway", logger);
         }
         // After the OMS and gateways, so its final write holds everything they recorded while closing.
         closeQuietly(started.ledger(), logger);
@@ -133,19 +136,16 @@ record SessionAgents(
      */
     GnomeAgentRunner startHeartbeat(
             String sessionId,
-            List<GatewayRunners> venueGateways,
             SessionJournal journal,
             LedgerAgent ledgerAgent,
             LedgerRing ledgerRing,
             SharedPriceBuffer priceBuffer,
             PriceSlotRegistry priceSlotRegistry,
             RiskEngine riskEngine,
-            VenueRateLimiters rateLimiters,
             IntFunction<RegistryConnection> registry,
             Logger logger,
             ErrorHandler errorHandler) {
         List<GatewayHealth> gateways = new ArrayList<>(marketData.health());
-        gateways.addAll(venueGateways);
         List<GnomeAgentRunner> watched = new ArrayList<>();
         // A stuck journal holds up market data and every trading buffer once their rings fill.
         for (GnomeAgentRunner runner :
@@ -155,12 +155,7 @@ record SessionAgents(
             }
         }
         watched.addAll(outboundAgents);
-        // Market data connections come and go as they roll, so they are watched through their markets' state.
-        for (GatewayRunners gateway : venueGateways) {
-            watched.addAll(gateway.runners());
-        }
-        int bodyCapacity =
-                SessionHeartbeatAgent.bodyCapacity(sessionId, watched, gateways, priceSlotRegistry, rateLimiters.all());
+        int bodyCapacity = SessionHeartbeatAgent.bodyCapacity(sessionId, watched, gateways, priceSlotRegistry);
         GnomeAgentRunner runner = new GnomeAgentRunner(
                 new SessionHeartbeatAgent(
                         sessionId,
@@ -174,7 +169,6 @@ record SessionAgents(
                         ledgerAgent,
                         ledgerRing,
                         riskEngine,
-                        rateLimiters.all(),
                         HostReadings.ofThisProcess(
                                 journal.directory() != null
                                         ? journal.directory().toFile()

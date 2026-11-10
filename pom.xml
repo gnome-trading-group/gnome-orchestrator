@@ -78,7 +78,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-schemas</artifactId>
-            <version>2.5.0</version>
+            <version>2.6.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -88,13 +88,13 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>3.1.1</version>
+            <version>4.0.0</version>
         </dependency>
         <!-- The account path's fakes, for the order gateway's in-process tests. -->
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>3.1.1</version>
+            <version>4.0.0</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>
@@ -162,6 +162,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>apigateway</artifactId>
+        </dependency>
+        <!-- An idle order gateway sets its own ECS service to zero before it stops. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ecs</artifactId>
         </dependency>
         <!-- The exit harness's emergency scenario starts the deployed EmergencyCancel. -->
         <dependency>
@@ -233,6 +238,12 @@
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>group.gnometrading.orchestrator.Main</mainClass>
+                                    <!-- What Agrona, SBE and the runtime reach into, for a process started with java -jar
+                                         (the order gateway); the Python runner and sessions pass gnomepy's JVM args. -->
+                                    <manifestEntries>
+                                        <Add-Opens>java.base/jdk.internal.misc java.base/sun.nio.ch java.base/java.nio java.base/java.lang.reflect java.base/java.util.concurrent java.base/java.io java.base/java.lang java.base/java.util</Add-Opens>
+                                        <Add-Exports>java.base/jdk.internal.ref java.base/jdk.internal.util jdk.unsupported/sun.misc</Add-Exports>
+                                    </manifestEntries>
                                 </transformer>
                             </transformers>
                         </configuration>

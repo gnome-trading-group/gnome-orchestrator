@@ -69,15 +69,17 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
 - `session/lifecycle/`: `SessionExit` (graceful exit), `SessionFatalHandler` (every error exit),
   `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING -> RUNNING), `SessionReports` (alerts + registry PATCH).
 - `session/journal/`: `JournalManagerAgent`, `JournalSegmentSealer`, `JournalSource`.
-- `session/orders/`: live outbound orchestrators (Kalshi, Polymarket Intl, Polymarket US), `OrderEntryHttpClients`,
-  `PaperTradingOutboundGateway`, `ListingRouter` (multi-listing only). With `order.gateway.enabled` (live only, off by
-  default) the session's orders go through order gateways instead: one `GatewayLink` per venue (`live:<exchange>:main`,
-  found in `service-endpoints`, or `order.gateway.local=<ip>:<port>`), opened by `GatewayLinks` on a control thread, and
-  one `GatewayClient` agent reading the OMS's orders and writing its reports (no router). A NEW on a link not ready is
-  rejected `GATEWAY_UNAVAILABLE`; cancels wait for the link; a gateway's `OrderStatus` becomes the reports the OMS lacks;
-  startup waits `order.gateway.start.timeout.seconds` for every welcome. The slot is the registry's `session_seq`.
-  Per-listing venue lookups for startup recovery are still built in the session. The session's `AeronRuntime` is
-  launched by `SessionOrchestrator` (shared by market data and the links) and closed last.
+- `session/orders/`: paper sessions trade on `PaperTradingOutboundGateway` (one per listing, `ListingRouter` with
+  several). Live sessions trade only through order gateways, and hold no trading key: one `GatewayLink` per venue
+  (`live:<exchange>:main`, found in `service-endpoints`, or `order.gateway.local=<ip>:<port>`), opened by
+  `GatewayLinks` on a control thread, and one `GatewayClient` agent reading the OMS's orders and writing its reports
+  (no router). A NEW on a link not ready is rejected `GATEWAY_UNAVAILABLE`; cancels wait for the link; a gateway's
+  `OrderStatus` becomes the reports the OMS lacks. The client starts, and every link is welcomed (within
+  `order.gateway.start.timeout.seconds`), before startup recovery, which asks the venue through it
+  (`GatewayVenueOrderQuery`: `VenueQuery` for open orders and lookups, `CancelEnded` to cancel what an ended session
+  of the strategy left; a query a dropped link lost is sent again). The slot is the registry's `session_seq`. The
+  session's `AeronRuntime` is launched by `SessionOrchestrator` (shared by market data and the links) and closed
+  last.
 - `session/recovery/`: `StartupRecovery`.
 - `shard/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
   records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
@@ -154,7 +156,13 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   - `GatewayJournal` (when `journal.enabled`): ingress, egress and each lane record into their own ring on one global
     sequence, read through lapping pollers into a `skipsLost` `JournalWriter` under
     `<journal.directory>/gateway-<key>/<start millis>/`; each record is the session's slot (8 bytes LE, 0 if unlinked)
-    then the message. A lap is written as a gap and logged `GATEWAY_JOURNAL_GAP`. Nothing ships it yet.
+    then the message. A lap is written as a gap and logged `GATEWAY_JOURNAL_GAP`. Nothing ships it yet, so deployed
+    gateways run with `JOURNAL_ENABLED=false`.
+  - Starting sessions' venue questions (`control/VenueQueries`, on the control thread, blocking it while the venue
+    answers): `VenueQuery` open orders and lookups by id with the account's own `VenueOrderQuery`, answered in
+    `VenueQueryResult` pages (owners 0: recovery attributes by its ledger); `CancelEnded` cancels every order the
+    strategy's ended sessions (not linked, not running in the registry) hold on the listing, then refuses if the named
+    order still rests.
   - Restart (`GatewayRestart`, before any thread starts): under `gateway.state.directory/<key>/`, each account's
     `OwnershipLog` (memory-mapped, CRC-checked records written by the lane before each send: ADD, VENUE_ID, END; a torn
     tail counts as never written; rewritten with the open orders when `gateway.ownership.log.mb` fills) gives back its
@@ -214,8 +222,11 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   buffer with no `JournalSource`, even with the journal off. Create pollers before the producers start.
 - Close order matters: a producer blocks on a full ring whose reader has closed. Keep `SessionAgents.close` ordered
   market data -> strategy -> OMS -> gateways -> ledger -> journal -> heartbeat.
-- JVM flags live only in gnomepy (`gnomepy/java/_jvm.py`, `STRATEGY_JVM_ARGS`); `start-session.sh` reads them from
-  there. Never add JVM flags to scripts, units or Dockerfiles here.
+- Every process starts with `java -jar` and takes its module access from the jar's manifest (`Add-Opens`/`Add-Exports`
+  in the shade plugin, kept equal to gnomepy's `DEFAULT_JVM_ARGS` minus jdk.compiler, which the Python runner passes to
+  JPype instead). Sessions' other JVM options live only in gnomepy (`STRATEGY_JVM_OPTIONS`), which `start-session.sh`
+  reads; the gateway's GC choice is in `gateway-start.sh`, a shard's in gnome-market-data's `shard-start.sh`. Add no
+  other JVM flags to scripts, units or Dockerfiles here. A release without the manifest entries can't start this way.
 - Java 17 (parent pom, `openjdk-17` in the AMI, `eclipse-temurin-17` in Docker). Do not bump it.
 - One session per instance. `run-strategy.sh` refuses a second start; any exit of the unit shuts the instance down
   (launch template turns shutdown into terminate). Do not add restarts.
@@ -229,7 +240,17 @@ account) deploys stage `Dev`, waits on `ApproveProd`, then `Prod`. Stacks per st
 (journal bucket `gnome-journals-<stage>`, SSM params), `<Stage>-OrchestratorAmiStack` (us-east-1, AMIs copied to all
 regions), and per region in us-east-1, ap-northeast-1, eu-west-1: `<Stage>-OrchestratorEcsStack-<region>` (VPC,
 security group, log group; the name is historical, renaming recreates the VPC) and `<Stage>-OrchestratorEc2Stack-<region>`
-(launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; only live roles can read `gnome/accounts/*`),
+(launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; no session role can read `gnome/accounts/*`;
+live ones can read `order-gateway#*` items in `service-endpoints`), `<Stage>-OrchestratorOrderGatewayStack-<region>`
+(where live order gateways run, with nothing about which: ECS cluster `order-gateways`, on-demand `c7a.medium` hosts
+scaling from zero (capacity provider `order-gateway-hosts`), base task definition `order-gateway` (a Java 17 runtime and
+`cdk/lib/stacks/gateway-docker/gateway-start.sh`, which runs `java -jar <release> gateway`: the jar's manifest carries
+the module access gnomepy's JVM args give sessions), state on a host volume, logs in
+`/gnome/order-gateway/<region>`. The registry's `POST /gateways/ensure?gatewayKey=` starts a gateway in its row's
+region as service `order-gateway-<key with : as ->` from its own revision (key and release filled in) and allocates its
+Elastic IP (tag `gnome:order-gateway`), which `gateway-start.sh` attaches at boot; the launcher calls it for each live
+venue and a waiting session every 10 s. A gateway idle `gateway.idle.minutes` (30) sets its service to zero and
+stops),
 and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
 exchange code; run in the exchange's region, `sm.exchange.region`, where its gateway runs; reads only that region's
 `gnome/accounts/*/trading`; 5-minute timeout, never retried, dropped unless started within a minute). Started from the controller's Treasury
@@ -250,7 +271,7 @@ instance goes away). On boot it runs `StartupRecovery` (inherits positions, and 
 earlier sessions). A session already stopped before startup exits 0 without reporting.
 - Heartbeat: every 5 s to `/api/strategy-sessions/heartbeat` (agents' `stalledMs`/`exited`, per-listing
   `priceUnchangedMs` and `marketDataBadMs` (how long its book has been flagged bad data, the OMS refusing new orders;
-  0 trusted), ledger, gateways `reconnecting`/`resyncsLast5m`, risk, rate limiters, host CPU/mem/disk,
+  0 trusted), ledger, market data `reconnecting`/`resyncsLast5m`, risk, host CPU/mem/disk,
   journal backlog). Stops once the registry says the session ended.
 - Journal: segments under `/var/lib/gnome/journal/<sessionId>/`; `gnome-journal-shipper` uploads them to
   `gnome-journals-<stage>/<sessionId>/` and ships open segments after the strategy unit stops. Strategy metrics live
@@ -301,7 +322,7 @@ unset means no alerts):
 - Everything else about a session is raised by the registry's session monitor from heartbeat fields
   (gnome-registry `cdk/lambda/monitoring/rules/sessions.ts`): `AGENT_STALLED`, `AGENT_EXITED`, `RECONNECTING`,
   `BOOK_RESYNCS`, `MARKET_DATA_BAD`, `MARKET_DATA_BAD_HELD`, `LEDGER_FAILING`, `LEDGER_FENCED`, `RISK_STALE`, `RISK_UNGUARDED`, `POLICY_UNBUILDABLE`,
-  `LATCHES_DROPPED`, `RATE_LIMIT_THROTTLING`, `HOST_CPU_HIGH`, `HOST_MEMORY_LOW`, `DISK_LOW`, `JOURNAL_BACKLOG`,
+  `LATCHES_DROPPED`, `HOST_CPU_HIGH`, `HOST_MEMORY_LOW`, `DISK_LOW`, `JOURNAL_BACKLOG`,
   `SILENT`; lifecycle ones (`START_STUCK`, `STOP_STUCK`, `FAILED`) come from other monitor rules.
 - This repo defines no CloudWatch alarms. Collectors have no alerting from here either.
 

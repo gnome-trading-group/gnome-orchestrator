@@ -86,6 +86,8 @@ import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.ecs.model.UpdateServiceRequest;
 
 /**
  * An order gateway ({@code GATEWAY_KEY}): one process per venue holding that venue's trading accounts for every live
@@ -97,6 +99,10 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 public class OrderGatewayOrchestrator extends Orchestrator {
 
     private static final int HEALTH_PORT = 8080;
+    // Where the registry's gateways/ensure runs each gateway: its cluster, and its service, by its key (orchestrator
+    // cdk order-gateway-stack.ts, gnome-registry gateway-ensure.ts).
+    private static final String ECS_CLUSTER = "order-gateways";
+    private static final String ECS_SERVICE_PREFIX = "order-gateway-";
     private static final int CONTROL_QUEUE = 1024;
     private static final int REJECT_QUEUE = 4096;
     // Of ECS's stop timeout: this long for the lanes to empty after every order is cancelled.
@@ -547,8 +553,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     }
 
     /**
-     * Stopping when idle: the exit is the planned stop of the shutdown hook. Off while {@code gateway.idle.minutes} is
-     * 0, as something must also stop the gateway being started again.
+     * Stopping when idle: its ECS service is set to zero first, so ECS doesn't start it again, then the exit is the
+     * planned stop of the shutdown hook. The registry's gateways/ensure starts it again when a session wants it. Off
+     * while {@code gateway.idle.minutes} is 0.
      */
     private GatewayControl.Idle idle(final Properties properties, final GatewaySettings settings) {
         final long minutes = properties.getLongProperty("gateway.idle.minutes");
@@ -556,13 +563,43 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             return GatewayControl.Idle.NEVER;
         }
         final RegistryConnection registry = getInstance(RegistryConnection.class);
+        final Logger logger = getInstance(Logger.class);
         final ObjectMapper mapper = new ObjectMapper();
         return new GatewayControl.Idle(
                 TimeUnit.MINUTES.toNanos(minutes),
                 () -> wantedAtMillis(registry, mapper, settings.key()),
                 System::currentTimeMillis,
                 // On a thread of its own: the shutdown hook's planned stop closes the control thread that calls this.
-                () -> new Thread(() -> System.exit(0), "gateway-idle-exit").start());
+                () -> new Thread(
+                                () -> {
+                                    stopService(logger, settings.key());
+                                    System.exit(0);
+                                },
+                                "gateway-idle-exit")
+                        .start());
+    }
+
+    /**
+     * Sets the gateway's own ECS service to zero tasks. A failure is logged and the gateway stops anyway: ECS starts it
+     * again, and it stops again once idle.
+     */
+    private static void stopService(final Logger logger, final String gatewayKey) {
+        final String service = ECS_SERVICE_PREFIX + gatewayKey.replace(':', '-');
+        try (EcsClient ecs = EcsClient.create()) {
+            ecs.updateService(UpdateServiceRequest.builder()
+                    .cluster(ECS_CLUSTER)
+                    .service(service)
+                    .desiredCount(0)
+                    .build());
+            logger.logf(LogMessage.DEBUG, "Gateway %s idle: service %s set to zero", gatewayKey, service);
+        } catch (RuntimeException e) {
+            logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Gateway %s idle, but its service %s couldn't be set to zero: %s",
+                    gatewayKey,
+                    service,
+                    CauseChain.of(e));
+        }
     }
 
     /** When a session last asked for the gateway, from its registry row; 0 if never. */

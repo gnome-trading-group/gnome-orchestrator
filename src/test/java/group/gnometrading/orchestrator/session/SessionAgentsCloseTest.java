@@ -54,7 +54,7 @@ class SessionAgentsCloseTest {
         };
         final SessionAgents started =
                 new SessionAgents(marketData, strategy, oms, List.of(slowOrderWriter), null, null, null);
-        final Thread closing = new Thread(() -> SessionAgents.close(started, List.of(), null, null, new NullLogger()));
+        final Thread closing = new Thread(() -> SessionAgents.close(started, null, null, new NullLogger()));
         closing.setDaemon(true);
         closing.start();
         closing.join(TimeUnit.SECONDS.toMillis(15));

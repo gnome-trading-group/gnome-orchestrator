@@ -14,8 +14,6 @@ import group.gnometrading.RegistryConnection;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.ReaderPauseControl;
-import group.gnometrading.gateways.ratelimit.VenueRateLimiters;
-import group.gnometrading.gateways.venues.kalshi.KalshiVenue;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.ledger.LedgerAgent;
@@ -61,7 +59,6 @@ class SessionHeartbeatAgentTest {
     private LedgerRing ledgerRing;
     private LedgerAgent ledger;
     private RiskEngine riskEngine;
-    private VenueRateLimiters rateLimiters;
     private HostReadings host;
 
     @TempDir
@@ -112,8 +109,6 @@ class SessionHeartbeatAgentTest {
                 250,
                 1_000);
         riskEngine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), ListingDirectory.EMPTY);
-        rateLimiters = new VenueRateLimiters(new NullLogger(), System::nanoTime, () -> now[0]);
-        rateLimiters.forAccount(KalshiVenue.rateLimits(), "key-1");
         host = new HostReadings(tempDir.resolve("proc"), tempDir.toFile());
     }
 
@@ -158,7 +153,6 @@ class SessionHeartbeatAgentTest {
                 ledger,
                 ledgerRing,
                 riskEngine,
-                rateLimiters.all(),
                 host,
                 null,
                 SAMPLE_MS,
@@ -217,9 +211,6 @@ class SessionHeartbeatAgentTest {
         assertFalse(risk.get("unguarded").asBoolean());
         assertEquals(0, risk.get("unbuildablePolicies").asInt());
         assertEquals(0, risk.get("droppedLatches").asLong());
-        final JsonNode limiter = beat.get("rateLimit").get(0);
-        assertEquals("Kalshi/key-1", limiter.get("account").asText());
-        assertFalse(limiter.get("throttling").asBoolean());
     }
 
     @Test
@@ -245,8 +236,7 @@ class SessionHeartbeatAgentTest {
         assertEquals(listings, body.get("listings").size());
         assertEquals(listings, body.get("gateways").size());
         assertEquals(listings, body.get("agents").size());
-        assertTrue(agent.lastBody().length()
-                <= SessionHeartbeatAgent.bodyCapacity("s1", agents, gateways, slots, rateLimiters.all()));
+        assertTrue(agent.lastBody().length() <= SessionHeartbeatAgent.bodyCapacity("s1", agents, gateways, slots));
     }
 
     /** A listing's market data as the heartbeat sees it. */
@@ -335,7 +325,6 @@ class SessionHeartbeatAgentTest {
                 ledger,
                 ledgerRing,
                 riskEngine,
-                rateLimiters.all(),
                 host,
                 null,
                 SAMPLE_MS,
@@ -395,7 +384,6 @@ class SessionHeartbeatAgentTest {
                 ledger,
                 ledgerRing,
                 riskEngine,
-                rateLimiters.all(),
                 readings,
                 journal,
                 SAMPLE_MS,

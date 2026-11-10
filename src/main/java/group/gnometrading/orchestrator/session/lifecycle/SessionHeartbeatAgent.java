@@ -5,7 +5,6 @@ import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.concurrent.ThreadProfile;
-import group.gnometrading.gateways.ratelimit.VenueRateLimiter;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -21,7 +20,6 @@ import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import org.agrona.concurrent.EpochClock;
@@ -40,7 +38,6 @@ import org.agrona.concurrent.EpochClock;
  *       wrong and resynced in the last five minutes;
  *   <li>whether risk can be trusted: stale (the registry unreachable), unguarded (a required policy missing), policies
  *       that couldn't be built, and halts the OMS couldn't record;
- *   <li>each venue account's rate limiter, and whether it is refusing requests;
  *   <li>the host's CPU, memory and disk, and this process's memory;
  *   <li>how many journal segments are waiting for the shipper to upload them.
  * </ul>
@@ -63,7 +60,6 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             "{\"listingId\":,\"priceUnchangedMs\":,\"marketDataBadMs\":},".length() + 3 * MAX_NUMBER_BYTES;
     private static final int GATEWAY_ENTRY_BYTES =
             "{\"name\":\"\",\"reconnecting\":false,\"resyncsLast5m\":},".length() + MAX_NUMBER_BYTES;
-    private static final int LIMITER_ENTRY_BYTES = "{\"account\":\"\",\"throttling\":false},".length();
     private static final long MAX_PARK_MS = 100;
     private static final int HTTP_OK = 200;
     private static final int HTTP_NOT_FOUND = 404;
@@ -95,8 +91,6 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private int resyncSlot;
 
     private final RiskEngine riskEngine;
-    private final String[] limiterNames;
-    private final VenueRateLimiter[] limiters;
 
     private final LedgerAgent ledger;
     private final LedgerRing ledgerRing;
@@ -125,7 +119,6 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final LedgerAgent ledger,
             final LedgerRing ledgerRing,
             final RiskEngine riskEngine,
-            final Map<String, VenueRateLimiter> rateLimiters,
             final HostReadings host,
             final JournalSegmentSealer journal,
             final long sampleIntervalMs,
@@ -158,11 +151,9 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         this.ledger = ledger;
         this.ledgerRing = ledgerRing;
         this.riskEngine = riskEngine;
-        this.limiterNames = rateLimiters.keySet().toArray(new String[0]);
-        this.limiters = rateLimiters.values().toArray(new VenueRateLimiter[0]);
         this.host = host;
         this.journal = journal;
-        this.body = ByteBuffer.allocate(bodyCapacity(sessionId, agents, gateways, priceSlots, rateLimiters));
+        this.body = ByteBuffer.allocate(bodyCapacity(sessionId, agents, gateways, priceSlots));
     }
 
     /**
@@ -173,8 +164,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final String sessionId,
             final List<GnomeAgentRunner> agents,
             final List<GatewayHealth> gateways,
-            final PriceSlotRegistry priceSlots,
-            final Map<String, VenueRateLimiter> rateLimiters) {
+            final PriceSlotRegistry priceSlots) {
         int capacity = FIXED_SECTIONS_BYTES + escapedBytes(sessionId);
         for (GnomeAgentRunner agent : agents) {
             capacity += AGENT_ENTRY_BYTES + escapedBytes(agent.getAgent().roleName());
@@ -182,9 +172,6 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         capacity += priceSlots.count() * LISTING_ENTRY_BYTES;
         for (GatewayHealth gateway : gateways) {
             capacity += GATEWAY_ENTRY_BYTES + escapedBytes(gateway.name());
-        }
-        for (String account : rateLimiters.keySet()) {
-            capacity += LIMITER_ENTRY_BYTES + escapedBytes(account);
         }
         return capacity;
     }
@@ -293,8 +280,6 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         writeGateways();
         json.writeComma();
         writeRisk(now);
-        json.writeComma();
-        writeRateLimits();
         json.writeComma();
         writeHost();
         json.writeComma();
@@ -451,21 +436,6 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                 .writeComma()
                 .writeObjectEntry("droppedLatches", riskEngine.droppedLatches())
                 .writeObjectEnd();
-    }
-
-    private void writeRateLimits() {
-        json.writeString("rateLimit").writeColon().writeArrayStart();
-        for (int i = 0; i < limiters.length; i++) {
-            if (i > 0) {
-                json.writeComma();
-            }
-            json.writeObjectStart()
-                    .writeObjectEntry("account", limiterNames[i])
-                    .writeComma()
-                    .writeObjectEntry("throttling", limiters[i].isThrottling())
-                    .writeObjectEnd();
-        }
-        json.writeArrayEnd();
     }
 
     private static void park(final long millis) {

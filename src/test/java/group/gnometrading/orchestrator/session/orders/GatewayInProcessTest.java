@@ -1,9 +1,12 @@
 package group.gnometrading.orchestrator.session.orders;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.gateways.orders.recovery.VenueOrder;
+import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
@@ -19,8 +22,10 @@ import group.gnometrading.schemas.gateway.HelloRefusal;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -296,6 +301,73 @@ class GatewayInProcessTest {
                 "nothing sent again");
     }
 
+    @Test
+    void aStartingSessionAsksTheVenueThroughTheGatewayWithNoKeyOfItsOwn() throws Exception {
+        final VenueOrder resting = new VenueOrder("x-1", "v-x-1", UNIT, 400_000_000L, 7, false);
+        final VenueOrder ended = new VenueOrder("x-2", "v-x-2", 3 * UNIT, 1_200_000_000L, 9, true);
+        this.venue.orders().orders.put("x-1", resting);
+        this.venue.orders().orders.put("x-2", ended);
+        final VenueOrderQuery query = this.first.recoveryQuery();
+
+        assertEquals(List.of(resting), query.listOpenOrders(GatewayFixture.listing()));
+        assertEquals(Optional.of(ended), query.getOrder(GatewayFixture.listing(), "x-2", 0));
+        assertEquals(Optional.empty(), query.getOrder(GatewayFixture.listing(), "x-3", 0));
+    }
+
+    @Test
+    void aSessionCantCancelAnotherStrategysRestingOrder() throws Exception {
+        this.second.order(1);
+        await(() -> this.venue.server().requests().size() == 1, "the other strategy's order at the venue");
+        this.venue.transport().push("ACK s43-1");
+        await(() -> this.second.reports().size() == 1, "acknowledged");
+        final VenueOrder theirs = new VenueOrder("s43-1", "v-s43-1", 0, 0, 0, false);
+        this.venue.orders().orders.put("s43-1", theirs);
+
+        final IOException refused = assertThrows(
+                IOException.class, () -> this.first.recoveryQuery().cancel(GatewayFixture.listing(), theirs));
+
+        assertTrue(refused.getMessage().contains("refused"), refused.getMessage());
+        assertTrue(
+                this.venue.server().requests().stream()
+                        .noneMatch(r -> r.method().equals("DELETE")),
+                "nothing cancelled at the venue");
+    }
+
+    @Test
+    void aSessionCancelsWhatAnEndedSessionOfItsStrategyLeftAfterARestart() throws Exception {
+        this.venue.register("session-c", 44, 3);
+        final TestSession ended = new TestSession("session-c", 44, 3);
+        try {
+            await(ended::ready, "the earlier session welcomed");
+            ended.order(1);
+            await(() -> this.venue.server().requests().size() == 1, "its order at the venue");
+            this.venue.transport().push("ACK s44-1");
+            await(() -> ended.reports().size() == 1, "acknowledged");
+        } finally {
+            ended.close();
+        }
+        final VenueOrder left = new VenueOrder("s44-1", "v-s44-1", 0, 0, 0, false);
+        this.venue.orders().orders.put("s44-1", left);
+        this.venue.registry().end("session-c");
+        this.gateway.kill();
+        this.gateway = GatewayFixture.start("in-process-gateway", this.venue, INGRESS_PORT);
+        await(this.first::ready, "the running session welcomed again");
+        // The venue takes the cancel: its lookups say so from then on.
+        final Thread venueCancels = new Thread(() -> {
+            while (this.venue.server().requests().stream()
+                    .noneMatch(r -> r.method().equals("DELETE"))) {
+                Thread.onSpinWait();
+            }
+            this.venue.orders().orders.put("s44-1", new VenueOrder("s44-1", "v-s44-1", 0, 0, 0, true));
+        });
+        venueCancels.setDaemon(true);
+        venueCancels.start();
+
+        assertTrue(this.first.recoveryQuery().cancel(GatewayFixture.listing(), left));
+
+        assertTrue(this.venue.orders().orders.get("s44-1").terminal());
+    }
+
     // ----- a session -----
 
     /** One session's OMS rings and its gateway client, on threads of their own. */
@@ -352,6 +424,10 @@ class GatewayInProcessTest {
 
         boolean ready() {
             return this.link.state == GatewayLink.READY;
+        }
+
+        VenueOrderQuery recoveryQuery() {
+            return new GatewayVenueOrderQuery(this.client, TimeUnit.SECONDS.toNanos(10));
         }
 
         void order(final long counter) {

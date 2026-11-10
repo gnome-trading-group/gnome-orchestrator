@@ -4,7 +4,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
-import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
+import { SERVICE_ENDPOINTS, Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { grantResearchTables } from '../constructs/research-tables';
 
 export const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
@@ -24,8 +24,9 @@ export class Ec2Stack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
 
-    // Paper and live sessions run under different roles: only a live session may read a venue account's
-    // credentials (gnome/accounts/*), which for a Polymarket wallet include the key that can move its funds.
+    // Paper and live sessions run under different roles: only a live session may look up its order gateways. Neither
+    // may read a venue account's credentials (gnome/accounts/*), which for a Polymarket wallet include the key that can
+    // move its funds: live orders, and startup recovery's questions, go through the gateway, which holds them.
     this.launchTemplate(props, LAUNCH_TEMPLATE_NAME, `gnome-orchestrator-instance-${this.region}`, false);
     this.launchTemplate(props, LIVE_LAUNCH_TEMPLATE_NAME, `gnome-orchestrator-live-instance-${this.region}`, true);
 
@@ -58,22 +59,26 @@ export class Ec2Stack extends cdk.Stack {
       ],
     });
     // Any region: instances fall back to us-east-1 for secrets that are not replicated to their own region. Every
-    // session reads the gnomepy token; only a live one reads its account's trading key. None reads a venue's
-    // market-data key: sessions get market data from shards.
+    // session reads the gnomepy token. None reads a venue's market-data key: sessions get market data from shards.
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
       resources: [
         `arn:aws:secretsmanager:*:${this.account}:secret:gnomepy/*`,
         // The market-data API key, to read the session's lease; its one copy is in us-east-1.
         `arn:aws:secretsmanager:us-east-1:${this.account}:secret:gnome/api-keys/market-data-*`,
-        ...(live ? [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*/trading-*`] : []),
       ],
     }));
-    if (!live) {
+    role.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.DENY,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`],
+    }));
+    if (live) {
+      // Where each venue's order gateway is; the table is shared with other services, so only gateway items.
       role.addToPolicy(new iam.PolicyStatement({
-        effect: iam.Effect.DENY,
-        actions: ['secretsmanager:GetSecretValue'],
-        resources: [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`],
+        actions: ['dynamodb:GetItem'],
+        resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
       }));
     }
     // The journal shipper uploads large segments in parts, and abandons a failed multipart upload.

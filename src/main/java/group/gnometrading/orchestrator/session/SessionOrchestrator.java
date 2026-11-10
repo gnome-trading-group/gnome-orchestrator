@@ -32,7 +32,6 @@ import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aws.AwsModule;
 import group.gnometrading.orchestrator.aws.RegistryEndpoint;
 import group.gnometrading.orchestrator.aws.RiskModule;
-import group.gnometrading.orchestrator.aws.SecretCache;
 import group.gnometrading.orchestrator.di.Orchestrator;
 import group.gnometrading.orchestrator.di.Provides;
 import group.gnometrading.orchestrator.di.Singleton;
@@ -93,6 +92,8 @@ public class SessionOrchestrator extends Orchestrator {
     private volatile AeronRuntime aeron;
     private volatile SessionJournal journal = SessionJournal.OFF;
     private volatile GnomeAgentRunner heartbeatRunner;
+    // Order entry, started ahead of the other agents; closed on its own if the session fails before they start.
+    private volatile List<GnomeAgentRunner> orderEntry = List.of();
     private volatile Logger logger;
     // A session's way out on an error; null for a local run, which throws instead.
     private volatile SessionFatalHandler fatalHandler;
@@ -120,9 +121,6 @@ public class SessionOrchestrator extends Orchestrator {
     public final void configure() {
         install(new RiskModule());
         install(new AwsModule());
-        // Before any gateway's child orchestrator, so they share it and each venue's key is fetched once.
-        getInstance(SecretCache.class);
-
         Logger logger = getInstance(Logger.class);
         this.logger = logger;
         Properties properties = getInstance(Properties.class);
@@ -212,14 +210,7 @@ public class SessionOrchestrator extends Orchestrator {
 
         Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
         this.orders = new SessionOrders(
-                logger,
-                properties,
-                securityMaster,
-                nanoClock,
-                () -> getInstance(RegistryConnection.class),
-                fatalHandler,
-                this::createChildOrchestrator,
-                this.aeron);
+                logger, properties, securityMaster, nanoClock, () -> getInstance(RegistryConnection.class), this.aeron);
         SessionOrders.Wiring outbound = orders.wire(
                 listings,
                 streams,
@@ -228,6 +219,10 @@ public class SessionOrchestrator extends Orchestrator {
                 buffers.omsExecReports(),
                 buffers.routed(),
                 venueQueries);
+        // Before recovery: a live session asks the venue through its gateways, which must have welcomed it first.
+        List<GnomeAgentRunner> orderEntry = SessionAgents.startOrderEntry(outbound.agents(), errorHandler);
+        this.orderEntry = orderEntry;
+        awaitGateways(properties);
 
         OmsAgent omsAgent = new OmsAgent(
                 oms,
@@ -278,7 +273,7 @@ public class SessionOrchestrator extends Orchestrator {
         SessionAgents started = SessionAgents.start(
                 marketData,
                 omsAgent,
-                outbound.agents(),
+                orderEntry,
                 outbound.router(),
                 strategy,
                 ledgerAgent,
@@ -287,19 +282,16 @@ public class SessionOrchestrator extends Orchestrator {
                 logger,
                 errorHandler);
         this.agents = started;
-        awaitGateways(properties);
         // Only a session reports to the registry; a local run has nothing to report to.
         if (sessionId != null) {
             this.heartbeatRunner = started.startHeartbeat(
                     sessionId,
-                    orders.venueGateways(),
                     journal,
                     ledgerAgent,
                     ledgerRing,
                     priceBuffer,
                     priceSlotRegistry,
                     riskEngine,
-                    orders.rateLimiters(),
                     bodyBytes -> registryWriterConnection(registryWriterClient().withWriteBufferSize(bodyBytes)),
                     logger,
                     errorHandler);
@@ -342,11 +334,12 @@ public class SessionOrchestrator extends Orchestrator {
         }
         SessionAgents started = this.agents;
         if (started == null) {
+            closeOrderEntry();
             return;
         }
         logger.logf(LogMessage.DEBUG, "Shutting down: closing agents");
         final long start = System.nanoTime();
-        SessionAgents.close(started, orders.venueGateways(), journal.runner(), heartbeatRunner, logger);
+        SessionAgents.close(started, journal.runner(), heartbeatRunner, logger);
         try {
             orders.close();
         } catch (InterruptedException e) {
@@ -355,6 +348,28 @@ public class SessionOrchestrator extends Orchestrator {
         // Last: the gateway link's cancels on shutdown go over it after market data has closed.
         this.aeron.close();
         logger.logf(LogMessage.DEBUG, "Agents closed in %d ms", (System.nanoTime() - start) / 1_000_000);
+    }
+
+    /** A session that failed before its agents started: order entry may already be running, and its links open. */
+    private void closeOrderEntry() {
+        for (GnomeAgentRunner runner : this.orderEntry) {
+            try {
+                runner.close();
+            } catch (Exception e) {
+                logger.logf(
+                        LogMessage.UNKNOWN_ERROR,
+                        "Closing %s: %s",
+                        runner.getAgent().roleName(),
+                        e);
+            }
+        }
+        if (orders != null) {
+            try {
+                orders.close();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /**

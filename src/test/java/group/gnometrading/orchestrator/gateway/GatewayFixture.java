@@ -119,6 +119,21 @@ public final class GatewayFixture implements AutoCloseable {
                             Map.of(exchangeId, accountId),
                             rateWeight));
         }
+
+        /** The session as the registry has it once it stopped. */
+        public void end(final String sessionId) {
+            final SessionRegistry.SessionRecord running = this.records.get(sessionId);
+            this.records.put(
+                    sessionId,
+                    new SessionRegistry.SessionRecord(
+                            running.sessionSeq(),
+                            "STOPPED",
+                            running.strategyId(),
+                            running.mode(),
+                            running.listingIds(),
+                            running.accountByExchange(),
+                            running.rateWeight()));
+        }
     }
 
     /** What outlives a gateway process: the venue, its account's socket, the host's state directory, the registry. */

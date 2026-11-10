@@ -125,8 +125,6 @@ public final class GatewayControl implements GnomeAgent {
         public static final long HELLO_GRACE_NANOS = TimeUnit.SECONDS.toNanos(10);
     }
 
-    // How far back the venue is searched for an order a restart lost track of.
-    private static final long LOOKBACK_MILLIS = TimeUnit.DAYS.toMillis(2);
     // How long a session no longer linked is kept, with its ring and totals, before it is forgotten.
     static final long UNLINKED_KEEP_NANOS = TimeUnit.MINUTES.toNanos(10);
 
@@ -165,6 +163,7 @@ public final class GatewayControl implements GnomeAgent {
 
     private final MessageHeaderDecoder header = new MessageHeaderDecoder();
     private final HelloPages helloPages;
+    private final VenueQueries venueQueries;
     private final SessionGoodbyeDecoder goodbye = new SessionGoodbyeDecoder();
     private final MessageHeaderEncoder headerEncoder = new MessageHeaderEncoder();
     private final UnsafeBuffer outbound = new UnsafeBuffer(new byte[GatewayMessage.MAX_LENGTH]);
@@ -233,6 +232,8 @@ public final class GatewayControl implements GnomeAgent {
         this.replayCapacity = replayCapacity;
         this.idle = idle;
         this.helloPages = new HelloPages(logger, nanoClock);
+        this.venueQueries =
+                new VenueQueries(logger, sessions, registry, listings, this::sendAnswer, nanoClock, idle.wallMillis());
         this.sessionsFile = restart.sessionsFile();
         this.helloGraceNanos = restart.helloGraceNanos();
         restart.loaded().forEach((accountId, keys) -> this.loaded.put(accountId, new HashSet<>(keys)));
@@ -285,6 +286,8 @@ public final class GatewayControl implements GnomeAgent {
                 onHelloOrders(message);
             } else if (templateId == SessionGoodbyeDecoder.TEMPLATE_ID) {
                 onGoodbye(message);
+            } else if (VenueQueries.handles(templateId)) {
+                this.venueQueries.onMessage(message);
             } else {
                 this.logger.logf(
                         LogMessage.UNKNOWN_ERROR,
@@ -598,7 +601,7 @@ public final class GatewayControl implements GnomeAgent {
         }
         try {
             final VenueOrderQuery query = session.account.orderQuery();
-            final long since = this.idle.wallMillis().getAsLong() - LOOKBACK_MILLIS;
+            final long since = this.idle.wallMillis().getAsLong() - VenueQueries.LOOKBACK_MILLIS;
             Optional<VenueOrder> found = query.getOrder(listing, order.exchangeOrderId(), since);
             if (found.isEmpty()) {
                 this.logger.logf(
@@ -1084,6 +1087,11 @@ public final class GatewayControl implements GnomeAgent {
             Thread.sleep(50);
         }
         return false;
+    }
+
+    private void sendAnswer(final long slot, final UnsafeBuffer buffer, final int length) {
+        this.outbound.putBytes(0, buffer, 0, length);
+        toEgress(GatewayMessage.UNNUMBERED, slot, -1, length);
     }
 
     private void toEgress(final int kind, final long slot, final long resumeAfter, final int length) {
