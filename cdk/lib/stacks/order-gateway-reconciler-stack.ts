@@ -30,6 +30,8 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
     const queue = new sqs.Queue(this, 'GatewayReconcilerQueue', {
       queueName: ORDER_GATEWAYS.reconcilerQueue,
       fifo: true,
+      // The schedule's ticks can't carry a deduplication id; each tick's body names its minute, so it is its own id.
+      contentBasedDeduplication: true,
       // At least the Lambda's timeout (SQS triggers require it), and no more: a failed tick holds the one message group
       // until its batch is visible again.
       visibilityTimeout: cdk.Duration.minutes(2),
