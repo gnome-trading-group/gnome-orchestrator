@@ -1,4 +1,4 @@
-"""What the handler refuses before it reads any secret or reaches any venue."""
+"""What the handler refuses before it reads any secret or reaches any venue, and how it waits out a lagging list."""
 
 import os
 import sys
@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import handler  # noqa: E402
+import venues  # noqa: E402
 
 GOOD = {"exchange": "KALSHI", "secretName": "gnome/accounts/steady-heron-01/trading", "reason": "gateway hung"}
 
@@ -61,3 +62,45 @@ def test_a_failure_after_the_request_was_accepted_still_comes_back_and_is_alerte
 
     assert result["error"] == "RuntimeError: secret unreadable"
     assert alerts == [result]
+
+
+class LaggingList:
+    """A venue whose open-orders list still shows cancelled orders for a few lists, as Kalshi's did."""
+
+    def __init__(self, open_ids, stale_lists, keeps=()):
+        self.open_ids = list(open_ids)
+        self.stale_lists = stale_lists
+        self.keeps = set(keeps)
+        self.lists = 0
+
+    def list_open(self):
+        self.lists += 1
+        if self.lists <= self.stale_lists:
+            return [venues.OpenOrder(i) for i in self.open_ids]
+        return [venues.OpenOrder(i) for i in self.open_ids if i in self.keeps]
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    monkeypatch.setattr(handler, "SETTLE_PAUSE_SECONDS", 0.0)
+
+
+def test_orders_a_lagging_list_still_shows_are_listed_again_until_they_go(no_pause):
+    venue = LaggingList(["o1", "o2", "o3"], stale_lists=3)
+
+    assert handler._settled(venue, lambda: 300.0) == []
+    assert venue.lists == 4
+
+
+def test_an_order_that_stays_open_is_reported_once_the_wait_is_over(no_pause, monkeypatch):
+    monkeypatch.setattr(handler, "SETTLE_SECONDS", 0.05)
+    venue = LaggingList(["o1", "o2"], stale_lists=0, keeps={"o2"})
+
+    assert [order.order_id for order in handler._settled(venue, lambda: 300.0)] == ["o2"]
+
+
+def test_no_list_again_once_the_run_is_nearly_out_of_time(no_pause):
+    venue = LaggingList(["o1"], stale_lists=5)
+
+    assert [order.order_id for order in handler._settled(venue, lambda: handler.SETTLE_FLOOR_SECONDS)] == ["o1"]
+    assert venue.lists == 1

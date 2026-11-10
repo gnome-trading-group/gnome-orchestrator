@@ -16,6 +16,7 @@ EMERGENCY_CANCEL alert. Never retried on its own: the caller decides whether to 
 import datetime
 import json
 import os
+import time
 import uuid
 
 import boto3
@@ -29,6 +30,12 @@ SECRET_PREFIX = "gnome/accounts/"
 ALERT_REGION = "us-east-1"
 ALERT_BUS = "gnome-alerts"
 MAX_LISTED = 50
+# A venue's open-orders list can trail its cancels by a moment (Kalshi's does): orders still
+# listed after the cancels are listed again, a pause apart, for up to this long before they count as still open.
+SETTLE_SECONDS = 10.0
+SETTLE_PAUSE_SECONDS = 1.0
+# No list starts with less than this left of the run: one request's timeout, with room for the alert after it.
+SETTLE_FLOOR_SECONDS = 15.0
 
 
 def handler(event, context):
@@ -60,7 +67,7 @@ def _cancel(request: dict, seconds_left) -> dict:
     venue = VENUES[request["exchange"]](json.loads(secret), os.environ[BASE_URL_ENV[request["exchange"]]])
     before = venue.list_open()
     failures = [] if request["dryRun"] else venue.cancel(before, seconds_left)
-    after = venue.list_open()
+    after = venue.list_open() if request["dryRun"] else _settled(venue, seconds_left)
     return {
         "openBefore": len(before),
         "failedCount": len(failures),
@@ -68,6 +75,17 @@ def _cancel(request: dict, seconds_left) -> dict:
         "openAfter": len(after),
         "stillOpen": [order.order_id for order in after][:MAX_LISTED],
     }
+
+
+def _settled(venue, seconds_left) -> list:
+    """The account's open orders once the cancels have shown in the venue's list, or as they stand when it stops
+    waiting for them to."""
+    after = venue.list_open()
+    deadline = time.monotonic() + SETTLE_SECONDS
+    while after and time.monotonic() < deadline and seconds_left() - SETTLE_PAUSE_SECONDS > SETTLE_FLOOR_SECONDS:
+        time.sleep(SETTLE_PAUSE_SECONDS)
+        after = venue.list_open()
+    return after
 
 
 def _seconds_left(context):
