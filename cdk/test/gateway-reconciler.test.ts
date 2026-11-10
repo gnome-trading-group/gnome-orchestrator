@@ -1,3 +1,4 @@
+import { Observation } from '../lambda/gateway_reconciler/alerts';
 import {
   Activity, GatewayNames, GatewayRow, reconcile, ReconcileDeps, serviceName as nameOf, shouldRun, WANT_WINDOW_MS,
 } from '../lambda/gateway_reconciler/reconciler';
@@ -13,6 +14,7 @@ class FakeRegion {
   addresses: { AllocationId: string; Tags: { Key: string; Value: string }[] }[] = [];
   revisions = new Map<string, any[]>();
   sent: { command: string; input: any }[] = [];
+  stoppedTasks: { taskArn: string; stoppedAt: string; stoppedReason: string; containers: { exitCode?: number }[] }[] = [];
 
   ecs = {
     send: async (command: any) => {
@@ -40,6 +42,12 @@ class FakeRegion {
           serviceName: command.input.serviceName, status: 'ACTIVE', desiredCount: 1, taskDefinition: command.input.taskDefinition,
         });
         return {};
+      }
+      if (name === 'ListTasksCommand') {
+        return { taskArns: this.stoppedTasks.map((t) => t.taskArn) };
+      }
+      if (name === 'DescribeTasksCommand') {
+        return { tasks: this.stoppedTasks.filter((t) => command.input.tasks.includes(t.taskArn)) };
       }
       if (name === 'UpdateServiceCommand') {
         const service = this.services.find((s) => s.serviceName === command.input.service)!;
@@ -165,6 +173,41 @@ describe('the gateway reconciler', () => {
     expect(west.services[0]).toMatchObject({ desiredCount: 1, taskDefinition: 'order-gateway-live-polymarket_intl-main:1' });
     expect(west.commands()).not.toContain('RegisterTaskDefinitionCommand');
     expect(west.commands()).not.toContain('AllocateAddressCommand');
+    expect(west.sent.filter((s) => s.command === 'UpdateServiceCommand').map((s) => s.input))
+      .toEqual([{ cluster: CLUSTER, service: serviceName(INTL), desiredCount: 1 }]);
+  });
+
+  it('moves a stopped gateway onto a new revision before wanting it, so no task starts on the old one', async () => {
+    const east = new FakeRegion();
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, '1.32.0')], { 'us-east-1': east }));
+    east.services[0].desiredCount = 0;
+    east.sent = [];
+
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, '1.32.1')], { 'us-east-1': east }));
+
+    expect(east.sent.filter((s) => s.command === 'UpdateServiceCommand').map((s) => s.input)).toEqual([
+      { cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: 'order-gateway-live-kalshi-main:2', desiredCount: 0 },
+      { cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 1 },
+    ]);
+  });
+
+  it('says why a running gateway that isn\'t up last stopped, from its newest stopped task', async () => {
+    const east = new FakeRegion();
+    east.services.push({ serviceName: serviceName(KALSHI), status: 'ACTIVE', desiredCount: 1 });
+    east.stoppedTasks.push(
+      { taskArn: 't-old', stoppedAt: ago(120_000), stoppedReason: 'Scaling activity', containers: [{ exitCode: 143 }] },
+      { taskArn: 't-new', stoppedAt: ago(10_000), stoppedReason: 'Essential container in task exited', containers: [{ exitCode: 22 }] },
+    );
+    const seen: Observation[] = [];
+    const up: Observation[] = [];
+
+    await reconcile({ ...deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east }), observed: (o) => seen.push(o) });
+    await reconcile({
+      ...deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east }, { [KALSHI]: idle }), observed: (o) => up.push(o),
+    });
+
+    expect(seen[0].stoppedReason).toBe('Essential container in task exited, exit 22');
+    expect(up[0].stoppedReason).toBeUndefined();
   });
 
   it('registers a new revision when the release changed since the gateway last ran', async () => {

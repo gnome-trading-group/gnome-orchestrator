@@ -54,6 +54,7 @@ import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
 import group.gnometrading.orchestrator.runtime.AlertsApi;
+import group.gnometrading.orchestrator.runtime.BoundedCalls;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
@@ -65,12 +66,14 @@ import io.aeron.Subscription;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.agrona.ErrorHandler;
@@ -79,6 +82,7 @@ import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
@@ -99,6 +103,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     // How long a failing gateway waits for its alert to be taken before it halts.
     private static final long FATAL_ALERT_WAIT_MILLIS = 2_000;
     private static final long CONTROL_STALL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    // How long the control thread waits on the registry for one record or listing.
+    private static final long REGISTRY_TIMEOUT_MILLIS = 5_000;
 
     @Provides
     public final EpochNanoClock provideEpochNanoClock() {
@@ -121,7 +127,13 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     @Singleton
     @Named("ENDPOINTS")
     public final DynamoDbClient provideEndpointsDynamo(@Named("AWS_PROFILE") final String awsProfile) {
-        final var builder = DynamoDbClient.builder().region(Region.of(ServiceEndpoints.REGION));
+        final var builder = DynamoDbClient.builder()
+                .region(Region.of(ServiceEndpoints.REGION))
+                // A write that can't land soon is overtaken by the next anyway.
+                .overrideConfiguration(ClientOverrideConfiguration.builder()
+                        .apiCallTimeout(Duration.ofSeconds(5))
+                        .apiCallAttemptTimeout(Duration.ofSeconds(2))
+                        .build());
         if (awsProfile != null && !awsProfile.isEmpty()) {
             builder.credentialsProvider(ProfileCredentialsProvider.create(awsProfile));
         }
@@ -200,9 +212,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 wallClock,
                 journal == null ? JournalRecorder.NONE : journal.egress(),
                 cross);
-        final SessionRegistry registry =
-                new SessionRegistry(SessionRegistry.over(getInstance(RegistryConnection.class)));
-        final GatewayControl.Listings listings = listings(getInstance(SecurityMaster.class));
+        final BoundedCalls registryCalls = new BoundedCalls("gateway-registry");
+        final SessionRegistry registry = sessionRegistry(registryCalls);
+        final GatewayControl.Listings listings = listings(registryCalls, getInstance(SecurityMaster.class));
         final GatewayRestart.Result restart =
                 restart(logger, properties, settings, accounts, listings, registry, cross);
         final GatewayControl control = new GatewayControl(
@@ -251,7 +263,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class));
         reportDrops(logger, ingress, egress, sessions, cross);
         reportSelfTrades(logger, cross);
-        final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, controlRunner, accounts)
+        final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, control, accounts)
                 .start();
 
         Runtime.getRuntime()
@@ -558,38 +570,63 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final ProcessExit exit,
             final GnomeAgentRunner ingress,
             final GnomeAgentRunner egress,
-            final GnomeAgentRunner control,
+            final GatewayControl gatewayControl,
             final List<GatewayAccount> accounts) {
         final long stall = TimeUnit.MILLISECONDS.toNanos(properties.getLongProperty("gateway.watchdog.stall.millis"));
         final List<Watchdog.CheckIn> checkIns = new ArrayList<>();
-        checkIns.add(new Watchdog.CheckIn("ingress", ingress::cycles, () -> false, stall));
-        checkIns.add(new Watchdog.CheckIn("egress", egress::cycles, () -> false, stall));
-        // The control thread waits on the registry and the venue now and then; stuck for a minute, liveness and hellos
-        // have stopped.
-        checkIns.add(new Watchdog.CheckIn("control", control::cycles, () -> false, CONTROL_STALL_NANOS));
+        checkIns.add(new Watchdog.CheckIn("ingress", "gateway-ingress", ingress::cycles, () -> false, stall));
+        checkIns.add(new Watchdog.CheckIn("egress", "gateway-egress", egress::cycles, () -> false, stall));
+        // The control thread waits on the registry and the venue now and then, each within a deadline; stuck for a
+        // minute, liveness and hellos have stopped.
+        checkIns.add(new Watchdog.CheckIn(
+                "control", "gateway-control", gatewayControl::progress, () -> false, CONTROL_STALL_NANOS));
         for (final GatewayAccount account : accounts) {
-            checkIns.add(new Watchdog.CheckIn(account.name() + " lane", account::lanePasses, () -> false, stall));
             checkIns.add(new Watchdog.CheckIn(
-                    account.name() + " reader", account::readerPasses, account::readerPaused, stall));
+                    account.name() + " lane", account.name() + "-lane", account::lanePasses, () -> false, stall));
+            // Every account's reader thread has the same name, so none is picked out for its stack.
+            checkIns.add(new Watchdog.CheckIn(
+                    account.name() + " reader", null, account::readerPasses, account::readerPaused, stall));
         }
         return new Watchdog(logger, checkIns, System::nanoTime, exit);
     }
 
-    private static GatewayControl.Listings listings(final SecurityMaster securityMaster) {
+    /** The sessions' registry records, asked on the control thread, so with a deadline (a miss falls back to its cache). */
+    private SessionRegistry sessionRegistry(final BoundedCalls registryCalls) {
+        final SessionRegistry.Source source = SessionRegistry.over(getInstance(RegistryConnection.class));
+        return new SessionRegistry(
+                sessionId -> registryCalls.call(() -> source.fetch(sessionId), REGISTRY_TIMEOUT_MILLIS));
+    }
+
+    /**
+     * Listings from the security master, read on the control thread, so with a deadline. One that runs out throws rather
+     * than answering none: no listing would read as a market that doesn't exist.
+     */
+    private static GatewayControl.Listings listings(
+            final BoundedCalls registryCalls, final SecurityMaster securityMaster) {
         return new GatewayControl.Listings() {
             @Override
             public Listing listing(final int exchangeId, final long securityId) {
-                return securityMaster.getListing(exchangeId, (int) securityId);
+                return bounded(() -> securityMaster.getListing(exchangeId, (int) securityId));
             }
 
             @Override
             public FeeTimeline fees(final Listing listing) {
-                return securityMaster.getFeeTimeline(listing.listingId());
+                return bounded(() -> securityMaster.getFeeTimeline(listing.listingId()));
+            }
+
+            private <T> T bounded(final Callable<T> call) {
+                try {
+                    return registryCalls.call(call, REGISTRY_TIMEOUT_MILLIS);
+                } catch (RuntimeException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new IllegalStateException("security master: " + e.getMessage(), e);
+                }
             }
         };
     }
 
-    /** Writes where sessions reach the gateway and its state; never throws, as the next write comes 15 s later. */
+    /** Writes where sessions reach the gateway and its state, on a thread of its own; a failed write waits for the next. */
     private GatewayControl.Advertiser advertiser(
             final Logger logger,
             final GatewaySettings settings,
@@ -601,24 +638,21 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
         final String instance = instance();
         final String version = properties.getStringProperty("orchestrator.version");
-        return (state, linkedSessions, workingOrders) -> {
-            try {
-                endpoints.put(new ServiceEndpoint(
-                        ServiceEndpoint.Kind.ORDER_GATEWAY,
-                        settings.key(),
-                        instance,
-                        region,
-                        ip,
-                        port,
-                        state.name(),
-                        version,
-                        wallClock.nanoTime(),
-                        linkedSessions,
-                        workingOrders));
-            } catch (Exception e) {
-                logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to write the gateway's endpoint: %s", CauseChain.of(e));
-            }
-        };
+        return new EndpointWriter(
+                        logger,
+                        (state, linkedSessions, workingOrders) -> endpoints.put(new ServiceEndpoint(
+                                ServiceEndpoint.Kind.ORDER_GATEWAY,
+                                settings.key(),
+                                instance,
+                                region,
+                                ip,
+                                port,
+                                state.name(),
+                                version,
+                                wallClock.nanoTime(),
+                                linkedSessions,
+                                workingOrders)))
+                .start();
     }
 
     private static String instance() {

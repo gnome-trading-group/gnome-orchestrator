@@ -105,6 +105,15 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       resources: platformRegions().map(region =>
         `arn:aws:ecs:${region}:${this.account}:service/${ORDER_GATEWAYS.cluster}/${ORDER_GATEWAYS.servicePrefix}*`),
     }));
+    // Why a gateway's tasks stopped, for its alert.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:ListTasks', 'ecs:DescribeTasks'],
+      resources: ['*'],
+      conditions: {
+        ArnEquals: { 'ecs:cluster': platformRegions().map(region =>
+          `arn:aws:ecs:${region}:${this.account}:cluster/${ORDER_GATEWAYS.cluster}`) },
+      },
+    }));
     fn.addToRolePolicy(new iam.PolicyStatement({
       // Task definitions take no resource-level permission for these.
       actions: ['ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition', 'ec2:DescribeAddresses'],

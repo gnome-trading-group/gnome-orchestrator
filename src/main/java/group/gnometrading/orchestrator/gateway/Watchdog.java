@@ -3,10 +3,13 @@ package group.gnometrading.orchestrator.gateway;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
+import java.util.stream.Collectors;
 
 /**
  * Exits the process when a thread on the order path stops making progress: ingress, egress, a lane or an account's
@@ -17,7 +20,11 @@ import java.util.function.LongSupplier;
 public final class Watchdog {
 
     /** One thread to watch, and how long it may go without progress. */
-    record CheckIn(String name, LongSupplier passes, BooleanSupplier excused, long stallNanos) {}
+    /** @param thread the watched thread's name, whose stack is logged when it stalls; null when it has no one thread */
+    record CheckIn(String name, String thread, LongSupplier passes, BooleanSupplier excused, long stallNanos) {}
+
+    // How many of a stalled thread's frames go into the reason it exits with.
+    private static final int REASON_FRAMES = 4;
 
     private final Logger logger;
     private final List<CheckIn> checkIns;
@@ -62,10 +69,20 @@ public final class Watchdog {
             }
             if (now - this.lastMovedNanos[i] > checkIn.stallNanos() && !this.fired) {
                 this.fired = true;
+                final StackTraceElement[] stack = stackOf(checkIn.thread());
                 final String why = checkIn.name() + " made no progress for "
-                        + TimeUnit.NANOSECONDS.toMillis(now - this.lastMovedNanos[i]) + " ms";
+                        + TimeUnit.NANOSECONDS.toMillis(now - this.lastMovedNanos[i]) + " ms" + at(stack);
                 this.logger.logf(LogMessage.FATAL_ERROR_EXITING, "Gateway watchdog: %s", why);
-                this.exit.exit(1, new IllegalStateException(why));
+                if (stack.length > 0) {
+                    this.logger.logf(
+                            LogMessage.FATAL_ERROR_EXITING,
+                            "Gateway watchdog: %s's stack:%n  %s",
+                            checkIn.thread(),
+                            Arrays.stream(stack).map(String::valueOf).collect(Collectors.joining("\n  ")));
+                }
+                final IllegalStateException stalled = new IllegalStateException(why);
+                stalled.setStackTrace(stack);
+                this.exit.exit(1, stalled);
             }
         }
     }
@@ -88,5 +105,37 @@ public final class Watchdog {
         thread.setDaemon(true);
         thread.start();
         return thread;
+    }
+
+    /** Where the named thread is now; empty when there is no such thread. */
+    static StackTraceElement[] stackOf(final String threadName) {
+        if (threadName == null) {
+            return new StackTraceElement[0];
+        }
+        for (final Map.Entry<Thread, StackTraceElement[]> thread :
+                Thread.getAllStackTraces().entrySet()) {
+            if (threadName.equals(thread.getKey().getName())) {
+                return thread.getValue();
+            }
+        }
+        return new StackTraceElement[0];
+    }
+
+    /** What it is blocked in, then the first of its own frames under that: the JDK's say little about why. */
+    private static String at(final StackTraceElement[] stack) {
+        if (stack.length == 0) {
+            return "";
+        }
+        final String own = Arrays.stream(stack)
+                .skip(1)
+                .filter(frame -> !isJdk(frame.getClassName()))
+                .limit(REASON_FRAMES - 1)
+                .map(String::valueOf)
+                .collect(Collectors.joining(" <- "));
+        return ", at " + stack[0] + (own.isEmpty() ? "" : " ... " + own);
+    }
+
+    private static boolean isJdk(final String className) {
+        return className.startsWith("java.") || className.startsWith("jdk.") || className.startsWith("sun.");
     }
 }

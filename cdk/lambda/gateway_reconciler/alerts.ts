@@ -20,8 +20,10 @@ export interface Observation {
   error?: string;
   // Its endpoint item; null when it has none or it has expired.
   activity: Activity | null;
-  // Its ECS service's newest event, which says why a task can't start or stopped.
+  // Its ECS service's newest event, which says why a task can't be placed.
   serviceEvent?: string;
+  // Why its most recently stopped task stopped; looked up only while it is running but not up.
+  stoppedReason?: string;
 }
 
 /** What is kept of a gateway between ticks. */
@@ -100,7 +102,8 @@ function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Ale
   const labels = (extra: Record<string, string> = {}) => ({
     gateway: seen.gatewayKey, exchange, region: seen.region, ...extra,
   });
-  const why = seen.serviceEvent ? `: ${seen.serviceEvent}` : '';
+  const reason = seen.stoppedReason ?? seen.serviceEvent;
+  const why = reason ? `: ${reason}` : '';
   const alerts: Alert[] = [];
   if (memory.failedTicks >= FAILED_TICKS) {
     alerts.push({

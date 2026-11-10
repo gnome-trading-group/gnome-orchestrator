@@ -134,9 +134,14 @@ public final class GatewayControl implements GnomeAgent {
     static final long REFUSAL_LINGER_NANOS = TimeUnit.SECONDS.toNanos(2);
     private static final long TICK_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
     private static final int MESSAGES_PER_PASS = 64;
+    // How long one hello's orders may be looked up at the venue in all.
+    static final long SETTLE_BUDGET_NANOS = TimeUnit.SECONDS.toNanos(20);
 
     private final Logger logger;
     private final GatewayAlerts alerts;
+    // Written by this thread alone; volatile for the watchdog.
+    private volatile long progress;
+    private long settleDeadlineNanos;
     private final SessionTable sessions;
     private final GatewayStatus status;
     private final Map<Integer, AccountLink> accounts;
@@ -258,7 +263,16 @@ public final class GatewayControl implements GnomeAgent {
             this.nextTickNanos = now + TICK_NANOS;
             work += tick(now);
         }
+        this.progress = this.progress + 1;
         return work;
+    }
+
+    /**
+     * Rises with every pass and every message handled, for the watchdog: a pass may handle many messages that each wait
+     * on the registry or a venue, every one within its deadline, and is moving as long as they are.
+     */
+    public long progress() {
+        return this.progress;
     }
 
     @Override
@@ -274,6 +288,7 @@ public final class GatewayControl implements GnomeAgent {
     // ----- messages from sessions -----
 
     private void onMessage(final GatewayMessage message) {
+        this.progress = this.progress + 1;
         try {
             if (message.kind == GatewayMessage.UNREADABLE) {
                 evict(message.image, "a message it couldn't read");
@@ -331,6 +346,7 @@ public final class GatewayControl implements GnomeAgent {
             return;
         }
         final boolean known = this.sessions.bySlot(hello.sessionSeq()) != null;
+        this.settleDeadlineNanos = now + SETTLE_BUDGET_NANOS;
         final GatewaySession session = sessionFor(hello, account);
         account.markets().addSession(session.slot, session.sessionId);
         introduce(session, this.lastRecord.rateWeight(), hello);
@@ -613,6 +629,15 @@ public final class GatewayControl implements GnomeAgent {
 
     /** An order the session holds open that the gateway doesn't: reported as the venue has it. */
     private void settleUnheld(final GatewaySession session, final Hello.Order order) {
+        if (this.nanoClock.getAsLong() - this.settleDeadlineNanos >= 0) {
+            // A hello's lookups share one budget, so a session listing many keeps the control thread only so long.
+            this.logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Gateway: session %s's order %d left as it holds it: out of time to look it up; its next hello does",
+                    session.sessionId,
+                    order.counter());
+            return;
+        }
         final Listing listing = this.listings.listing(order.exchangeId(), order.securityId());
         if (order.exchangeOrderId().isEmpty() || listing == null) {
             // It never had a report, so nothing names it at the venue: with no record of it here, it wasn't sent.

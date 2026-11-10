@@ -154,7 +154,12 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     refused or (shadow) would have.
   - Idle parks on the Aeron path: `gateway.idle.max.park.micros` (50). A lane or connector, ingress or egress failure
     exits the process; so does `Watchdog` when ingress, egress, a lane or a reader (unless paused for a reconnect) makes
-    no progress for `gateway.watchdog.stall.millis` (3000). `/health` on :8080 fails when a lane stops.
+    no progress for `gateway.watchdog.stall.millis` (3000), or control (counted per pass and per message) for a
+    minute; it logs the stalled thread's stack and exits with its frames. Nothing on the control thread blocks past a
+    deadline: registry records and listings 5 s (`runtime/BoundedCalls`, one client call at a time; a missed record
+    falls back to the cache), each venue query 10 s (`accounts/BoundedOrderQuery`), one hello's order lookups 20 s in
+    all; the endpoint item is written by `EndpointWriter` on its own thread (5 s call timeout), control only handing it
+    the latest state. `/health` on :8080 fails when a lane stops.
   - `GatewayJournal` (when `journal.enabled`): ingress, egress and each lane record into their own ring on one global
     sequence, read through lapping pollers into a `skipsLost` `JournalWriter` under
     `<journal.directory>/gateway-<key>/<start millis>/`; each record is the session's slot (8 bytes LE, 0 if unlinked)

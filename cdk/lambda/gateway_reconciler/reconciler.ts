@@ -3,8 +3,8 @@ import { DynamoDBClient, GetItemCommand, PutItemCommand } from '@aws-sdk/client-
 import { AllocateAddressCommand, DescribeAddressesCommand, EC2Client } from '@aws-sdk/client-ec2';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import {
-  CreateServiceCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, KeyValuePair,
-  RegisterTaskDefinitionCommand, UpdateServiceCommand,
+  CreateServiceCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand, DescribeTasksCommand, ECSClient,
+  KeyValuePair, ListTasksCommand, RegisterTaskDefinitionCommand, UpdateServiceCommand,
 } from '@aws-sdk/client-ecs';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { platformRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
@@ -130,12 +130,21 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
     return seen('stopped');
   }
   // A running gateway keeps its release: a new pin or release reaches it at its next start.
-  if (running) return seen('running');
+  if (running) {
+    if (activity && UP_STATES.has(activity.state)) return seen('running');
+    // Not up: why its last task stopped, for the alert should it stay so.
+    return { ...seen('running'), stoppedReason: await lastStopped(ecs, names, service) };
+  }
   const version = row.orchestrator_version ?? await deps.latestVersion();
   await ensureAddress(deps.ec2(row.region), names, row.gateway_key);
   const taskDefinition = await revision(ecs, names, row.gateway_key, version, await deps.alertsApiUrl());
   if (current) {
-    await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, taskDefinition, desiredCount: 1 }));
+    if (current.taskDefinition !== taskDefinition) {
+      // Onto the new revision while nothing is wanted, then wanted: set together, ECS first raises the count on the old
+      // deployment, and a gateway on the previous release takes sessions until the new one replaces it.
+      await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, taskDefinition, desiredCount: 0 }));
+    }
+    await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 1 }));
     return seen('started');
   }
   await ecs.send(new CreateServiceCommand({
@@ -148,6 +157,23 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
     deploymentConfiguration: { minimumHealthyPercent: 0, maximumPercent: 100 },
   }));
   return seen('created');
+}
+
+// A gateway's endpoint states in which it is up.
+const UP_STATES = new Set(['READY', 'DEGRADED']);
+
+/** Why the service's most recently stopped task stopped, as ECS and its container say; undefined when none has. */
+async function lastStopped(ecs: Client, names: GatewayNames, service: string): Promise<string | undefined> {
+  const listed = await ecs.send(new ListTasksCommand({
+    cluster: names.cluster, serviceName: service, desiredStatus: 'STOPPED', maxResults: 10,
+  }));
+  if (!listed.taskArns?.length) return undefined;
+  const tasks = (await ecs.send(new DescribeTasksCommand({ cluster: names.cluster, tasks: listed.taskArns }))).tasks ?? [];
+  const newest = [...tasks].sort((a: any, b: any) => Date.parse(b.stoppedAt ?? 0) - Date.parse(a.stoppedAt ?? 0))[0];
+  if (!newest) return undefined;
+  const container = newest.containers?.[0];
+  const exit = container?.exitCode != null ? `exit ${container.exitCode}` : container?.reason;
+  return [newest.stoppedReason, exit].filter(Boolean).join(', ') || undefined;
 }
 
 // What each gateway's revision sets over the base's environment.

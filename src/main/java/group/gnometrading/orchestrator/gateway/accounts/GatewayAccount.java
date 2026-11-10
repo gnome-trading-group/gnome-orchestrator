@@ -78,7 +78,8 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
         this.reports = parts.reports;
         this.markets = published(parts.markets, parts.crossKeys);
         this.crossKeys = parts.crossKeys;
-        this.orderQuery = parts.orderQuery;
+        // The control thread asks it for starting sessions, and mustn't wait on a venue that doesn't answer.
+        this.orderQuery = parts.orderQuery == null ? null : new BoundedOrderQuery(parts.orderQuery, parts.name);
         this.heartbeats = parts.heartbeats;
         this.heartbeatConnections = parts.heartbeatConnections;
     }
