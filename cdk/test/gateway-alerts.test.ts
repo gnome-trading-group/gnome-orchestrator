@@ -50,6 +50,26 @@ describe('a gateway starting', () => {
   });
 });
 
+describe('a gateway waiting for its old deployment to drain', () => {
+  it('counts its start from the first tick it began, not each tick it waits', () => {
+    const minutes = START_STUCK_MS / MINUTE;
+    const types = ticks([
+      seen('starting', null),
+      ...Array.from({ length: minutes - 1 }, () => seen('starting', null)),
+      seen('started', null),
+    ]);
+    expect(types[minutes]).toEqual(['GATEWAY_START_STUCK']);
+  });
+});
+
+describe('a gateway whose endpoint has expired', () => {
+  it('counts as gone, as if it had none', () => {
+    const up = evaluate([seen('running', ready(1, 2))], EMPTY_STATE, T0);
+    const quiet = evaluate([seen('running', { ...ready(1, 2), expired: true })], up.state, T0 + MINUTE);
+    expect([...quiet.firing.values()].map((a) => a.type)).toEqual(['GATEWAY_DOWN']);
+  });
+});
+
 describe('a gateway going away', () => {
   it('is down when it vanishes while orders work, with what it held, and pages by its labels', () => {
     const up = evaluate([seen('running', ready(1, 2))], EMPTY_STATE, T0);

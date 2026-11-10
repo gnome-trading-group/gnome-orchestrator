@@ -262,9 +262,12 @@ the module access gnomepy's JVM args give sessions), state on a host volume, log
 reconciler, Lambda `GatewayReconciler` (`cdk/lambda/gateway_reconciler`, TypeScript; one tick at a time from FIFO queue
 `gateway-reconciler.fifo`, woken by the registry's `POST /gateways/ensure`, which the launcher and sessions call, and
 every minute; names in `cdk/lib/config.ts` `ORDER_GATEWAYS`, given to the Lambda in its environment). It reads the registry's gateway rows and runs a gateway while it was wanted in
-the last 30 minutes or reports sessions or orders, in its row's region, as service `order-gateway-<key with : as ->` from
-its own revision (key and release filled in), and allocates its Elastic IP (tag `gnome:order-gateway`), which
-`gateway-start.sh` attaches at boot; otherwise it sets the service to zero),
+the last 30 minutes or reports sessions or orders (or, running, went quiet while it had either: it may be restarting
+with orders; one that never wrote an endpoint holds nothing), in its row's region, as service
+`order-gateway-<key with : as ->` from its own revision (key, release and `ALERTS_API_URL` filled in), and allocates
+its Elastic IP (tag `gnome:order-gateway`), which `gateway-start.sh` attaches at boot; otherwise it sets the service to
+zero. A start on a new revision moves the service onto it at zero and raises the count on a later tick, once the old
+deployment has drained: raised sooner, ECS starts a task of the previous release on the old one),
 and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
 exchange code; run in the exchange's region, `sm.exchange.region`, where its gateway runs; reads only that region's
 `gnome/accounts/*/trading`; 5-minute timeout, never retried, dropped unless started within a minute). Started from the controller's Treasury

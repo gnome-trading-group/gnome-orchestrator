@@ -18,7 +18,7 @@ export interface Observation {
   // Absent when reconciling it failed, with the error instead.
   outcome?: Outcome;
   error?: string;
-  // Its endpoint item; null when it has none or it has expired.
+  // Its endpoint item; null when it has never written one, `expired` when it has stopped writing.
   activity: Activity | null;
   // Its ECS service's newest event, which says why a task can't be placed.
   serviceEvent?: string;
@@ -52,6 +52,11 @@ export const EMPTY_STATE: AlertState = { gateways: {}, firing: {} };
 
 const UP = new Set(['READY', 'DEGRADED']);
 
+/** What it says now; null when it has said nothing, or nothing lately. */
+function present(activity: Activity | null): Activity | null {
+  return activity && !activity.expired ? activity : null;
+}
+
 /** The alerts that hold after this tick, by key, and what to keep for the next. */
 export function evaluate(observations: Observation[], previous: AlertState, nowMs: number):
   { firing: Map<string, Alert>; state: AlertState } {
@@ -79,10 +84,11 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
     // Stopped as asked: its planned stop cancels and tells everyone, so its going is no outage.
     return { degradedTicks: 0, failedTicks: 0 };
   }
-  if (outcome === 'started' || outcome === 'created') {
-    return { degradedTicks: 0, failedTicks: 0, startingSinceMs: nowMs };
+  if (outcome === 'starting' || outcome === 'started' || outcome === 'created') {
+    // A start that waits for the old deployment to drain counts from when it began.
+    return { degradedTicks: 0, failedTicks: 0, startingSinceMs: memory.startingSinceMs ?? nowMs };
   }
-  const activity = seen.activity;
+  const activity = present(seen.activity);
   if (activity && UP.has(activity.state)) {
     memory.startingSinceMs = undefined;
     memory.lastInUse = activity.linkedSessions > 0 || activity.workingOrders > 0
@@ -118,10 +124,10 @@ function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Ale
     alerts.push({
       type: 'GATEWAY_START_STUCK',
       title: `Gateway ${seen.gatewayKey} isn't ready ${minutes} min after starting${why}`,
-      labels: labels({ minutes: String(minutes), state: seen.activity?.state ?? 'none' }),
+      labels: labels({ minutes: String(minutes), state: present(seen.activity)?.state ?? 'none' }),
     });
   }
-  if (seen.activity == null && memory.lastInUse) {
+  if (present(seen.activity) == null && memory.lastInUse) {
     const { linkedSessions, workingOrders } = memory.lastInUse;
     alerts.push({
       type: 'GATEWAY_DOWN',

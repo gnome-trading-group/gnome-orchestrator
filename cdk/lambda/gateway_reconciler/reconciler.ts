@@ -54,11 +54,15 @@ export interface GatewayRow {
   wanted_at: string | null;
 }
 
-/** What the gateway says of itself, from its endpoint item; null when it has none or it has expired. */
+/**
+ * What the gateway last said of itself, from its endpoint item; null when it has never written one. An expired item
+ * (no write for its TTL) is what it said before it went: it is gone, but may have left orders working.
+ */
 export interface Activity {
   state: string;
   linkedSessions: number;
   workingOrders: number;
+  expired?: boolean;
 }
 
 type Client = { send(command: any): Promise<any> };
@@ -76,20 +80,22 @@ export interface ReconcileDeps {
   observed?(observation: Observation): void;
 }
 
-export type Outcome = 'started' | 'created' | 'stopped' | 'running' | 'stopped already';
+// 'starting': moved onto a new revision with nothing wanted yet, waiting for the old deployment to drain.
+export type Outcome = 'starting' | 'started' | 'created' | 'stopped' | 'running' | 'stopped already';
 
 export function serviceName(names: GatewayNames, gatewayKey: string): string {
   return names.servicePrefix + gatewayKey.replace(/:/g, '-');
 }
 
 /**
- * Whether a gateway should run now: wanted recently, or in use; or running and saying nothing of itself, which may be
- * a gateway restarting with orders still working.
+ * Whether a gateway should run now: wanted recently, or in use; or running and gone silent while it last had sessions
+ * or orders, which may be a gateway restarting with orders still working. One that never said anything never came up,
+ * so holds nothing.
  */
 export function shouldRun(row: GatewayRow, activity: Activity | null, running: boolean, nowMs: number): boolean {
   const wanted = row.wanted_at != null && nowMs - Date.parse(row.wanted_at) < WANT_WINDOW_MS;
-  const inUse = activity != null && (activity.linkedSessions > 0 || activity.workingOrders > 0);
-  return wanted || inUse || (running && activity == null);
+  const held = activity != null && (activity.linkedSessions > 0 || activity.workingOrders > 0);
+  return wanted || (held && (!activity!.expired || running));
 }
 
 /** One tick: each live gateway brought to where it should be. One that fails is logged and tried again next tick. */
@@ -131,7 +137,7 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   }
   // A running gateway keeps its release: a new pin or release reaches it at its next start.
   if (running) {
-    if (activity && UP_STATES.has(activity.state)) return seen('running');
+    if (activity && !activity.expired && UP_STATES.has(activity.state)) return seen('running');
     // Not up: why its last task stopped, for the alert should it stay so.
     return { ...seen('running'), stoppedReason: await lastStopped(ecs, names, service) };
   }
@@ -139,11 +145,14 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   await ensureAddress(deps.ec2(row.region), names, row.gateway_key);
   const taskDefinition = await revision(ecs, names, row.gateway_key, version, await deps.alertsApiUrl());
   if (current) {
+    // Onto a new revision with nothing wanted, and wanted only once the old deployment has drained: while it is still
+    // there, ECS starts a task of the previous release on it, which takes sessions until the new one replaces it. A
+    // starting session wakes this every 10 s, so the next tick comes soon.
     if (current.taskDefinition !== taskDefinition) {
-      // Onto the new revision while nothing is wanted, then wanted: set together, ECS first raises the count on the old
-      // deployment, and a gateway on the previous release takes sessions until the new one replaces it.
       await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, taskDefinition, desiredCount: 0 }));
+      return seen('starting');
     }
+    if ((current.deployments ?? []).length > 1) return seen('starting');
     await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 1 }));
     return seen('started');
   }
@@ -313,11 +322,13 @@ const lambdaDeps: Omit<ReconcileDeps, 'names'> = {
       Key: { service_id: { S: `order-gateway#${gatewayKey}` } },
       ConsistentRead: true,
     }))).Item;
-    if (!item || Number(item.expires_at?.N ?? 0) * 1000 <= nowMs) return null;
+    if (!item) return null;
     return {
       state: item.state?.S ?? '',
       linkedSessions: Number(item.linked_sessions?.N ?? 0),
       workingOrders: Number(item.working_orders?.N ?? 0),
+      // DynamoDB removes expired items only eventually.
+      expired: Number(item.expires_at?.N ?? 0) * 1000 <= nowMs,
     };
   },
   latestVersion: () => parameter(LATEST_VERSION_PARAMETER),

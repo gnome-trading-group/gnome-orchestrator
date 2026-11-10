@@ -10,7 +10,10 @@ const serviceName = (key: string) => nameOf(NAMES, key);
 
 // What ECS and EC2 hold in one region, and every command each was sent, by name.
 class FakeRegion {
-  services: { serviceName: string; status: string; desiredCount: number; taskDefinition?: string }[] = [];
+  services: {
+    serviceName: string; status: string; desiredCount: number; taskDefinition?: string;
+    deployments?: { taskDefinition?: string }[];
+  }[] = [];
   addresses: { AllocationId: string; Tags: { Key: string; Value: string }[] }[] = [];
   revisions = new Map<string, any[]>();
   sent: { command: string; input: any }[] = [];
@@ -52,7 +55,11 @@ class FakeRegion {
       if (name === 'UpdateServiceCommand') {
         const service = this.services.find((s) => s.serviceName === command.input.service)!;
         service.desiredCount = command.input.desiredCount;
-        if (command.input.taskDefinition) service.taskDefinition = command.input.taskDefinition;
+        if (command.input.taskDefinition && command.input.taskDefinition !== service.taskDefinition) {
+          // As ECS does: the old deployment stays until it has drained.
+          service.deployments = [{ taskDefinition: command.input.taskDefinition }, { taskDefinition: service.taskDefinition }];
+          service.taskDefinition = command.input.taskDefinition;
+        }
         return {};
       }
       throw new Error(`unexpected ${name}`);
@@ -74,6 +81,11 @@ class FakeRegion {
       throw new Error(`unexpected ${name}`);
     },
   };
+
+  /** Every service's old deployments gone, as once ECS has drained them. */
+  drain() {
+    for (const service of this.services) service.deployments = [{ taskDefinition: service.taskDefinition }];
+  }
 
   commands(): string[] {
     return this.sent.map((s) => s.command);
@@ -125,9 +137,13 @@ describe('which gateways should run', () => {
     expect(shouldRun(row(KALSHI, 'us-east-1', WANT_WINDOW_MS + 1), idle, true, NOW)).toBe(false);
     expect(shouldRun(row(KALSHI, 'us-east-1', null), { ...idle, linkedSessions: 1 }, true, NOW)).toBe(true);
     expect(shouldRun(row(KALSHI, 'us-east-1', null), { ...idle, workingOrders: 3 }, true, NOW)).toBe(true);
-    // Crashed and restarting: it may hold orders nobody else would cancel.
-    expect(shouldRun(row(KALSHI, 'us-east-1', null), null, true, NOW)).toBe(true);
-    expect(shouldRun(row(KALSHI, 'us-east-1', null), null, false, NOW)).toBe(false);
+    // Gone quiet while it had orders, and restarting: it may hold orders nobody else would cancel.
+    const wentQuiet = { ...idle, workingOrders: 2, expired: true };
+    expect(shouldRun(row(KALSHI, 'us-east-1', null), wentQuiet, true, NOW)).toBe(true);
+    expect(shouldRun(row(KALSHI, 'us-east-1', null), wentQuiet, false, NOW)).toBe(false);
+    // Never said anything (it never came up), or went quiet with nothing: it holds nothing.
+    expect(shouldRun(row(KALSHI, 'us-east-1', null), null, true, NOW)).toBe(false);
+    expect(shouldRun(row(KALSHI, 'us-east-1', null), { ...idle, expired: true }, true, NOW)).toBe(false);
   });
 });
 
@@ -164,6 +180,7 @@ describe('the gateway reconciler', () => {
     west.addresses.push({ AllocationId: 'eipalloc-9', Tags: [{ Key: ADDRESS_TAG, Value: INTL }] });
     // Started on this release before, from the same base.
     await reconcile(deps([row(INTL, 'eu-west-1', 5_000, '1.30.0')], { 'eu-west-1': west }));
+    west.drain();
     west.services[0].desiredCount = 0;
     west.sent = [];
 
@@ -177,18 +194,26 @@ describe('the gateway reconciler', () => {
       .toEqual([{ cluster: CLUSTER, service: serviceName(INTL), desiredCount: 1 }]);
   });
 
-  it('moves a stopped gateway onto a new revision before wanting it, so no task starts on the old one', async () => {
+  it('wants a gateway on a new revision only once the old deployment has drained, so no task starts on it', async () => {
     const east = new FakeRegion();
     await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, '1.32.0')], { 'us-east-1': east }));
     east.services[0].desiredCount = 0;
-    east.sent = [];
+    const tick = async () => {
+      east.sent = [];
+      const outcome = (await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, '1.32.1')], { 'us-east-1': east }))).get(KALSHI);
+      return { outcome, updates: east.sent.filter((s) => s.command === 'UpdateServiceCommand').map((s) => s.input) };
+    };
 
-    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, '1.32.1')], { 'us-east-1': east }));
-
-    expect(east.sent.filter((s) => s.command === 'UpdateServiceCommand').map((s) => s.input)).toEqual([
-      { cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: 'order-gateway-live-kalshi-main:2', desiredCount: 0 },
-      { cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 1 },
-    ]);
+    expect(await tick()).toEqual({
+      outcome: 'starting',
+      updates: [{ cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: 'order-gateway-live-kalshi-main:2', desiredCount: 0 }],
+    });
+    expect(await tick()).toEqual({ outcome: 'starting', updates: [] });
+    east.drain();
+    expect(await tick()).toEqual({
+      outcome: 'started', updates: [{ cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 1 }],
+    });
+    expect(east.services[0]).toMatchObject({ desiredCount: 1, taskDefinition: 'order-gateway-live-kalshi-main:2' });
   });
 
   it('says why a running gateway that isn\'t up last stopped, from its newest stopped task', async () => {
@@ -218,6 +243,7 @@ describe('the gateway reconciler', () => {
     await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, '1.32.1')], { 'us-east-1': east }));
 
     expect(east.services[0].taskDefinition).toBe('order-gateway-live-kalshi-main:2');
+    expect(east.revisions.get('order-gateway-live-kalshi-main')).toHaveLength(2);
   });
 
   it('leaves a running gateway as it is while it is wanted or in use', async () => {
@@ -242,14 +268,25 @@ describe('the gateway reconciler', () => {
     expect(east.services[0].desiredCount).toBe(0);
   });
 
-  it('keeps a running gateway that says nothing of itself, as it may be restarting with orders working', async () => {
+  it('keeps a running gateway gone quiet with orders working, as it may be restarting with them', async () => {
     const east = new FakeRegion();
     east.services.push({ serviceName: serviceName(KALSHI), status: 'ACTIVE', desiredCount: 1 });
 
-    const outcomes = await reconcile(deps([row(KALSHI, 'us-east-1', null)], { 'us-east-1': east }));
+    const outcomes = await reconcile(deps(
+      [row(KALSHI, 'us-east-1', null)], { 'us-east-1': east }, { [KALSHI]: { ...idle, workingOrders: 2, expired: true } }));
 
     expect(outcomes.get(KALSHI)).toBe('running');
     expect(east.services[0].desiredCount).toBe(1);
+  });
+
+  it('stops an unwanted gateway that never came up, however long it has been failing', async () => {
+    const east = new FakeRegion();
+    east.services.push({ serviceName: serviceName(KALSHI), status: 'ACTIVE', desiredCount: 1 });
+
+    const outcomes = await reconcile(deps([row(KALSHI, 'us-east-1', WANT_WINDOW_MS + 1)], { 'us-east-1': east }));
+
+    expect(outcomes.get(KALSHI)).toBe('stopped');
+    expect(east.services[0].desiredCount).toBe(0);
   });
 
   it('tries every gateway even when one fails, and leaves the failed one for the next tick', async () => {
