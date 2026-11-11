@@ -54,7 +54,7 @@ final class VenueQueries {
     static final long LOOKBACK_MILLIS = TimeUnit.DAYS.toMillis(2);
     // How long a cancelled order is given to end at the venue before the answer says it still rests.
     static final long CANCEL_SETTLE_MILLIS = 3_000;
-    private static final long CANCEL_POLL_MILLIS = 200;
+    static final long CANCEL_POLL_MILLIS = 200;
 
     private final Logger logger;
     private final SessionTable sessions;

@@ -720,6 +720,21 @@ class GatewayControlTest {
     }
 
     @Test
+    void anUnheldOrderCancelledAtTheVenueIsReportedOnceTheVenueShowsItEnded() throws Exception {
+        this.control = control(List.of(recovered(Set.of(1L), 60_000)), GatewayControl.Restart.HELLO_GRACE_NANOS);
+        this.account.query.orders.put("s42-3", new VenueOrder("s42-3", "v-3", 0, 0, 0, false));
+        // The venue takes the cancel but still shows the order resting on the next two lookups.
+        this.account.query.lagAfterCancel.set(2);
+        awaitReady();
+        hello(0, 1);
+        helloOrders(0, true, new long[] {1, OrderState.NEW.value()}, new long[] {3, OrderState.NEW.value(), 1});
+
+        await(() -> statuses().size() == 1, "the cancelled order's status");
+        assertEquals(OrderState.CANCELED, status(statuses().get(0)).state());
+        assertEquals(List.of("s42-3"), this.account.query.cancelled);
+    }
+
+    @Test
     void aSessionNewToTheGatewayHasTheOrdersItHoldsOpenSettledAsTheVenueHasThem() throws Exception {
         // As after a stop whose cancel reports never reached it: the gateway that took them is gone, this one holds
         // nothing of the session's.

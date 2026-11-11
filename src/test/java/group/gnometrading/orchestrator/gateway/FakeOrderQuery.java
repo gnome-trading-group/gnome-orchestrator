@@ -21,6 +21,9 @@ public final class FakeOrderQuery implements VenueOrderQuery {
     // When the venue says each order was placed, for the account-wide list; 0 when not set.
     public final Map<String, Long> created = new ConcurrentHashMap<>();
     public volatile IOException listAllFails;
+    // Lookups after a cancel that still show the order as it was, as a venue slow to reflect a cancel does.
+    public final AtomicInteger lagAfterCancel = new AtomicInteger();
+    private final Map<String, VenueOrder> beforeCancel = new ConcurrentHashMap<>();
 
     @Override
     public List<VenueOrder> listOpenOrders(final Listing listing) {
@@ -31,6 +34,10 @@ public final class FakeOrderQuery implements VenueOrderQuery {
     public Optional<VenueOrder> getOrder(
             final Listing listing, final String exchangeOrderId, final long createdAfterMs) {
         this.lookups.incrementAndGet();
+        final VenueOrder stale = this.beforeCancel.get(exchangeOrderId);
+        if (stale != null && this.lagAfterCancel.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
+            return Optional.of(stale);
+        }
         return Optional.ofNullable(this.orders.get(exchangeOrderId));
     }
 
@@ -38,6 +45,7 @@ public final class FakeOrderQuery implements VenueOrderQuery {
     @Override
     public boolean cancel(final Listing listing, final VenueOrder order) {
         this.cancelled.add(order.exchangeOrderId());
+        this.beforeCancel.put(order.exchangeOrderId(), order);
         this.orders.put(
                 order.exchangeOrderId(),
                 new VenueOrder(

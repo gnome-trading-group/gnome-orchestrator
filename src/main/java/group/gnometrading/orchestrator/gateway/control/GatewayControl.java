@@ -669,7 +669,7 @@ public final class GatewayControl implements GnomeAgent {
                         session.sessionId,
                         order.counter());
                 query.cancel(listing, found.get());
-                found = query.getOrder(listing, order.exchangeOrderId(), since);
+                found = awaitEnded(query, listing, order.exchangeOrderId(), since);
             }
             final VenueOrder venue = found.orElseThrow();
             if (!venue.terminal()) {
@@ -691,6 +691,25 @@ public final class GatewayControl implements GnomeAgent {
                     order.counter(),
                     CauseChain.of(e));
         }
+    }
+
+    /**
+     * The order once the venue shows it ended, or as it last stood: a venue may show a cancel it took as resting for a
+     * moment, and an order left as the session holds it is only looked at again at its next hello. Waits within the
+     * hello's lookup budget.
+     */
+    private Optional<VenueOrder> awaitEnded(
+            final VenueOrderQuery query, final Listing listing, final String exchangeOrderId, final long since)
+            throws Exception {
+        final long deadline = Math.min(
+                this.settleDeadlineNanos,
+                this.nanoClock.getAsLong() + TimeUnit.MILLISECONDS.toNanos(VenueQueries.CANCEL_SETTLE_MILLIS));
+        Optional<VenueOrder> found = query.getOrder(listing, exchangeOrderId, since);
+        while (found.isPresent() && !found.get().terminal() && this.nanoClock.getAsLong() - deadline < 0) {
+            Thread.sleep(VenueQueries.CANCEL_POLL_MILLIS);
+            found = query.getOrder(listing, exchangeOrderId, since);
+        }
+        return found;
     }
 
     private void sendStatus(
