@@ -814,8 +814,11 @@ public final class GatewayControl implements GnomeAgent {
         answerRefusals(now);
         forgetIdleSessions(now);
         closeLingering(now);
+        final GatewayState before = this.status.state();
         updateState();
-        if (now - this.nextAdvertiseNanos >= 0) {
+        // Sessions link only to a gateway the item calls READY or DEGRADED, and a restarted gateway gives sessions it
+        // took back only a short grace to say hello, so a change of state can't wait for the next interval.
+        if (now - this.nextAdvertiseNanos >= 0 || this.status.state() != before) {
             this.nextAdvertiseNanos = now + ADVERTISE_INTERVAL_NANOS;
             this.advertiser.advertise(this.status.state(), linkedSessions(), workingOrders());
         }

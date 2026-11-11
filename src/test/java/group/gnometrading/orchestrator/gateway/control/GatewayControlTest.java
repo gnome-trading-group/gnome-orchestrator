@@ -393,6 +393,20 @@ class GatewayControlTest {
     }
 
     @Test
+    void aChangeOfStateIsAdvertisedAtOnceNotAtTheNextInterval() throws Exception {
+        this.account.state = AccountState.CONNECTING;
+        runFor(50);
+        assertEquals(List.of(GatewayState.STARTING), this.advertised);
+
+        // Sessions link only to a gateway its endpoint calls READY; the interval is 15 s, this test far shorter.
+        this.account.state = AccountState.READY;
+        await(() -> this.advertised.contains(GatewayState.READY), "READY advertised");
+        this.account.state = AccountState.DOWN;
+        await(() -> this.advertised.contains(GatewayState.DEGRADED), "DEGRADED advertised");
+        assertEquals(List.of(GatewayState.STARTING, GatewayState.READY, GatewayState.DEGRADED), this.advertised);
+    }
+
+    @Test
     void aHelloWaitsForItsLastPageOfOpenOrders() throws Exception {
         awaitReady();
         hello(0, 2);
