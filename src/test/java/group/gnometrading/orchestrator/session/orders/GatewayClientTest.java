@@ -1,6 +1,8 @@
 package group.gnometrading.orchestrator.session.orders;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.logging.NullLogger;
@@ -249,6 +251,18 @@ class GatewayClientTest {
                 decode(received(SessionGoodbyeDecoder.TEMPLATE_ID).get(0), new SessionGoodbyeDecoder());
         assertEquals(SLOT, goodbye.sessionSeq());
         assertEquals(GoodbyeReason.SESSION_EXIT, goodbye.reason());
+
+        // The control thread runs on while the session closes; a link it reopened would close the publication the
+        // goodbye went out on and could say hello again.
+        final Publication saidGoodbyeOn = this.link.publication;
+        final long pastRetry = System.nanoTime() + GatewayLinks.RETRY_NANOS + TimeUnit.MILLISECONDS.toNanos(50);
+        while (System.nanoTime() - pastRetry < 0) {
+            this.links.run();
+            Thread.sleep(10);
+        }
+        assertEquals(GatewayLink.GONE, this.link.state);
+        assertSame(saidGoodbyeOn, this.link.publication);
+        assertFalse(saidGoodbyeOn.isClosed());
     }
 
     @Test

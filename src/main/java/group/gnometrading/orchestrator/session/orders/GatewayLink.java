@@ -26,6 +26,9 @@ public final class GatewayLink {
     /** Welcomed: orders go out. */
     static final int READY = 3;
 
+    /** The session said goodbye on it while closing: it is never opened again. */
+    static final int GONE = 4;
+
     final String gatewayKey;
     final int exchangeId;
     final int venueAccountId;

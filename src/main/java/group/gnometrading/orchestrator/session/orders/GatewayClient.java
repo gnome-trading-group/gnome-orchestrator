@@ -220,7 +220,7 @@ public final class GatewayClient implements AeronPathAgent {
         while (this.nanoClock.getAsLong() - deadline <= 0) {
             flush(link);
             if (link.pending.isEmpty() && link.publication.offer(this.scratch, 0, length) > 0) {
-                link.state = GatewayLink.DOWN;
+                link.state = GatewayLink.GONE;
                 return;
             }
             Thread.onSpinWait();
