@@ -82,6 +82,9 @@ public final class GatewayClient implements AeronPathAgent {
     static final long HEARTBEAT_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
     static final long GATEWAY_SILENCE_NANOS = TimeUnit.SECONDS.toNanos(1);
     static final long WELCOME_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
+    // A gateway that crashed leaves its address in service-endpoints until its replacement writes one, so a link opened
+    // to it never connects; past this the link goes down and the control thread looks the address up again.
+    static final long CONNECT_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
     // Past this the goodbye is left to the gateway's silence timeout, which cancels and unlinks the same way.
     static final long GOODBYE_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
     private static final int FRAGMENT_LIMIT = 64;
@@ -192,6 +195,12 @@ public final class GatewayClient implements AeronPathAgent {
             work += sendQuery(pending);
         }
         work += this.omsOrders.poll();
+        for (final GatewayLink link : this.links) {
+            final int working = this.orders.openOn(link.exchangeId);
+            if (link.workingOrders != working) {
+                link.workingOrders = working;
+            }
+        }
         return work;
     }
 
@@ -476,6 +485,11 @@ public final class GatewayClient implements AeronPathAgent {
     private int step(final GatewayLink link) {
         switch (link.state) {
             case GatewayLink.CONNECTING -> {
+                if (this.now - link.connectingSinceNanos > CONNECT_TIMEOUT_NANOS && !isConnected(link)) {
+                    link.connectTimedOut = true;
+                    down(link);
+                    return 1;
+                }
                 return sayHello(link);
             }
             case GatewayLink.HELLO_SENT -> {
@@ -521,6 +535,11 @@ public final class GatewayClient implements AeronPathAgent {
      * The hello, then its pages of open orders, as far as the publication takes them; carries on from there on the
      * next pass. Done, it waits for the welcome.
      */
+    private static boolean isConnected(final GatewayLink link) {
+        final Publication publication = link.publication;
+        return publication != null && publication.isConnected();
+    }
+
     private int sayHello(final GatewayLink link) {
         final Publication publication = link.publication;
         if (publication == null || !publication.isConnected()) {

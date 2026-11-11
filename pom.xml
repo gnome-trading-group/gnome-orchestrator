@@ -88,13 +88,13 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>4.0.2</version>
+            <version>4.1.0</version>
         </dependency>
         <!-- The account path's fakes, for the order gateway's in-process tests. -->
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>4.0.2</version>
+            <version>4.1.0</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>

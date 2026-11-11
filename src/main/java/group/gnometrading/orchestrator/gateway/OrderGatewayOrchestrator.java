@@ -73,6 +73,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -105,6 +106,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     private static final long CONTROL_STALL_NANOS = TimeUnit.MINUTES.toNanos(1);
     // How long the control thread waits on the registry for one record or listing.
     private static final long REGISTRY_TIMEOUT_MILLIS = 5_000;
+    // How long sessions have to come back and claim, through their hellos, orders an earlier process left.
+    private static final long SWEEP_WAIT_MILLIS = 30_000;
 
     @Provides
     public final EpochNanoClock provideEpochNanoClock() {
@@ -148,6 +151,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final AeronPathIdle idle = AeronPathIdle.forGateway(properties);
         AgentRuntimeInstaller.installStandard(logger, idle);
 
+        // Before any account can send: the startup sweep tells an earlier process's orders by being placed before this.
+        final long startedMillis = System.currentTimeMillis();
         final GatewaySettings settings = GatewaySettings.of(properties);
         final IngestGatewayAlerts alerts = alerts(logger, properties, settings);
         final ProcessExit exit = exit(logger, alerts);
@@ -263,6 +268,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class));
         reportDrops(logger, ingress, egress, sessions, cross);
         reportSelfTrades(logger, cross);
+        sweepAtStartup(logger, alerts, accounts, restart, startedMillis);
         final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, control, accounts)
                 .start();
 
@@ -506,6 +512,38 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway %s holds no accounts", settings.key());
         }
         return accounts;
+    }
+
+    /**
+     * Cancels, once sessions have had time to come back, orders resting on the accounts that this process has no record
+     * of ({@link StartupSweep}): 30 s, plus the longest cancel-on-disconnect timeout of the sessions the restart holds.
+     */
+    private static void sweepAtStartup(
+            final Logger logger,
+            final GatewayAlerts alerts,
+            final List<GatewayAccount> accounts,
+            final GatewayRestart.Result restart,
+            final long startedMillis) {
+        final List<StartupSweep.Account> swept = new ArrayList<>();
+        for (final GatewayAccount account : accounts) {
+            if (account.orderQuery() != null) {
+                swept.add(new StartupSweep.Account(
+                        account.name(),
+                        account.orderQuery(),
+                        restart.held().getOrDefault(account.accountId(), Set.of())));
+            }
+        }
+        long longestCodNanos = 0;
+        for (final GatewayControl.Recovered recovered : restart.sessions()) {
+            longestCodNanos = Math.max(longestCodNanos, recovered.codTimeoutNanos());
+        }
+        final long waitMillis = SWEEP_WAIT_MILLIS + TimeUnit.NANOSECONDS.toMillis(longestCodNanos);
+        final Thread thread = new Thread(
+                new StartupSweep(
+                        logger, alerts, swept, startedMillis, waitMillis, System::currentTimeMillis, Thread::sleep),
+                "gateway-startup-sweep");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     /** Takes back the previous process's sessions and orders, before any thread starts. */

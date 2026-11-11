@@ -1,5 +1,6 @@
 package group.gnometrading.orchestrator.session.orders;
 
+import group.gnometrading.gateways.orders.recovery.AccountOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.schemas.gateway.QueryStatus;
@@ -44,12 +45,23 @@ final class GatewayVenueOrderQuery implements VenueOrderQuery {
         return found.stream().findFirst();
     }
 
+    /** A session only ever asks about its own listings; the account as a whole is the gateway's. */
+    @Override
+    public List<AccountOrder> listAllOpenOrders() {
+        throw new UnsupportedOperationException("a session lists orders only on its own listings");
+    }
+
     @Override
     public boolean cancel(final Listing listing, final VenueOrder order) throws IOException {
         ask(
                 GatewayQuery.cancelEnded(nextId(), exchangeId(listing), securityId(listing), order.exchangeOrderId()),
                 "a cancel of " + order.exchangeOrderId());
         return true;
+    }
+
+    @Override
+    public boolean cancel(final AccountOrder order) {
+        throw new UnsupportedOperationException("a session cancels orders only on its own listings");
     }
 
     private List<VenueOrder> ask(final GatewayQuery query, final String what) throws IOException {

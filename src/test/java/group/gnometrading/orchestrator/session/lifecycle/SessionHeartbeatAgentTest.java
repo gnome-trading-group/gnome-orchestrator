@@ -127,6 +127,63 @@ class SessionHeartbeatAgentTest {
         return runner;
     }
 
+    /** An order gateway link as the heartbeat sees it. */
+    private static final class Link implements OrderGatewayLinkStatus {
+        volatile boolean linked;
+        volatile int working;
+
+        @Override
+        public String gatewayKey() {
+            return "live:kalshi:main";
+        }
+
+        @Override
+        public boolean linked() {
+            return this.linked;
+        }
+
+        @Override
+        public int workingOrders() {
+            return this.working;
+        }
+    }
+
+    private final Link link = new Link();
+    private final List<OrderGatewayLinkStatus> orderGateways = new ArrayList<>(List.of(this.link));
+
+    @Test
+    void reportsEachOrderGatewayLinkAndHowLongItHasBeenDown() throws Exception {
+        this.link.linked = true;
+        this.link.working = 2;
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
+        agent.onStart();
+        agent.doWork();
+        JsonNode reported = mapper.readTree(posted.get(posted.size() - 1))
+                .get("orderGateways")
+                .get(0);
+        assertEquals("live:kalshi:main", reported.get("key").asText());
+        assertTrue(reported.get("linked").asBoolean());
+        assertEquals(0, reported.get("unlinkedMs").asLong());
+        assertEquals(2, reported.get("workingOrders").asInt());
+
+        this.link.linked = false;
+        step(agent, SAMPLE_MS);
+        step(agent, POST_MS);
+        reported = mapper.readTree(posted.get(posted.size() - 1))
+                .get("orderGateways")
+                .get(0);
+        assertFalse(reported.get("linked").asBoolean());
+        assertEquals(POST_MS, reported.get("unlinkedMs").asLong(), "down since the sample that first saw it");
+        assertEquals(2, reported.get("workingOrders").asInt());
+
+        this.link.linked = true;
+        step(agent, POST_MS);
+        reported = mapper.readTree(posted.get(posted.size() - 1))
+                .get("orderGateways")
+                .get(0);
+        assertEquals(0, reported.get("unlinkedMs").asLong());
+    }
+
     @Test
     void aListingWhoseBookIsFlaggedBadReportsForHowLong() throws Exception {
         final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
@@ -148,6 +205,7 @@ class SessionHeartbeatAgentTest {
                 new NullLogger(),
                 agents,
                 gateways,
+                orderGateways,
                 prices,
                 slots,
                 ledger,
@@ -236,7 +294,8 @@ class SessionHeartbeatAgentTest {
         assertEquals(listings, body.get("listings").size());
         assertEquals(listings, body.get("gateways").size());
         assertEquals(listings, body.get("agents").size());
-        assertTrue(agent.lastBody().length() <= SessionHeartbeatAgent.bodyCapacity("s1", agents, gateways, slots));
+        assertTrue(agent.lastBody().length()
+                <= SessionHeartbeatAgent.bodyCapacity("s1", agents, gateways, orderGateways, slots));
     }
 
     /** A listing's market data as the heartbeat sees it. */
@@ -320,6 +379,7 @@ class SessionHeartbeatAgentTest {
                 new NullLogger(),
                 List.of(running("LiveAgent")),
                 List.of(),
+                orderGateways,
                 prices,
                 slots,
                 ledger,
@@ -379,6 +439,7 @@ class SessionHeartbeatAgentTest {
                 new NullLogger(),
                 List.of(),
                 List.of(),
+                orderGateways,
                 prices,
                 slots,
                 ledger,

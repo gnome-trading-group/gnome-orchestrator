@@ -138,6 +138,14 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
             return;
         }
         this.retryAt.put(link, now + RETRY_NANOS);
+        if (link.connectTimedOut) {
+            link.connectTimedOut = false;
+            this.logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Gateway %s: nothing answered at its address for %d s; looking it up again",
+                    link.gatewayKey,
+                    TimeUnit.NANOSECONDS.toSeconds(GatewayClient.CONNECT_TIMEOUT_NANOS));
+        }
         final HelloRefusal refusal = link.refusal;
         if (refusal != HelloRefusal.NONE) {
             this.logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway %s refused the session: %s", link.gatewayKey, refusal);
@@ -164,6 +172,7 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
         link.replies = replies;
         link.publication = publication;
         link.helloPage = 0;
+        link.connectingSinceNanos = this.nanoClock.getAsLong();
         link.state = GatewayLink.CONNECTING;
         this.logger.logf(
                 LogMessage.DEBUG,

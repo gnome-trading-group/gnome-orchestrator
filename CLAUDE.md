@@ -80,7 +80,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   (`GatewayVenueOrderQuery`: `VenueQuery` for open orders and lookups, `CancelEnded` to cancel what an ended session
   of the strategy left; a query a dropped link lost is sent again). On close the client sends each ready link what it
   still holds, then a `SessionGoodbye` (`SESSION_EXIT`), so the gateway cancels and unlinks the session at once
-  instead of after its silence (a goodbye not taken within 100 ms is left to that). The slot is the registry's `session_seq`. The
+  instead of after its silence (a goodbye not taken within 100 ms is left to that); the link is then `GONE`, which the
+  control thread never reopens. A link that doesn't connect within 5 s (a crashed gateway's address, still in
+  `service-endpoints` until its replacement writes) goes down, and the control thread looks the address up again. The slot is the registry's `session_seq`. The
   session's `AeronRuntime` is launched by `SessionOrchestrator` (shared by market data and the links) and closed
   last.
 - `session/recovery/`: `StartupRecovery`.
@@ -183,6 +185,11 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     within 10 s of READY plus its cod timeout has its orders cancelled. A hello past its replay ring gets statuses too.
     A session new to the gateway (not recovered, not held) that lists open orders has each looked up at the venue and
     reported as the venue has it, still-resting ones cancelled: they were another gateway's.
+  - Startup sweep (`StartupSweep`, its own thread): the ownership log is on the host, so a gateway back on another host
+    starts with none. 30 s after start (plus the longest cod timeout of the sessions it took back) it lists each
+    account's open orders (`VenueOrderQuery.listAllOpenOrders`, through the account's bounded query) and cancels those
+    the venue created before this process started that the restart doesn't hold, alerting `GATEWAY_UNATTRIBUTED_ORDERS`
+    for each. A list that fails is retried every 10 s, alerting `GATEWAY_SWEEP_FAILED` past 5 minutes.
   - Tests: `GatewayFixture` (test scope, from gnome-gateways' test jar) runs a whole gateway in process on a fake
     venue; `session/orders/GatewayInProcessTest` drives sessions through it, restart included.
   - Whether it runs is not its own decision: the gateway reconciler (`cdk/lambda/gateway_reconciler`) starts and stops
@@ -290,8 +297,8 @@ instance goes away). On boot it runs `StartupRecovery` (inherits positions, and 
 earlier sessions). A session already stopped before startup exits 0 without reporting.
 - Heartbeat: every 5 s to `/api/strategy-sessions/heartbeat` (agents' `stalledMs`/`exited`, per-listing
   `priceUnchangedMs` and `marketDataBadMs` (how long its book has been flagged bad data, the OMS refusing new orders;
-  0 trusted), ledger, market data `reconnecting`/`resyncsLast5m`, risk, host CPU/mem/disk,
-  journal backlog). Stops once the registry says the session ended.
+  0 trusted), ledger, market data `reconnecting`/`resyncsLast5m`, each order gateway link's `linked`/`unlinkedMs`/
+  `workingOrders`, risk, host CPU/mem/disk, journal backlog). Stops once the registry says the session ended.
 - Journal: segments under `/var/lib/gnome/journal/<sessionId>/`; `gnome-journal-shipper` uploads them to
   `gnome-journals-<stage>/<sessionId>/` and ships open segments after the strategy unit stops. Strategy metrics live
   only in the journal.
@@ -342,18 +349,20 @@ unset means no alerts; posted through `runtime/AlertsApi`):
   (gnome-registry `cdk/lambda/monitoring/rules/sessions.ts`): `AGENT_STALLED`, `AGENT_EXITED`, `RECONNECTING`,
   `BOOK_RESYNCS`, `MARKET_DATA_BAD`, `MARKET_DATA_BAD_HELD`, `LEDGER_FAILING`, `LEDGER_FENCED`, `RISK_STALE`, `RISK_UNGUARDED`, `POLICY_UNBUILDABLE`,
   `LATCHES_DROPPED`, `HOST_CPU_HIGH`, `HOST_MEMORY_LOW`, `DISK_LOW`, `JOURNAL_BACKLOG`,
-  `SILENT`; lifecycle ones (`START_STUCK`, `STOP_STUCK`, `FAILED`) come from other monitor rules.
+  `SILENT`, `ORDER_GATEWAY_UNLINKED` (live, a minute unlinked from a gateway with orders working there); lifecycle ones (`START_STUCK`, `STOP_STUCK`, `FAILED`) come from other monitor rules.
 - An order gateway raises what only it sees (`core/GatewayAlerts`, posted by `IngestGatewayAlerts` to the
   `ALERTS_API_URL` the reconciler puts in its revision), keyed `<TYPE>:<gateway key>[:<account or order>]`:
   `GATEWAY_KILLS_STALE` (kills unread 30 s; resolved by the next read), `GATEWAY_VENUE_RATE_LIMITED` and
   `GATEWAY_ORDERS_UNANSWERED` (per account, a minute with any; resolved by a minute without),
-  `GATEWAY_UNATTRIBUTED_ORDERS` (a restart cancelled an order its session didn't know) and `GATEWAY_FATAL` (sent,
+  `GATEWAY_UNATTRIBUTED_ORDERS` (a restart or its startup sweep cancelled an order nobody knew), `GATEWAY_SWEEP_FAILED`
+  (the sweep couldn't list an account's orders for 5 minutes) and `GATEWAY_FATAL` (sent,
   waiting up to 2 s, before a failing gateway halts; one per process).
 - The gateway reconciler raises, per gateway, on the `gnome-alerts` bus (`cdk/lambda/gateway_reconciler/alerts.ts`,
   firing keys and per-gateway memory on the `service-endpoints` item `order-gateway-reconciler#alerts`):
   `GATEWAY_START_STUCK` (running, not READY or DEGRADED 6 min after it started), `GATEWAY_DOWN` (its endpoint expired
   while it last showed sessions linked or orders working, without being asked to stop; CRITICAL with orders working),
-  `GATEWAY_DEGRADED` (2 ticks), `GATEWAY_RECONCILE_FAILED` (3 ticks). CloudWatch alarms on the reconciler itself,
+  `GATEWAY_DEGRADED` (2 ticks), `GATEWAY_RECONCILE_FAILED` (3 ticks), `GATEWAY_RESTARTED` (its running task changed
+  without the reconciler starting it while orders worked; held 15 minutes, with the old task's stop reason). CloudWatch alarms on the reconciler itself,
   `GatewayReconciler-{TickFailing,NotRunning,Errors,QueueStuck}-Error`, are this repo's only alarms. Catalog and
   runbooks are gnome-registry's. Collectors have no alerting from here.
 

@@ -13,6 +13,7 @@ import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.utils.CauseChain;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -30,17 +31,22 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Sessions then come back with a hello and are reconciled ({@link GatewayControl.Recovered}); one that doesn't has its
  * orders cancelled. An order the log never held (the machine was lost with its log) isn't known here: its events find
- * no order, and the session's own startup recovery attributes it from the ledger.
+ * no order; a session still holding it gets it looked up through its hello, and {@link StartupSweep} cancels what no
+ * session claims.
  */
 public final class GatewayRestart {
 
     /** What the restart took back. */
-    /** @param loaded per account, the listings made tradeable on it to take its orders back, by listing key */
+    /**
+     * @param loaded per account, the listings made tradeable on it to take its orders back, by listing key
+     * @param held per account, the ids execution reports carry of the orders taken back, for the startup sweep
+     */
     record Result(
             SessionsFile sessionsFile,
             List<GatewayControl.Recovered> sessions,
             List<OwnershipLog> logs,
-            Map<Integer, Set<Long>> loaded) {}
+            Map<Integer, Set<Long>> loaded,
+            Map<Integer, Set<String>> held) {}
 
     private GatewayRestart() {}
 
@@ -70,6 +76,7 @@ public final class GatewayRestart {
         final Map<Long, int[]> owners = new HashMap<>();
         final List<OwnershipLog> logs = new ArrayList<>();
         final Map<Integer, Set<Long>> loadedByAccount = new HashMap<>();
+        final Map<Integer, Set<String>> heldByAccount = new HashMap<>();
         for (final GatewayAccount account : accounts) {
             final List<OrderContext> open = new ArrayList<>();
             final OwnershipLog log =
@@ -80,8 +87,11 @@ public final class GatewayRestart {
                     });
             final Set<Long> loaded = new HashSet<>();
             loadedByAccount.put(account.accountId(), loaded);
+            final Set<String> held = new HashSet<>();
+            heldByAccount.put(account.accountId(), held);
             for (final OrderContext ctx : open) {
                 if (recoverOrder(logger, account, listings, loaded, ctx)) {
+                    held.add(new String(ctx.correlationIdBytes, 0, ctx.correlationIdLength, StandardCharsets.US_ASCII));
                     cross.restore(
                             ctx.sessionSlot,
                             ctx.clientOidCounter,
@@ -116,7 +126,7 @@ public final class GatewayRestart {
                     entry == null ? 0 : TimeUnit.MILLISECONDS.toNanos(entry.codTimeoutMs()),
                     slot.getValue()));
         }
-        return new Result(sessionsFile, sessions, logs, loadedByAccount);
+        return new Result(sessionsFile, sessions, logs, loadedByAccount, heldByAccount);
     }
 
     /** @return whether the lane and reader hold the order */

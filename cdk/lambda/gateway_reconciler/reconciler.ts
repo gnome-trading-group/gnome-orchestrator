@@ -137,9 +137,10 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   }
   // A running gateway keeps its release: a new pin or release reaches it at its next start.
   if (running) {
-    if (activity && !activity.expired && UP_STATES.has(activity.state)) return seen('running');
+    const taskId = await runningTask(ecs, names, service);
+    if (activity && !activity.expired && UP_STATES.has(activity.state)) return { ...seen('running'), taskId };
     // Not up: why its last task stopped, for the alert should it stay so.
-    return { ...seen('running'), stoppedReason: await lastStopped(ecs, names, service) };
+    return { ...seen('running'), taskId, stoppedReason: await lastStopped(ecs, names, service) };
   }
   const version = row.orchestrator_version ?? await deps.latestVersion();
   await ensureAddress(deps.ec2(row.region), names, row.gateway_key);
@@ -170,6 +171,13 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
 
 // A gateway's endpoint states in which it is up.
 const UP_STATES = new Set(['READY', 'DEGRADED']);
+
+/** The service's running task, by its id; undefined while none is. */
+async function runningTask(ecs: Client, names: GatewayNames, service: string): Promise<string | undefined> {
+  const listed = await ecs.send(new ListTasksCommand({ cluster: names.cluster, serviceName: service, desiredStatus: 'RUNNING' }));
+  const arn = (listed.taskArns ?? [])[0];
+  return arn ? arn.substring(arn.lastIndexOf('/') + 1) : undefined;
+}
 
 /** Why the service's most recently stopped task stopped, as ECS and its container say; undefined when none has. */
 async function lastStopped(ecs: Client, names: GatewayNames, service: string): Promise<string | undefined> {

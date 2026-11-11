@@ -15,6 +15,7 @@ import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.orchestrator.session.journal.SessionJournal;
+import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.orchestrator.session.lifecycle.SessionHeartbeatAgent;
 import group.gnometrading.orchestrator.session.marketdata.MarketData;
 import group.gnometrading.orchestrator.session.orders.ListingRouter;
@@ -142,6 +143,7 @@ record SessionAgents(
             SharedPriceBuffer priceBuffer,
             PriceSlotRegistry priceSlotRegistry,
             RiskEngine riskEngine,
+            List<? extends OrderGatewayLinkStatus> orderGateways,
             IntFunction<RegistryConnection> registry,
             Logger logger,
             ErrorHandler errorHandler) {
@@ -155,7 +157,8 @@ record SessionAgents(
             }
         }
         watched.addAll(outboundAgents);
-        int bodyCapacity = SessionHeartbeatAgent.bodyCapacity(sessionId, watched, gateways, priceSlotRegistry);
+        int bodyCapacity =
+                SessionHeartbeatAgent.bodyCapacity(sessionId, watched, gateways, orderGateways, priceSlotRegistry);
         GnomeAgentRunner runner = new GnomeAgentRunner(
                 new SessionHeartbeatAgent(
                         sessionId,
@@ -164,6 +167,7 @@ record SessionAgents(
                         logger,
                         watched,
                         gateways,
+                        orderGateways,
                         priceBuffer,
                         priceSlotRegistry,
                         ledgerAgent,

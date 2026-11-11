@@ -1,8 +1,10 @@
 package group.gnometrading.orchestrator.gateway;
 
+import group.gnometrading.gateways.orders.recovery.AccountOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.sm.Listing;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -16,6 +18,9 @@ public final class FakeOrderQuery implements VenueOrderQuery {
     public final Map<String, VenueOrder> orders = new ConcurrentHashMap<>();
     public final List<String> cancelled = new CopyOnWriteArrayList<>();
     public final AtomicInteger lookups = new AtomicInteger();
+    // When the venue says each order was placed, for the account-wide list; 0 when not set.
+    public final Map<String, Long> created = new ConcurrentHashMap<>();
+    public volatile IOException listAllFails;
 
     @Override
     public List<VenueOrder> listOpenOrders(final Listing listing) {
@@ -43,5 +48,21 @@ public final class FakeOrderQuery implements VenueOrderQuery {
                         order.fees(),
                         true));
         return true;
+    }
+
+    @Override
+    public List<AccountOrder> listAllOpenOrders() throws IOException {
+        if (this.listAllFails != null) {
+            throw this.listAllFails;
+        }
+        return this.orders.values().stream()
+                .filter(order -> !order.terminal())
+                .map(order -> new AccountOrder(order, "MARKET", this.created.getOrDefault(order.exchangeOrderId(), 0L)))
+                .toList();
+    }
+
+    @Override
+    public boolean cancel(final AccountOrder order) {
+        return cancel(null, order.order());
     }
 }

@@ -17,6 +17,7 @@ import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.SessionTag;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.session.journal.JournalSource;
+import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.OrderExecutionReport;
@@ -280,6 +281,11 @@ public final class SessionOrders {
      * @throws IllegalStateException if they aren't ready in time: a live session that can't reach its gateway can't
      *     trade
      */
+    /** Each order gateway link, for the heartbeat; none for a paper session. */
+    public List<? extends OrderGatewayLinkStatus> gatewayLinks() {
+        return this.links;
+    }
+
     public void awaitGateways(long timeoutNanos) throws InterruptedException {
         long deadline = System.nanoTime() + timeoutNanos;
         while (!links.stream().allMatch(link -> link.state == GatewayLink.READY)) {

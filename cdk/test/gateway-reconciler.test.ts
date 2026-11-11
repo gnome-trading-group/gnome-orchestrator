@@ -254,7 +254,8 @@ describe('the gateway reconciler', () => {
       [row(KALSHI, 'us-east-1', WANT_WINDOW_MS * 2)], { 'us-east-1': east }, { [KALSHI]: { ...idle, linkedSessions: 2 } }));
 
     expect(outcomes.get(KALSHI)).toBe('running');
-    expect(east.commands()).toEqual(['DescribeServicesCommand']);
+    // Only reads: its running task, to tell a restart nobody asked for from one this reconciler made.
+    expect(east.commands()).toEqual(['DescribeServicesCommand', 'ListTasksCommand']);
   });
 
   it('stops a gateway nobody has wanted for the window and that holds no session or order', async () => {

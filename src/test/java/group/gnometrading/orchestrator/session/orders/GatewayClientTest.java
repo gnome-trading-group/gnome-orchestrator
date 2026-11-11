@@ -61,6 +61,10 @@ class GatewayClientTest {
     private static final int STRATEGY_ID = 3;
     private static final long EPOCH = 99;
 
+    // Where service-endpoints says the gateway is; a test points it elsewhere, as a crashed gateway's stale entry
+    // would.
+    private volatile int resolvedPort = INGRESS_PORT;
+
     private final AeronRuntime sessionAeron =
             AeronRuntime.launch("client-session", AeronProfile.GATEWAY, Throwable::printStackTrace);
     private final AeronRuntime gatewayAeron =
@@ -95,7 +99,7 @@ class GatewayClientTest {
             this.sessionAeron.aeron(),
             "127.0.0.1",
             List.of(this.link),
-            key -> new GatewayLinks.Endpoint("127.0.0.1", INGRESS_PORT),
+            key -> new GatewayLinks.Endpoint("127.0.0.1", this.resolvedPort),
             System::nanoTime);
     private final List<UnsafeBuffer> atGateway = new ArrayList<>();
     private long gatewayHeartbeatSeq;
@@ -263,6 +267,25 @@ class GatewayClientTest {
         assertEquals(GatewayLink.GONE, this.link.state);
         assertSame(saidGoodbyeOn, this.link.publication);
         assertFalse(saidGoodbyeOn.isClosed());
+    }
+
+    @Test
+    void aLinkNothingAnswersOnIsLookedUpAgain() throws Exception {
+        this.resolvedPort = INGRESS_PORT + 1;
+        this.links.run();
+        assertEquals(GatewayLink.CONNECTING, this.link.state);
+
+        await(() -> this.link.state == GatewayLink.DOWN, "the connect timeout");
+        assertTrue(received(SessionHelloDecoder.TEMPLATE_ID).isEmpty());
+
+        this.resolvedPort = INGRESS_PORT;
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (this.link.state != GatewayLink.CONNECTING && System.nanoTime() < deadline) {
+            this.links.run();
+            Thread.sleep(10);
+        }
+        assertEquals(GatewayLink.CONNECTING, this.link.state);
+        await(() -> !received(SessionHelloDecoder.TEMPLATE_ID).isEmpty(), "the hello at the gateway's real address");
     }
 
     @Test

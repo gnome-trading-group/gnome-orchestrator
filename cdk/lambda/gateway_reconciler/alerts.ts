@@ -10,6 +10,8 @@ import type { Activity, Outcome } from './reconciler';
 export const START_STUCK_MS = 6 * 60 * 1000;
 export const DEGRADED_TICKS = 2;
 export const FAILED_TICKS = 3;
+// How long a restart nobody asked for stays raised, for someone to look at what it left.
+export const RESTARTED_HOLD_MS = 15 * 60 * 1000;
 
 /** What one tick saw of one gateway. */
 export interface Observation {
@@ -24,6 +26,8 @@ export interface Observation {
   serviceEvent?: string;
   // Why its most recently stopped task stopped; looked up only while it is running but not up.
   stoppedReason?: string;
+  // Its running task's id, while it runs.
+  taskId?: string;
 }
 
 /** What is kept of a gateway between ticks. */
@@ -34,6 +38,10 @@ export interface GatewayMemory {
   lastInUse?: { linkedSessions: number; workingOrders: number };
   degradedTicks: number;
   failedTicks: number;
+  // The task it runs as; a new one this reconciler didn't start is a restart nobody asked for.
+  taskId?: string;
+  // When such a restart was seen while orders worked, the task it replaced, and why that one stopped once known.
+  restarted?: { atMs: number; fromTask: string; workingOrders: number; reason?: string };
 }
 
 export interface AlertState {
@@ -88,6 +96,15 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
     // A start that waits for the old deployment to drain counts from when it began.
     return { degradedTicks: 0, failedTicks: 0, startingSinceMs: memory.startingSinceMs ?? nowMs };
   }
+  if (seen.taskId !== undefined && memory.taskId !== undefined && seen.taskId !== memory.taskId
+      && (memory.lastInUse?.workingOrders ?? 0) > 0) {
+    memory.restarted = { atMs: nowMs, fromTask: memory.taskId, workingOrders: memory.lastInUse!.workingOrders };
+  }
+  if (memory.restarted && nowMs - memory.restarted.atMs >= RESTARTED_HOLD_MS) memory.restarted = undefined;
+  if (memory.restarted && seen.stoppedReason && !memory.restarted.reason) {
+    memory.restarted = { ...memory.restarted, reason: seen.stoppedReason };
+  }
+  if (seen.taskId !== undefined) memory.taskId = seen.taskId;
   const activity = present(seen.activity);
   if (activity && UP.has(activity.state)) {
     memory.startingSinceMs = undefined;
@@ -133,6 +150,15 @@ function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Ale
       type: 'GATEWAY_DOWN',
       title: `Gateway ${seen.gatewayKey} is gone with ${linkedSessions} session(s) linked and ${workingOrders} order(s) working${why}`,
       labels: labels({ linkedSessions: String(linkedSessions), workingOrders: String(workingOrders) }),
+    });
+  }
+  if (memory.restarted) {
+    const { fromTask, workingOrders, reason: stopped } = memory.restarted;
+    alerts.push({
+      type: 'GATEWAY_RESTARTED',
+      title: `Gateway ${seen.gatewayKey} was replaced without being asked to, with ${workingOrders} order(s) working`
+        + (stopped ? `: ${stopped}` : ''),
+      labels: labels({ fromTask, workingOrders: String(workingOrders), ...(stopped ? { stoppedReason: stopped } : {}) }),
     });
   }
   if (memory.degradedTicks >= DEGRADED_TICKS) {

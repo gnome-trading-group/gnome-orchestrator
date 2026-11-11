@@ -7,6 +7,7 @@ import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.gateway.OrderState;
 import java.util.function.Consumer;
+import org.agrona.collections.Int2IntCounterMap;
 import org.agrona.collections.Long2ObjectHashMap;
 
 /**
@@ -59,6 +60,7 @@ final class GatewayOrders {
     }
 
     private final Long2ObjectHashMap<Entry> open;
+    private final Int2IntCounterMap openByExchange = new Int2IntCounterMap(0);
     private final Entry[] pool;
     private int free;
 
@@ -94,6 +96,7 @@ final class GatewayOrders {
         entry.size = size;
         entry.state = OrderState.PENDING_NEW;
         this.open.put(counter, entry);
+        this.openByExchange.incrementAndGet(exchangeId);
         return true;
     }
 
@@ -162,7 +165,13 @@ final class GatewayOrders {
 
     void release(final Entry entry) {
         this.open.remove(entry.counter);
+        this.openByExchange.decrementAndGet(entry.exchangeId);
         this.pool[this.free++] = entry;
+    }
+
+    /** Open orders on the venue's exchange. */
+    int openOn(final int exchangeId) {
+        return this.openByExchange.get(exchangeId);
     }
 
     int size() {

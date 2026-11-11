@@ -36,6 +36,8 @@ import org.agrona.concurrent.EpochClock;
  *   <li>the ledger's last stored write, failures since, and whether it was fenced;
  *   <li>each gateway's reader, whether it is held off its socket while reconnecting, and how often its book was found
  *       wrong and resynced in the last five minutes;
+ *   <li>a live session's link to each venue's order gateway: whether it is linked, how long it hasn't been, and how
+ *       many of its orders work on that venue meanwhile;
  *   <li>whether risk can be trusted: stale (the registry unreachable), unguarded (a required policy missing), policies
  *       that couldn't be built, and halts the OMS couldn't record;
  *   <li>the host's CPU, memory and disk, and this process's memory;
@@ -60,6 +62,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             "{\"listingId\":,\"priceUnchangedMs\":,\"marketDataBadMs\":},".length() + 3 * MAX_NUMBER_BYTES;
     private static final int GATEWAY_ENTRY_BYTES =
             "{\"name\":\"\",\"reconnecting\":false,\"resyncsLast5m\":},".length() + MAX_NUMBER_BYTES;
+    private static final int ORDER_GATEWAY_ENTRY_BYTES =
+            "{\"key\":\"\",\"linked\":false,\"unlinkedMs\":,\"workingOrders\":},".length() + 2 * MAX_NUMBER_BYTES;
     private static final long MAX_PARK_MS = 100;
     private static final int HTTP_OK = 200;
     private static final int HTTP_NOT_FOUND = 404;
@@ -90,6 +94,10 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private final long[][] resyncHistory;
     private int resyncSlot;
 
+    private final OrderGatewayLinkStatus[] orderGateways;
+    // When each link was last seen unlinked after being linked (or since start); 0 while linked.
+    private final long[] unlinkedSinceMs;
+
     private final RiskEngine riskEngine;
 
     private final LedgerAgent ledger;
@@ -114,6 +122,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final Logger logger,
             final List<GnomeAgentRunner> agents,
             final List<GatewayHealth> gateways,
+            final List<? extends OrderGatewayLinkStatus> orderGateways,
             final SharedPriceBuffer prices,
             final PriceSlotRegistry priceSlots,
             final LedgerAgent ledger,
@@ -147,13 +156,15 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         for (int i = 0; i < this.gateways.length; i++) {
             this.gatewayNames[i] = this.gateways[i].name();
         }
+        this.orderGateways = orderGateways.toArray(new OrderGatewayLinkStatus[0]);
+        this.unlinkedSinceMs = new long[this.orderGateways.length];
         this.resyncHistory = new long[this.gateways.length][(int) Math.max(1, RESYNC_WINDOW_MS / postIntervalMs)];
         this.ledger = ledger;
         this.ledgerRing = ledgerRing;
         this.riskEngine = riskEngine;
         this.host = host;
         this.journal = journal;
-        this.body = ByteBuffer.allocate(bodyCapacity(sessionId, agents, gateways, priceSlots));
+        this.body = ByteBuffer.allocate(bodyCapacity(sessionId, agents, gateways, orderGateways, priceSlots));
     }
 
     /**
@@ -164,8 +175,12 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final String sessionId,
             final List<GnomeAgentRunner> agents,
             final List<GatewayHealth> gateways,
+            final List<? extends OrderGatewayLinkStatus> orderGateways,
             final PriceSlotRegistry priceSlots) {
         int capacity = FIXED_SECTIONS_BYTES + escapedBytes(sessionId);
+        for (OrderGatewayLinkStatus link : orderGateways) {
+            capacity += ORDER_GATEWAY_ENTRY_BYTES + escapedBytes(link.gatewayKey());
+        }
         for (GnomeAgentRunner agent : agents) {
             capacity += AGENT_ENTRY_BYTES + escapedBytes(agent.getAgent().roleName());
         }
@@ -192,6 +207,9 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         for (int slot = 0; slot < lastPriceVersions.length; slot++) {
             lastPriceVersions[slot] = prices.slotVersion(slot);
             priceChangedAtMs[slot] = now;
+        }
+        for (int i = 0; i < orderGateways.length; i++) {
+            unlinkedSinceMs[i] = orderGateways[i].linked() ? 0 : now;
         }
         nextSampleMs = now + sampleIntervalMs;
         nextPostMs = now;
@@ -241,6 +259,13 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                 priceChangedAtMs[slot] = now;
             }
         }
+        for (int i = 0; i < orderGateways.length; i++) {
+            if (orderGateways[i].linked()) {
+                unlinkedSinceMs[i] = 0;
+            } else if (unlinkedSinceMs[i] == 0) {
+                unlinkedSinceMs[i] = now;
+            }
+        }
     }
 
     private void post(final long now) {
@@ -278,6 +303,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         writeLedger(now);
         json.writeComma();
         writeGateways();
+        json.writeComma();
+        writeOrderGateways(now);
         json.writeComma();
         writeRisk(now);
         json.writeComma();
@@ -350,6 +377,26 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                     .writeObjectEntry("stalledMs", now - advancedAtMs[i])
                     .writeComma()
                     .writeObjectEntry("exited", agents[i].isClosed())
+                    .writeObjectEnd();
+        }
+        json.writeArrayEnd();
+    }
+
+    private void writeOrderGateways(final long now) {
+        json.writeString("orderGateways").writeColon().writeArrayStart();
+        for (int i = 0; i < orderGateways.length; i++) {
+            if (i > 0) {
+                json.writeComma();
+            }
+            final boolean linked = orderGateways[i].linked();
+            json.writeObjectStart()
+                    .writeObjectEntry("key", orderGateways[i].gatewayKey())
+                    .writeComma()
+                    .writeObjectEntry("linked", linked)
+                    .writeComma()
+                    .writeObjectEntry("unlinkedMs", linked || unlinkedSinceMs[i] == 0 ? 0 : now - unlinkedSinceMs[i])
+                    .writeComma()
+                    .writeObjectEntry("workingOrders", orderGateways[i].workingOrders())
                     .writeObjectEnd();
         }
         json.writeArrayEnd();

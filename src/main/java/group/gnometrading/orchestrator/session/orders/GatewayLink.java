@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.session.orders;
 
 import group.gnometrading.orchestrator.aeron.PendingMessages;
+import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.schemas.gateway.HelloRefusal;
 import io.aeron.Publication;
 import io.aeron.Subscription;
@@ -12,7 +13,7 @@ import java.util.List;
  * does everything else: says hello once the publication connects, waits for the welcome, trades, and takes the link down
  * when the gateway goes quiet, refuses it, or asks for a new hello.
  */
-public final class GatewayLink {
+public final class GatewayLink implements OrderGatewayLinkStatus {
 
     /** No publication, or one the client gave up on: the control thread opens it again. */
     static final int DOWN = 0;
@@ -43,6 +44,12 @@ public final class GatewayLink {
     // Why the last hello was refused, for the control thread to report; NONE otherwise.
     volatile HelloRefusal refusal = HelloRefusal.NONE;
     volatile long gatewayHeardNanos;
+    // When the control thread opened the publication, so the client can give up on an address nothing answers on.
+    volatile long connectingSinceNanos;
+    // Set by the client when it gave up on that address, for the control thread to report.
+    volatile boolean connectTimedOut;
+    // The client's open orders on this venue, published when it changes, for the heartbeat.
+    volatile int workingOrders;
 
     // The client's: where its hello stands, the gateway's numbering, and cancels held until the link is ready.
     int helloPage;
@@ -64,5 +71,20 @@ public final class GatewayLink {
         this.venueAccountId = venueAccountId;
         this.listings = List.copyOf(listings);
         this.pending = new PendingMessages(pendingCapacity, 128);
+    }
+
+    @Override
+    public String gatewayKey() {
+        return this.gatewayKey;
+    }
+
+    @Override
+    public boolean linked() {
+        return this.state == READY;
+    }
+
+    @Override
+    public int workingOrders() {
+        return this.workingOrders;
     }
 }

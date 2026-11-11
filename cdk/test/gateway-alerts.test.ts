@@ -1,4 +1,6 @@
-import { AlertState, EMPTY_STATE, evaluate, Observation, START_STUCK_MS } from '../lambda/gateway_reconciler/alerts';
+import {
+  AlertState, EMPTY_STATE, evaluate, Observation, RESTARTED_HOLD_MS, START_STUCK_MS,
+} from '../lambda/gateway_reconciler/alerts';
 import { Activity, Outcome } from '../lambda/gateway_reconciler/reconciler';
 
 const KEY = 'live:kalshi:main';
@@ -102,6 +104,48 @@ describe('a gateway going away', () => {
     expect(types[2]).toEqual([]);
     expect(types[1 + minutes]).toEqual(['GATEWAY_START_STUCK']);
     expect(types[2 + minutes]).toEqual([]);
+  });
+});
+
+describe('a gateway replaced without being asked', () => {
+  const on = (task: string, activity: Activity | null, stoppedReason?: string): Observation =>
+    ({ ...seen('running', activity), taskId: task, stoppedReason });
+
+  it('is restarted when a new task appears while orders worked, saying why the old one stopped, for a while', () => {
+    const hold = RESTARTED_HOLD_MS / MINUTE;
+    const observations = [
+      on('task-a', ready(1, 2)),
+      on('task-b', starting, 'Essential container in task exited, exit code 137'),
+      ...Array.from({ length: hold - 1 }, () => on('task-b', ready(1, 0))),
+      on('task-b', ready(1, 0)),
+    ];
+    const types = ticks(observations);
+    expect(types[0]).toEqual([]);
+    expect(types[1]).toContain('GATEWAY_RESTARTED');
+    expect(types[hold]).toContain('GATEWAY_RESTARTED');
+    expect(types[hold + 1]).not.toContain('GATEWAY_RESTARTED');
+
+    let state: AlertState = EMPTY_STATE;
+    let alert;
+    for (const [i, observation] of observations.slice(0, 2).entries()) {
+      const result = evaluate([observation], state, T0 + i * MINUTE);
+      state = result.state;
+      alert = result.firing.get(`GATEWAY_RESTARTED:${KEY}`);
+    }
+    expect(alert?.title).toContain('exit code 137');
+    expect(alert?.labels).toMatchObject({ fromTask: 'task-a', workingOrders: '2' });
+  });
+
+  it('is nothing to raise when no order was working', () => {
+    expect(ticks([on('task-a', ready(1, 0)), on('task-b', ready(1, 0))]).flat()).not.toContain('GATEWAY_RESTARTED');
+  });
+
+  it('is no restart when the reconciler started the new task itself', () => {
+    expect(ticks([
+      on('task-a', ready(1, 2)),
+      seen('started', ready(1, 2)),
+      on('task-b', ready(1, 0)),
+    ]).flat()).not.toContain('GATEWAY_RESTARTED');
   });
 });
 

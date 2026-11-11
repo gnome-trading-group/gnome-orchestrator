@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import group.gnometrading.gateways.orders.recovery.AccountOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.orchestrator.runtime.BoundedCalls;
@@ -48,6 +49,16 @@ class BoundedOrderQueryTest {
 
         @Override
         public boolean cancel(final Listing listing, final VenueOrder order) throws IOException {
+            throw new IOException("venue refused");
+        }
+
+        @Override
+        public List<AccountOrder> listAllOpenOrders() {
+            return List.of();
+        }
+
+        @Override
+        public boolean cancel(final AccountOrder order) throws IOException {
             throw new IOException("venue refused");
         }
 

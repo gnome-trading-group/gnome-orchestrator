@@ -1,5 +1,6 @@
 package group.gnometrading.orchestrator.gateway.accounts;
 
+import group.gnometrading.gateways.orders.recovery.AccountOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.orchestrator.runtime.BoundedCalls;
@@ -43,8 +44,18 @@ public final class BoundedOrderQuery implements VenueOrderQuery {
     }
 
     @Override
+    public List<AccountOrder> listAllOpenOrders() throws IOException {
+        return bounded(this.venue::listAllOpenOrders);
+    }
+
+    @Override
     public boolean cancel(final Listing listing, final VenueOrder order) throws IOException {
         return bounded(() -> this.venue.cancel(listing, order));
+    }
+
+    @Override
+    public boolean cancel(final AccountOrder order) throws IOException {
+        return bounded(() -> this.venue.cancel(order));
     }
 
     private <T> T bounded(final Callable<T> call) throws IOException {

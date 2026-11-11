@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
+import group.gnometrading.gateways.orders.recovery.AccountOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.NullLogger;
@@ -358,6 +359,16 @@ class StartupRecoveryTest {
         public boolean cancel(final Listing listing, final VenueOrder order) {
             cancelled.add(order.exchangeOrderId());
             return true;
+        }
+
+        @Override
+        public List<AccountOrder> listAllOpenOrders() {
+            throw new UnsupportedOperationException("startup recovery asks per listing");
+        }
+
+        @Override
+        public boolean cancel(final AccountOrder order) {
+            throw new UnsupportedOperationException("startup recovery asks per listing");
         }
     }
 }

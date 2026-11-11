@@ -293,6 +293,7 @@ public class SessionOrchestrator extends Orchestrator {
                     priceBuffer,
                     priceSlotRegistry,
                     riskEngine,
+                    this.orders == null ? List.of() : this.orders.gatewayLinks(),
                     bodyBytes -> registryWriterConnection(registryWriterClient().withWriteBufferSize(bodyBytes)),
                     logger,
                     errorHandler);
