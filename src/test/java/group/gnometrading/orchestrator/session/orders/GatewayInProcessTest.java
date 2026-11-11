@@ -328,6 +328,25 @@ class GatewayInProcessTest {
     }
 
     @Test
+    void aSessionThatClosesSaysGoodbyeAndIsUnlinkedBeforeItsSilenceCounts() throws Exception {
+        this.first.order(1);
+        await(() -> posts() == 1, "the order at the venue");
+        this.venue.transport().push("ACK s42-1");
+        await(() -> this.first.reports().size() == 1, "resting");
+
+        final long closed = System.nanoTime();
+        this.first.close();
+        await(() -> !this.gateway.linked(42) && deletes().size() == 1, "the session unlinked and its order cancelled");
+        assertTrue(
+                System.nanoTime() - closed < TimeUnit.SECONDS.toNanos(2),
+                "well inside the session's 5 s cancel-on-disconnect, so it was the goodbye");
+        assertTrue(this.gateway.linked(43), "the other session is untouched");
+
+        this.first = new TestSession("session-a", 42, 3);
+        await(this.first::ready, "the same slot welcomed again");
+    }
+
+    @Test
     void aStartingSessionAsksTheVenueThroughTheGatewayWithNoKeyOfItsOwn() throws Exception {
         final VenueOrder resting = new VenueOrder("x-1", "v-x-1", UNIT, 400_000_000L, 7, false);
         final VenueOrder ended = new VenueOrder("x-2", "v-x-2", 3 * UNIT, 1_200_000_000L, 9, true);

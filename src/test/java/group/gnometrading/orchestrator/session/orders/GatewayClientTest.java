@@ -22,6 +22,7 @@ import group.gnometrading.schemas.SbeMessage;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.GatewayState;
+import group.gnometrading.schemas.gateway.GoodbyeReason;
 import group.gnometrading.schemas.gateway.HelloRefusal;
 import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
@@ -29,6 +30,7 @@ import group.gnometrading.schemas.gateway.OrderState;
 import group.gnometrading.schemas.gateway.OrderStatusEncoder;
 import group.gnometrading.schemas.gateway.ReHelloReason;
 import group.gnometrading.schemas.gateway.ReHelloRequiredEncoder;
+import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersDecoder;
@@ -226,6 +228,43 @@ class GatewayClientTest {
                 "an echo of the gateway's latest heartbeat");
     }
 
+    @Test
+    void closingSaysGoodbyeAfterWhatIsStillHeld() throws Exception {
+        connectAndWelcome();
+        final CancelOrder held = new CancelOrder();
+        held.encoder.exchangeId(EXCHANGE_ID).securityId(SECURITY_ID);
+        held.encodeClientOid(5, STRATEGY_ID);
+        this.link.pending.offer(held.buffer, 0, held.totalMessageSize());
+        this.atGateway.clear();
+
+        this.client.onClose();
+
+        awaitAtGateway(() -> !received(SessionGoodbyeDecoder.TEMPLATE_ID).isEmpty(), "the goodbye");
+        final List<Integer> order = this.atGateway.stream()
+                .map(message -> SbeMessage.templateId(message, 0))
+                .filter(id -> id == CancelOrderDecoder.TEMPLATE_ID || id == SessionGoodbyeDecoder.TEMPLATE_ID)
+                .toList();
+        assertEquals(List.of(CancelOrderDecoder.TEMPLATE_ID, SessionGoodbyeDecoder.TEMPLATE_ID), order);
+        final SessionGoodbyeDecoder goodbye =
+                decode(received(SessionGoodbyeDecoder.TEMPLATE_ID).get(0), new SessionGoodbyeDecoder());
+        assertEquals(SLOT, goodbye.sessionSeq());
+        assertEquals(GoodbyeReason.SESSION_EXIT, goodbye.reason());
+    }
+
+    @Test
+    void aLinkNotReadyGetsNoGoodbye() throws Exception {
+        connect();
+        sendToSession(welcome(false, HelloRefusal.SESSION_NOT_RUNNING), 0);
+        await(() -> this.link.state == GatewayLink.DOWN, "the refusal");
+        this.atGateway.clear();
+
+        this.client.onClose();
+
+        final long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(200);
+        awaitAtGateway(() -> System.nanoTime() > until, "a quiet while");
+        assertTrue(received(SessionGoodbyeDecoder.TEMPLATE_ID).isEmpty());
+    }
+
     // ----- the gateway's side -----
 
     private void connect() throws InterruptedException {
@@ -384,6 +423,24 @@ class GatewayClientTest {
             throw new IllegalStateException(e);
         }
         return decoder;
+    }
+
+    /** Reads what reaches the gateway without running the client, as after its close. */
+    private void awaitAtGateway(final BooleanSupplier condition, final String what) throws InterruptedException {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("timed out waiting for " + what);
+            }
+            this.ingress.poll(
+                    (buffer, offset, length, header) -> {
+                        final UnsafeBuffer copy = new UnsafeBuffer(new byte[length]);
+                        copy.putBytes(0, buffer, offset, length);
+                        this.atGateway.add(copy);
+                    },
+                    64);
+            Thread.sleep(1);
+        }
     }
 
     private void await(final BooleanSupplier condition, final String what) throws InterruptedException {

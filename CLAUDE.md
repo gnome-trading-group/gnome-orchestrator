@@ -78,7 +78,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   `OrderStatus` becomes the reports the OMS lacks. The client starts, and every link is welcomed (within
   `order.gateway.start.timeout.seconds`), before startup recovery, which asks the venue through it
   (`GatewayVenueOrderQuery`: `VenueQuery` for open orders and lookups, `CancelEnded` to cancel what an ended session
-  of the strategy left; a query a dropped link lost is sent again). The slot is the registry's `session_seq`. The
+  of the strategy left; a query a dropped link lost is sent again). On close the client sends each ready link what it
+  still holds, then a `SessionGoodbye` (`SESSION_EXIT`), so the gateway cancels and unlinks the session at once
+  instead of after its silence (a goodbye not taken within 100 ms is left to that). The slot is the registry's `session_seq`. The
   session's `AeronRuntime` is launched by `SessionOrchestrator` (shared by market data and the links) and closed
   last.
 - `session/recovery/`: `StartupRecovery`.

@@ -792,11 +792,12 @@ public final class GatewayControl implements GnomeAgent {
         if (this.goodbye.sessionSeq() != session.slot) {
             return;
         }
+        final GoodbyeReason reason = this.goodbye.reason();
         // The session says it has nothing working; cancelling anyway costs nothing if that's so.
         cancelAll(session);
         unlink(session);
         session.account.markets().removeSession(session.slot);
-        this.logger.logf(LogMessage.DEBUG, "Gateway: session %s said goodbye", session.sessionId);
+        this.logger.logf(LogMessage.DEBUG, "Gateway: session %s said goodbye (%s)", session.sessionId, reason);
     }
 
     // ----- liveness -----

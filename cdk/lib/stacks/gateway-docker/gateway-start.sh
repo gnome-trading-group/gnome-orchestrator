@@ -21,13 +21,26 @@ unset GH_TOKEN raw
 
 # The gateway's Elastic IP (allocated by gateways/ensure, tagged with its key) follows it to whichever host it runs on:
 # a venue may count its limit per IP, and an allowlist would name it.
-imds_token=$(curl -fsSX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+imds_token=$(curl -fsSX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
 instance=$(curl -fsSH "X-aws-ec2-metadata-token: ${imds_token}" http://169.254.169.254/latest/meta-data/instance-id)
-allocation=$(aws ec2 describe-addresses --filters "Name=tag:gnome:order-gateway,Values=${GATEWAY_KEY}" \
-  --query 'Addresses[0].AllocationId' --output text)
+found=$(aws ec2 describe-addresses --filters "Name=tag:gnome:order-gateway,Values=${GATEWAY_KEY}" \
+  --query 'Addresses[0].[AllocationId,PublicIp]' --output text)
+read -r allocation address <<< "$found"
 if [ -n "$allocation" ] && [ "$allocation" != "None" ]; then
   aws ec2 associate-address --allocation-id "$allocation" --instance-id "$instance" --allow-reassociation >/dev/null
-  echo "gateway-start: ${GATEWAY_KEY} on Elastic IP ${allocation}"
+  # The association returns before the host's traffic moves to the new address, and a connection opened while it
+  # moves can go unanswered, so the gateway waits until the metadata names it.
+  for _ in $(seq 1 30); do
+    current=$(curl -fsH "X-aws-ec2-metadata-token: ${imds_token}" \
+      http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+    [ "$current" = "$address" ] && break
+    sleep 1
+  done
+  if [ "$current" = "$address" ]; then
+    echo "gateway-start: ${GATEWAY_KEY} on Elastic IP ${allocation} (${address})"
+  else
+    echo "gateway-start: ${GATEWAY_KEY} attached Elastic IP ${allocation} (${address}), but the host still shows ${current:-no public address} after 30 s; starting anyway"
+  fi
 else
   echo "gateway-start: ${GATEWAY_KEY} has no Elastic IP; trading from the host's own address"
 fi

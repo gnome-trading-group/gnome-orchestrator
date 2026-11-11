@@ -23,6 +23,7 @@ import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.gateway.CancelEndedEncoder;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatDecoder;
 import group.gnometrading.schemas.gateway.GatewayMessageLimits;
+import group.gnometrading.schemas.gateway.GoodbyeReason;
 import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
 import group.gnometrading.schemas.gateway.Mode;
@@ -31,6 +32,7 @@ import group.gnometrading.schemas.gateway.OrderStatusDecoder;
 import group.gnometrading.schemas.gateway.QueryStatus;
 import group.gnometrading.schemas.gateway.ReHelloRequiredDecoder;
 import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
+import group.gnometrading.schemas.gateway.SessionGoodbyeEncoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersEncoder;
@@ -80,6 +82,8 @@ public final class GatewayClient implements AeronPathAgent {
     static final long HEARTBEAT_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
     static final long GATEWAY_SILENCE_NANOS = TimeUnit.SECONDS.toNanos(1);
     static final long WELCOME_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
+    // Past this the goodbye is left to the gateway's silence timeout, which cancels and unlinks the same way.
+    static final long GOODBYE_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
     private static final int FRAGMENT_LIMIT = 64;
     private static final long SIZE_SCALE = 1_000_000L;
     private static final int MAX_MESSAGE = 1024;
@@ -134,6 +138,7 @@ public final class GatewayClient implements AeronPathAgent {
     private final SessionHelloEncoder hello = new SessionHelloEncoder();
     private final SessionHelloOrdersEncoder helloOrders = new SessionHelloOrdersEncoder();
     private final SessionHeartbeatEncoder heartbeat = new SessionHeartbeatEncoder();
+    private final SessionGoodbyeEncoder goodbye = new SessionGoodbyeEncoder();
     private final UnsafeBuffer scratch = new UnsafeBuffer(new byte[MAX_MESSAGE]);
     private final VenueQueryEncoder venueQuery = new VenueQueryEncoder();
     private final CancelEndedEncoder cancelEnded = new CancelEndedEncoder();
@@ -188,6 +193,38 @@ public final class GatewayClient implements AeronPathAgent {
         }
         work += this.omsOrders.poll();
         return work;
+    }
+
+    /**
+     * Tells each gateway the session is leaving, after whatever is still held for it, so the gateway unlinks it at
+     * once (cancelling anything still working) instead of after the session's silence. Only a ready link is told: a
+     * gateway the session isn't linked to has nothing to unlink.
+     */
+    @Override
+    public void onClose() {
+        final long deadline = this.nanoClock.getAsLong() + GOODBYE_TIMEOUT_NANOS;
+        for (final GatewayLink link : this.links) {
+            if (link.state == GatewayLink.READY && link.publication != null) {
+                sayGoodbye(link, deadline);
+            }
+        }
+    }
+
+    private void sayGoodbye(final GatewayLink link, final long deadline) {
+        final int length = MessageHeaderEncoder.ENCODED_LENGTH
+                + this.goodbye
+                        .wrapAndApplyHeader(this.scratch, 0, this.headerEncoder)
+                        .sessionSeq(this.identity.sessionSeq())
+                        .reason(GoodbyeReason.SESSION_EXIT)
+                        .encodedLength();
+        while (this.nanoClock.getAsLong() - deadline <= 0) {
+            flush(link);
+            if (link.pending.isEmpty() && link.publication.offer(this.scratch, 0, length) > 0) {
+                link.state = GatewayLink.DOWN;
+                return;
+            }
+            Thread.onSpinWait();
+        }
     }
 
     /**
