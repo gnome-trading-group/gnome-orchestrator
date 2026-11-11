@@ -3,7 +3,7 @@
 # module access it needs.
 FROM eclipse-temurin:17-jre-noble
 
-# wget is not used by the start script: the ECS container health check runs it.
+# wget asks the gateway's /health: the start script every 5 s, and the ECS container health check behind it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl wget jq unzip ca-certificates \
     && curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip \

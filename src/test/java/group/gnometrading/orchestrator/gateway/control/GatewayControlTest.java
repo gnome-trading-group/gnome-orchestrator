@@ -583,6 +583,11 @@ class GatewayControlTest {
                 new long[] {1, 2},
                 this.advertisedActivity.get(stopping),
                 "in use as it stopped: one session linked, two orders working");
+        assertEquals(GatewayState.STOPPING, this.advertised.get(this.advertised.size() - 1));
+        assertArrayEquals(
+                new long[] {0, 0},
+                this.advertisedActivity.get(this.advertisedActivity.size() - 1),
+                "written last, what it left: no session linked, nothing working");
     }
 
     @Test

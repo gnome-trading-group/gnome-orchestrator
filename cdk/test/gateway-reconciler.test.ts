@@ -18,11 +18,22 @@ class FakeRegion {
   revisions = new Map<string, any[]>();
   sent: { command: string; input: any }[] = [];
   stoppedTasks: { taskArn: string; stoppedAt: string; stoppedReason: string; containers: { exitCode?: number }[] }[] = [];
+  // The capacity provider's Auto Scaling group.
+  hosts = { DesiredCapacity: 0, MaxSize: 4 };
+  hostsFail = false;
 
   ecs = {
     send: async (command: any) => {
       const name = command.constructor.name;
       this.sent.push({ command: name, input: command.input });
+      if (name === 'DescribeCapacityProvidersCommand') {
+        return { capacityProviders: [{ autoScalingGroupProvider: {
+          autoScalingGroupArn: 'arn:aws:autoscaling:us-east-1:1:autoScalingGroup:uuid:autoScalingGroupName/GatewayHostsASG',
+        } }] };
+      }
+      if (name === 'ListServicesCommand') {
+        return { serviceArns: this.services.map((s) => `arn:aws:ecs:us-east-1:1:service/${CLUSTER}/${s.serviceName}`) };
+      }
       if (name === 'DescribeServicesCommand') {
         return { services: this.services.filter((s) => command.input.services.includes(s.serviceName)) };
       }
@@ -82,6 +93,22 @@ class FakeRegion {
     },
   };
 
+  autoscaling = {
+    send: async (command: any) => {
+      const name = command.constructor.name;
+      this.sent.push({ command: name, input: command.input });
+      if (this.hostsFail) throw new Error('throttled');
+      if (name === 'DescribeAutoScalingGroupsCommand') {
+        return { AutoScalingGroups: [{ AutoScalingGroupName: command.input.AutoScalingGroupNames[0], ...this.hosts }] };
+      }
+      if (name === 'SetDesiredCapacityCommand') {
+        this.hosts.DesiredCapacity = command.input.DesiredCapacity;
+        return {};
+      }
+      throw new Error(`unexpected ${name}`);
+    },
+  };
+
   /** Every service's old deployments gone, as once ECS has drained them. */
   drain() {
     for (const service of this.services) service.deployments = [{ taskDefinition: service.taskDefinition }];
@@ -123,6 +150,7 @@ function deps(rows: GatewayRow[], regions: Record<string, FakeRegion>, activity:
     alertsApiUrl: async () => 'https://alerts.example/',
     ecs: (region) => regions[region].ecs,
     ec2: (region) => regions[region].ec2,
+    autoscaling: (region) => regions[region].autoscaling,
     nowMs: () => NOW,
   };
 }
@@ -297,5 +325,71 @@ describe('the gateway reconciler', () => {
 
     expect(outcomes.has('live:somewhere:main')).toBe(false);
     expect(outcomes.get(KALSHI)).toBe('created');
+  });
+});
+
+describe('the gateway reconciler\'s hosts', () => {
+  const sets = (region: FakeRegion) => region.sent.filter((s) => s.command === 'SetDesiredCapacityCommand').map((s) => s.input);
+
+  it('asks for a host at once when it starts a gateway in a region that has none', async () => {
+    const west = new FakeRegion();
+
+    expect((await reconcile(deps([row(INTL, 'eu-west-1', 5_000)], { 'eu-west-1': west }))).get(INTL)).toBe('created');
+
+    expect(sets(west)).toEqual([{ AutoScalingGroupName: 'GatewayHostsASG', DesiredCapacity: 1, HonorCooldown: false }]);
+  });
+
+  it('asks for one host per gateway set to run, the same when a stopped one starts again', async () => {
+    const east = new FakeRegion();
+    east.services.push({ serviceName: serviceName('live:polymarket_us:main'), status: 'ACTIVE', desiredCount: 1 });
+    east.hosts.DesiredCapacity = 1;
+
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east }));
+    expect(east.hosts.DesiredCapacity).toBe(2);
+
+    east.drain();
+    east.services.find((s) => s.serviceName === serviceName(KALSHI))!.desiredCount = 0;
+    east.hosts.DesiredCapacity = 1;
+    east.sent = [];
+    expect((await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east }))).get(KALSHI)).toBe('started');
+    expect(sets(east)).toEqual([{ AutoScalingGroupName: 'GatewayHostsASG', DesiredCapacity: 2, HonorCooldown: false }]);
+  });
+
+  it('leaves more hosts than it needs alone, and never asks past the group\'s maximum', async () => {
+    const roomy = new FakeRegion();
+    roomy.hosts.DesiredCapacity = 3;
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': roomy }));
+    expect(sets(roomy)).toEqual([]);
+    expect(roomy.hosts.DesiredCapacity).toBe(3);
+
+    const full = new FakeRegion();
+    full.hosts = { DesiredCapacity: 0, MaxSize: 0 };
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': full }));
+    expect(sets(full)).toEqual([]);
+  });
+
+  it('asks for nothing for a gateway it leaves running or stops', async () => {
+    const east = new FakeRegion();
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east }));
+    east.sent = [];
+
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east }, { [KALSHI]: idle }));
+    await reconcile(deps([row(KALSHI, 'us-east-1', WANT_WINDOW_MS + 1)], { 'us-east-1': east }, { [KALSHI]: idle }));
+
+    expect(east.commands()).not.toContain('DescribeAutoScalingGroupsCommand');
+    expect(east.commands()).not.toContain('SetDesiredCapacityCommand');
+  });
+
+  it('still starts the gateway when the hosts can\'t be raised, leaving them to managed scaling', async () => {
+    const east = new FakeRegion();
+    east.hostsFail = true;
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const outcomes = await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east }));
+
+    expect(outcomes.get(KALSHI)).toBe('created');
+    expect(east.services[0].desiredCount).toBe(1);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining('couldn\'t raise them'), expect.any(Error));
+    errors.mockRestore();
   });
 });

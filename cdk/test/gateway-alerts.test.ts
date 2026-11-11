@@ -82,6 +82,39 @@ describe('a gateway going away', () => {
       .toMatchObject({ gateway: KEY, exchange: 'kalshi', linkedSessions: '1', workingOrders: '2' });
   });
 
+  it('only warns when it stopped on its own but its planned stop cancelled everything first', () => {
+    const stopping = (workingOrders: number): Activity => ({ state: 'STOPPING', linkedSessions: 0, workingOrders });
+    const up = evaluate([seen('running', ready(1, 2))], EMPTY_STATE, T0);
+    const cancelling = evaluate([seen('running', stopping(2))], up.state, T0 + 10_000);
+    const done = evaluate([seen('running', stopping(0))], cancelling.state, T0 + 20_000);
+    const gone = evaluate([seen('running', null)], done.state, T0 + MINUTE);
+
+    expect([cancelling, done].map((tick) => tick.firing.size)).toEqual([0, 0]);
+    const down = gone.firing.get(`GATEWAY_DOWN:${KEY}`);
+    expect(down?.labels).toMatchObject({ linkedSessions: '1', workingOrders: '0', cleanStop: 'true' });
+    expect(down?.title).toContain('its planned stop cancelled every order');
+  });
+
+  it('is down with the orders it last said it held when its planned stop didn\'t finish', () => {
+    const stopping: Activity = { state: 'STOPPING', linkedSessions: 1, workingOrders: 1 };
+    const types = ticks([seen('running', ready(1, 2)), seen('running', stopping), seen('running', null)]);
+    expect(types).toEqual([[], [], ['GATEWAY_DOWN']]);
+    const up = evaluate([seen('running', ready(1, 2))], EMPTY_STATE, T0);
+    const partway = evaluate([seen('running', stopping)], up.state, T0 + MINUTE);
+    const gone = evaluate([seen('running', null)], partway.state, T0 + 2 * MINUTE);
+    expect(gone.firing.get(`GATEWAY_DOWN:${KEY}`)?.labels).toMatchObject({ workingOrders: '1' });
+    expect(gone.firing.get(`GATEWAY_DOWN:${KEY}`)?.labels?.cleanStop).toBeUndefined();
+  });
+
+  it('forgets a stop once it is up again', () => {
+    const stopped: Activity = { state: 'STOPPING', linkedSessions: 0, workingOrders: 0 };
+    const up = evaluate([seen('running', ready(1, 2))], EMPTY_STATE, T0);
+    const stop = evaluate([seen('running', stopped)], up.state, T0 + MINUTE);
+    const back = evaluate([seen('running', ready(1, 3))], stop.state, T0 + 2 * MINUTE);
+    const gone = evaluate([seen('running', null)], back.state, T0 + 3 * MINUTE);
+    expect(gone.firing.get(`GATEWAY_DOWN:${KEY}`)?.labels).toMatchObject({ workingOrders: '3' });
+  });
+
   it('is no outage when it was stopped as asked', () => {
     expect(ticks([seen('running', ready(1, 2)), seen('stopped', null), seen('stopped already', null)]))
       .toEqual([[], [], []]);

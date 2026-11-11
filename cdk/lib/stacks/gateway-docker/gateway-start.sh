@@ -6,6 +6,9 @@ set -euo pipefail
 : "${ORCHESTRATOR_VERSION:?ORCHESTRATOR_VERSION must be set in the gateway's task definition}"
 
 APP_JAR=/opt/gnome/app.jar
+# How often the JVM's /health is asked, and how long without an answer means it is frozen.
+HEALTH_INTERVAL_SECONDS=5
+HEALTH_SILENCE_SECONDS=15
 
 secret() {
   aws secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text 2>/dev/null \
@@ -47,4 +50,41 @@ fi
 
 # ZGC collects concurrently, so a collection doesn't stop the lanes and readers the way a G1 pause does.
 echo "gateway-start: starting ${GATEWAY_KEY}"
-exec java -XX:+UseZGC -XX:ConcGCThreads=2 -jar "$APP_JAR" gateway
+java -XX:+UseZGC -XX:ConcGCThreads=2 -jar "$APP_JAR" gateway &
+java_pid=$!
+
+# A JVM that stops answering /health altogether (frozen, so its own watchdog can't act) is killed here, so ECS starts it
+# again at once on the same host, ownership log intact. Left to ECS's health check, it would take a minute to notice
+# and then wait out the stop timeout, which is long for the planned stop, for a SIGTERM the frozen JVM never acts on.
+# A stop asked of the container goes to Java at once, and ends the watching.
+
+# Still running: a JVM that has exited stays a zombie until reaped, which kill -0 can't tell apart.
+running() {
+  [ -r "/proc/${java_pid}/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/${java_pid}/status"
+}
+stopping=0
+trap 'stopping=1; kill -TERM "$java_pid" 2>/dev/null || true' TERM INT
+# SECONDS when /health last answered; empty until it first does (the health server isn't up yet, and ECS's start period
+# covers a start that hangs).
+last_answer=
+while running; do
+  sleep "$HEALTH_INTERVAL_SECONDS" &
+  wait $! || true
+  [ "$stopping" = 1 ] && break
+  running || break
+  if wget --spider --quiet --timeout=2 --tries=1 http://localhost:8080/health; then
+    last_answer=$SECONDS
+  elif [ -n "$last_answer" ] && [ $((SECONDS - last_answer)) -ge "$HEALTH_SILENCE_SECONDS" ]; then
+    echo "gateway-start: ${GATEWAY_KEY} hasn't answered /health for $((SECONDS - last_answer)) s; killing it"
+    kill -KILL "$java_pid" 2>/dev/null || true
+    break
+  fi
+done
+# A wait a trapped signal interrupts returns while Java still runs; bash may also have reaped it already, and keeps its
+# status for this wait.
+while true; do
+  status=0
+  wait "$java_pid" || status=$?
+  running || break
+done
+exit "$status"

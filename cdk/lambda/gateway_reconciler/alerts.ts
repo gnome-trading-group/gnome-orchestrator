@@ -36,6 +36,8 @@ export interface GatewayMemory {
   startingSinceMs?: number;
   // Its sessions and orders the last time it said it was up with either; cleared when it stops as asked.
   lastInUse?: { linkedSessions: number; workingOrders: number };
+  // The orders it said it still held while stopping, its planned stop's last word; cleared when it is up again.
+  stopping?: { workingOrders: number };
   degradedTicks: number;
   failedTicks: number;
   // The task it runs as; a new one this reconciler didn't start is a restart nobody asked for.
@@ -108,9 +110,14 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
   const activity = present(seen.activity);
   if (activity && UP.has(activity.state)) {
     memory.startingSinceMs = undefined;
+    memory.stopping = undefined;
     memory.lastInUse = activity.linkedSessions > 0 || activity.workingOrders > 0
       ? { linkedSessions: activity.linkedSessions, workingOrders: activity.workingOrders }
       : undefined;
+  } else if (activity && activity.state === 'STOPPING') {
+    // Stopping, though not asked to by this reconciler (its host shutting down, or a stop by hand): it says what it
+    // still holds as it cancels, and once more when it is done.
+    memory.stopping = { workingOrders: activity.workingOrders };
   } else if (memory.startingSinceMs === undefined) {
     // Running but not up, and not started by this reconciler (gone without being asked, so ECS starts it again; or
     // started by hand): it must come up in time like any start.
@@ -145,12 +152,23 @@ function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Ale
     });
   }
   if (present(seen.activity) == null && memory.lastInUse) {
-    const { linkedSessions, workingOrders } = memory.lastInUse;
-    alerts.push({
-      type: 'GATEWAY_DOWN',
-      title: `Gateway ${seen.gatewayKey} is gone with ${linkedSessions} session(s) linked and ${workingOrders} order(s) working${why}`,
-      labels: labels({ linkedSessions: String(linkedSessions), workingOrders: String(workingOrders) }),
-    });
+    const { linkedSessions } = memory.lastInUse;
+    const workingOrders = memory.stopping?.workingOrders ?? memory.lastInUse.workingOrders;
+    if (memory.stopping && workingOrders === 0) {
+      // Its planned stop ran to the end: every order cancelled and every session told, only the gateway is missing.
+      alerts.push({
+        type: 'GATEWAY_DOWN',
+        title: `Gateway ${seen.gatewayKey} stopped without being asked to, with ${linkedSessions} session(s) linked;`
+          + ` its planned stop cancelled every order${why}`,
+        labels: labels({ linkedSessions: String(linkedSessions), workingOrders: '0', cleanStop: 'true' }),
+      });
+    } else {
+      alerts.push({
+        type: 'GATEWAY_DOWN',
+        title: `Gateway ${seen.gatewayKey} is gone with ${linkedSessions} session(s) linked and ${workingOrders} order(s) working${why}`,
+        labels: labels({ linkedSessions: String(linkedSessions), workingOrders: String(workingOrders) }),
+      });
+    }
   }
   if (memory.restarted) {
     const { fromTask, workingOrders, reason: stopped } = memory.restarted;

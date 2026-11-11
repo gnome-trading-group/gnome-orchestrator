@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.gateway;
 
 import group.gnometrading.gateways.orders.recovery.AccountOrder;
+import group.gnometrading.gateways.orders.recovery.OrderOwner;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.sm.Listing;
@@ -21,6 +22,8 @@ public final class FakeOrderQuery implements VenueOrderQuery {
     // When the venue says each order was placed, for the account-wide list; 0 when not set.
     public final Map<String, Long> created = new ConcurrentHashMap<>();
     public volatile IOException listAllFails;
+    // Whose each order is, where its id names a slot and counter (as Polymarket US's do); none when not set.
+    public final Map<String, OrderOwner> owners = new ConcurrentHashMap<>();
     // Lookups after a cancel that still show the order as it was, as a venue slow to reflect a cancel does.
     public final AtomicInteger lagAfterCancel = new AtomicInteger();
     private final Map<String, VenueOrder> beforeCancel = new ConcurrentHashMap<>();
@@ -72,5 +75,10 @@ public final class FakeOrderQuery implements VenueOrderQuery {
     @Override
     public boolean cancel(final AccountOrder order) {
         return cancel(null, order.order());
+    }
+
+    @Override
+    public Optional<OrderOwner> ownerOf(final VenueOrder order) {
+        return Optional.ofNullable(this.owners.get(order.exchangeOrderId()));
     }
 }

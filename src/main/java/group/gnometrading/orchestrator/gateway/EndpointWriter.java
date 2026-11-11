@@ -19,11 +19,15 @@ final class EndpointWriter implements GatewayControl.Advertiser {
         void write(GatewayState state, int linkedSessions, long workingOrders) throws Exception;
     }
 
-    private record Advert(GatewayState state, int linkedSessions, long workingOrders) {}
+    private record Advert(long number, GatewayState state, int linkedSessions, long workingOrders) {}
 
     private final Logger logger;
     private final Write write;
     private final BlockingQueue<Advert> latest = new ArrayBlockingQueue<>(1);
+    // How many adverts were handed over, and up to which one a write has been tried (a later advert's write covers
+    // every earlier one, which it overtook).
+    private long advertised;
+    private long tried;
 
     EndpointWriter(final Logger logger, final Write write) {
         this.logger = logger;
@@ -32,8 +36,28 @@ final class EndpointWriter implements GatewayControl.Advertiser {
 
     @Override
     public synchronized void advertise(final GatewayState state, final int linkedSessions, final long workingOrders) {
+        this.advertised++;
         this.latest.clear();
-        this.latest.offer(new Advert(state, linkedSessions, workingOrders));
+        this.latest.offer(new Advert(this.advertised, state, linkedSessions, workingOrders));
+    }
+
+    @Override
+    public synchronized boolean flush(final long timeoutMillis) throws InterruptedException {
+        final long target = this.advertised;
+        final long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+        while (this.tried < target) {
+            final long leftMillis = (deadline - System.nanoTime()) / 1_000_000L;
+            if (leftMillis <= 0) {
+                return false;
+            }
+            wait(leftMillis);
+        }
+        return true;
+    }
+
+    private synchronized void triedUpTo(final long count) {
+        this.tried = Math.max(this.tried, count);
+        notifyAll();
     }
 
     EndpointWriter start() {
@@ -42,7 +66,11 @@ final class EndpointWriter implements GatewayControl.Advertiser {
                     while (!Thread.currentThread().isInterrupted()) {
                         try {
                             final Advert advert = this.latest.take();
-                            this.write.write(advert.state(), advert.linkedSessions(), advert.workingOrders());
+                            try {
+                                this.write.write(advert.state(), advert.linkedSessions(), advert.workingOrders());
+                            } finally {
+                                triedUpTo(advert.number());
+                            }
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                         } catch (Exception e) {

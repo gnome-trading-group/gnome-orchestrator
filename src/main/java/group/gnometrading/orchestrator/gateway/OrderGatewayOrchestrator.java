@@ -268,7 +268,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class));
         reportDrops(logger, ingress, egress, sessions, cross);
         reportSelfTrades(logger, cross);
-        sweepAtStartup(logger, alerts, accounts, restart, startedMillis);
+        sweepAtStartup(logger, alerts, accounts, restart, startedMillis, registryCalls);
         final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, control, accounts)
                 .start();
 
@@ -518,12 +518,14 @@ public class OrderGatewayOrchestrator extends Orchestrator {
      * Cancels, once sessions have had time to come back, orders resting on the accounts that this process has no record
      * of ({@link StartupSweep}): 30 s, plus the longest cancel-on-disconnect timeout of the sessions the restart holds.
      */
-    private static void sweepAtStartup(
+    private void sweepAtStartup(
             final Logger logger,
             final GatewayAlerts alerts,
             final List<GatewayAccount> accounts,
             final GatewayRestart.Result restart,
-            final long startedMillis) {
+            final long startedMillis,
+            final BoundedCalls registryCalls) {
+        final RegistryConnection registry = getInstance(RegistryConnection.class);
         final List<StartupSweep.Account> swept = new ArrayList<>();
         for (final GatewayAccount account : accounts) {
             if (account.orderQuery() != null) {
@@ -540,10 +542,35 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final long waitMillis = SWEEP_WAIT_MILLIS + TimeUnit.NANOSECONDS.toMillis(longestCodNanos);
         final Thread thread = new Thread(
                 new StartupSweep(
-                        logger, alerts, swept, startedMillis, waitMillis, System::currentTimeMillis, Thread::sleep),
+                        logger,
+                        alerts,
+                        swept,
+                        startedMillis,
+                        waitMillis,
+                        System::currentTimeMillis,
+                        Thread::sleep,
+                        sessionSeq -> sessionIdOf(logger, registryCalls, registry, sessionSeq)),
                 "gateway-startup-sweep");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    /** The session with a {@code session_seq}, for the sweep's alerts; null when the registry can't say in time. */
+    private static String sessionIdOf(
+            final Logger logger,
+            final BoundedCalls registryCalls,
+            final RegistryConnection registry,
+            final long sessionSeq) {
+        try {
+            return registryCalls.call(() -> SessionRegistry.idBySeq(registry, sessionSeq), REGISTRY_TIMEOUT_MILLIS);
+        } catch (Exception e) {
+            logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Gateway: can't look up session_seq %d in the registry: %s",
+                    sessionSeq,
+                    CauseChain.of(e));
+            return null;
+        }
     }
 
     /** Takes back the previous process's sessions and orders, before any thread starts. */
@@ -720,7 +747,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             if (!control.stop(STOP_TIMEOUT_NANOS)) {
                 logger.logf(
                         LogMessage.UNKNOWN_ERROR,
-                        "Gateway stopping with orders still working or sessions not yet told");
+                        "Gateway stopping with orders still working, sessions not yet told, or its endpoint not yet written");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

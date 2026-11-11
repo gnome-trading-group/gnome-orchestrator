@@ -25,6 +25,7 @@
     "typescript": "~5.6.3"
   },
   "dependencies": {
+    "@aws-sdk/client-auto-scaling": "^3.1165.0",
     "aws-cdk-lib": "2.176.0",
     "constructs": "^10.0.0"
   },

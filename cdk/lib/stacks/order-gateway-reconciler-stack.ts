@@ -119,6 +119,26 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       actions: ['ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition', 'ec2:DescribeAddresses'],
       resources: ['*'],
     }));
+    // The hosts a starting gateway needs, asked for at once rather than after managed scaling's alarm: which group
+    // the capacity provider scales, how many gateways each region runs, and that group's size.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:DescribeCapacityProviders', 'autoscaling:DescribeAutoScalingGroups'],
+      resources: ['*'],
+    }));
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:ListServices'],
+      resources: ['*'],
+      conditions: {
+        ArnEquals: { 'ecs:cluster': platformRegions().map(region =>
+          `arn:aws:ecs:${region}:${this.account}:cluster/${ORDER_GATEWAYS.cluster}`) },
+      },
+    }));
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['autoscaling:SetDesiredCapacity'],
+      // OrderGatewayStack's group, named by CloudFormation after its stack.
+      resources: platformRegions().map(region => `arn:aws:autoscaling:${region}:${this.account}:autoScalingGroup:*:`
+        + `autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-GatewayHosts*`),
+    }));
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ec2:AllocateAddress', 'ec2:CreateTags'],
       resources: platformRegions().map(region => `arn:aws:ec2:${region}:${this.account}:elastic-ip/*`),

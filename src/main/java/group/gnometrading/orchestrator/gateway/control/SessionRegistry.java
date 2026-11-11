@@ -123,6 +123,15 @@ public final class SessionRegistry {
         };
     }
 
+    /**
+     * The id of the session with this {@code session_seq}; null if the registry has none. Polymarket US orders name a
+     * session's slot, which is its {@code session_seq} until 100,000 sessions wrap it.
+     */
+    public static String idBySeq(final RegistryConnection registry, final long sessionSeq) throws IOException {
+        final JsonNode rows = read(new ObjectMapper(), registry, "/api/strategy-sessions?sessionSeq=" + sessionSeq);
+        return rows.isEmpty() ? null : rows.get(0).path("session_id").asText(null);
+    }
+
     private static JsonNode read(final ObjectMapper mapper, final RegistryConnection registry, final String path)
             throws IOException {
         final ByteBuffer body = registry.get(new ViewString(path));

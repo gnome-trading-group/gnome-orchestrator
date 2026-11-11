@@ -189,13 +189,17 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     starts with none. 30 s after start (plus the longest cod timeout of the sessions it took back) it lists each
     account's open orders (`VenueOrderQuery.listAllOpenOrders`, through the account's bounded query) and cancels those
     the venue created before this process started that the restart doesn't hold, alerting `GATEWAY_UNATTRIBUTED_ORDERS`
-    for each. A list that fails is retried every 10 s, alerting `GATEWAY_SWEEP_FAILED` past 5 minutes.
+    for each, named as the session knows it: where the venue's id names a slot rather than the session (Polymarket US,
+    `VenueOrderQuery.ownerOf`), `<session>-<counter>`, the session found by `session_seq` in the registry, else the
+    slot. A list that fails is retried every 10 s, alerting `GATEWAY_SWEEP_FAILED` past 5 minutes.
   - Tests: `GatewayFixture` (test scope, from gnome-gateways' test jar) runs a whole gateway in process on a fake
     venue; `session/orders/GatewayInProcessTest` drives sessions through it, restart included.
   - Whether it runs is not its own decision: the gateway reconciler (`cdk/lambda/gateway_reconciler`) starts and stops
     it. Its endpoint item
     (every 15 s) carries `linked_sessions` and `working_orders`, which the reconciler reads; scaled to zero, ECS sends
-    SIGTERM and the planned stop runs. Sessions say they want it through `POST /gateways/ensure` (`GatewayLinks`: every
+    SIGTERM and the planned stop runs, which writes the item once more at its end (STOPPING, what it still holds) and
+    waits up to 2 s for that write, so a stop the reconciler didn't ask for (host shut down) is seen to have left
+    nothing. Sessions say they want it through `POST /gateways/ensure` (`GatewayLinks`: every
     10 s until linked, then every minute).
 - `aeron/` - the Aeron layer shards, sessions and order gateways share:
   `AeronRuntime` (embedded media driver + client per process, `AeronProfile` per host kind), `AeronPathIdle` (how long
@@ -265,8 +269,10 @@ security group, log group; the name is historical, renaming recreates the VPC) a
 live ones can read `order-gateway#*` items in `service-endpoints`), `<Stage>-OrchestratorOrderGatewayStack-<region>`
 (where live order gateways run, with nothing about which: ECS cluster `order-gateways`, on-demand `c7a.large` hosts
 scaling from zero (capacity provider `order-gateway-hosts`), base task definition `order-gateway` (a Java 17 runtime and
-`cdk/lib/stacks/gateway-docker/gateway-start.sh`, which runs `java -jar <release> gateway`: the jar's manifest carries
-the module access gnomepy's JVM args give sessions), state on a host volume, logs in
+`cdk/lib/stacks/gateway-docker/gateway-start.sh`, which runs `java -jar <release> gateway` as its child: the jar's
+manifest carries the module access gnomepy's JVM args give sessions; it forwards SIGTERM to Java and, once `/health`
+has answered, kills Java (`kill -9`) when it hasn't answered for 15 s, so a frozen JVM is restarted in seconds rather
+than after ECS's health check and 120 s stop timeout), state on a host volume, logs in
 `/gnome/order-gateway/<region>`), and `<Stage>-OrchestratorOrderGatewayReconcilerStack` (us-east-1 only): the gateway
 reconciler, Lambda `GatewayReconciler` (`cdk/lambda/gateway_reconciler`, TypeScript; one tick at a time from FIFO queue
 `gateway-reconciler.fifo`, woken by the registry's `POST /gateways/ensure`, which the launcher and sessions call, and
@@ -275,7 +281,8 @@ the last 30 minutes or reports sessions or orders (or, running, went quiet while
 with orders; one that never wrote an endpoint holds nothing), in its row's region, as service
 `order-gateway-<key with : as ->` from its own revision (key, release and `ALERTS_API_URL` filled in), and allocates
 its Elastic IP (tag `gnome:order-gateway`), which `gateway-start.sh` attaches at boot; otherwise it sets the service to
-zero. A start on a new revision moves the service onto it at zero and raises the count on a later tick, once the old
+zero. When it starts or creates one, it raises the region's host group (found through the capacity provider) to one
+host per gateway set to run, at once, rather than leave it to managed scaling's alarm (~2 min); it never lowers it. A start on a new revision moves the service onto it at zero and raises the count on a later tick, once the old
 deployment has drained: raised sooner, ECS starts a task of the previous release on the old one),
 and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
 exchange code; run in the exchange's region, `sm.exchange.region`, where its gateway runs; reads only that region's
@@ -360,7 +367,8 @@ unset means no alerts; posted through `runtime/AlertsApi`):
 - The gateway reconciler raises, per gateway, on the `gnome-alerts` bus (`cdk/lambda/gateway_reconciler/alerts.ts`,
   firing keys and per-gateway memory on the `service-endpoints` item `order-gateway-reconciler#alerts`):
   `GATEWAY_START_STUCK` (running, not READY or DEGRADED 6 min after it started), `GATEWAY_DOWN` (its endpoint expired
-  while it last showed sessions linked or orders working, without being asked to stop; CRITICAL with orders working),
+  while it last showed sessions linked or orders working, without being asked to stop; CRITICAL with orders working,
+  WARNING with `cleanStop` when its planned stop's last write said it held nothing),
   `GATEWAY_DEGRADED` (2 ticks), `GATEWAY_RECONCILE_FAILED` (3 ticks), `GATEWAY_RESTARTED` (its running task changed
   without the reconciler starting it while orders worked; held 15 minutes, with the old task's stop reason). CloudWatch alarms on the reconciler itself,
   `GatewayReconciler-{TickFailing,NotRunning,Errors,QueueStuck}-Error`, are this repo's only alarms. Catalog and

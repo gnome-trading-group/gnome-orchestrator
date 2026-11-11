@@ -92,6 +92,15 @@ public final class GatewayControl implements GnomeAgent {
          *     whatever decides whether it runs (the registry's gateway reconciler) reads from its endpoint
          */
         void advertise(GatewayState state, int linkedSessions, long workingOrders);
+
+        /**
+         * Waits until what was last advertised has been written, or tried, for at most {@code timeoutMillis}.
+         *
+         * @return whether it was in time
+         */
+        default boolean flush(final long timeoutMillis) throws InterruptedException {
+            return true;
+        }
     }
 
     /** Opens the publication a session's replies go on; blocks on the media driver. */
@@ -136,6 +145,8 @@ public final class GatewayControl implements GnomeAgent {
     private static final int MESSAGES_PER_PASS = 64;
     // How long one hello's orders may be looked up at the venue in all.
     static final long SETTLE_BUDGET_NANOS = TimeUnit.SECONDS.toNanos(20);
+    // How long the planned stop waits for its last endpoint write.
+    static final long FINAL_ADVERT_MILLIS = 2_000;
 
     private final Logger logger;
     private final GatewayAlerts alerts;
@@ -1095,11 +1106,12 @@ public final class GatewayControl implements GnomeAgent {
 
     /**
      * Stops taking orders and cancels every session's orders, waits until the lanes hold nothing, then says goodbye to
-     * each linked session after the reports of those cancels (egress sends it last) and unlinks every session. A session
-     * that heard the goodbye first would drop its link with its orders still open as far as it knows. Gives up waiting
-     * once {@code timeoutNanos} passes. Call with the control thread stopped and ingress and egress running.
+     * each linked session after the reports of those cancels (egress sends it last), unlinks every session, and writes
+     * its endpoint once more with what it still holds. A session that heard the goodbye first would drop its link with
+     * its orders still open as far as it knows. Gives up waiting once {@code timeoutNanos} passes. Call with the control
+     * thread stopped and ingress and egress running.
      *
-     * @return whether every lane emptied and every goodbye went out in time
+     * @return whether every lane emptied, every goodbye went out and what it left was written, each in time
      */
     public boolean stop(final long timeoutNanos) throws InterruptedException {
         final long deadline = this.nanoClock.getAsLong() + timeoutNanos;
@@ -1128,7 +1140,11 @@ public final class GatewayControl implements GnomeAgent {
         for (final GatewaySession session : all) {
             unlink(session);
         }
-        return emptied && saidGoodbye;
+        // What it leaves behind, written before it goes: told nothing more, the reconciler would take the orders it
+        // held when the stop began for orders left resting.
+        this.advertiser.advertise(GatewayState.STOPPING, linkedSessions(), workingOrders());
+        final boolean advertised = this.advertiser.flush(FINAL_ADVERT_MILLIS);
+        return emptied && saidGoodbye && advertised;
     }
 
     private boolean waitUntil(final BooleanSupplier condition, final long deadline) throws InterruptedException {

@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.gateway;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.logging.NullLogger;
@@ -62,5 +63,35 @@ class EndpointWriterTest {
             Thread.sleep(10);
         }
         assertEquals(List.of("READY"), written);
+    }
+
+    @Test
+    void aFlushWaitsForTheLastAdvertToBeWritten_AndGivesUpAtItsTimeout() throws Exception {
+        final CountDownLatch release = new CountDownLatch(1);
+        final List<String> written = new CopyOnWriteArrayList<>();
+        final EndpointWriter writer = new EndpointWriter(new NullLogger(), (state, linked, working) -> {
+                    if (state == GatewayState.STOPPING) {
+                        release.await();
+                    }
+                    written.add(state + "/" + linked + "/" + working);
+                })
+                .start();
+        assertTrue(writer.flush(100), "nothing advertised, nothing to wait for");
+
+        writer.advertise(GatewayState.STOPPING, 0, 0);
+        assertFalse(writer.flush(100), "the write is still going");
+        release.countDown();
+        assertTrue(writer.flush(5_000));
+        assertEquals(List.of("STOPPING/0/0"), written);
+    }
+
+    @Test
+    void aFlushCountsAFailedWriteAsTried() throws Exception {
+        final EndpointWriter writer = new EndpointWriter(new NullLogger(), (state, linked, working) -> {
+                    throw new IllegalStateException("table unreachable");
+                })
+                .start();
+        writer.advertise(GatewayState.STOPPING, 0, 0);
+        assertTrue(writer.flush(5_000), "nothing more to wait for once the write has failed");
     }
 }

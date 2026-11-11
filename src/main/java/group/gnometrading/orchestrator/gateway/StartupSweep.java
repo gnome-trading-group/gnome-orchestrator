@@ -1,14 +1,17 @@
 package group.gnometrading.orchestrator.gateway;
 
 import group.gnometrading.gateways.orders.recovery.AccountOrder;
+import group.gnometrading.gateways.orders.recovery.OrderOwner;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.orchestrator.gateway.core.GatewayAlerts;
 import group.gnometrading.utils.CauseChain;
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
 
@@ -40,6 +43,11 @@ final class StartupSweep implements Runnable {
         void sleep(long millis) throws InterruptedException;
     }
 
+    /** The session with a registry {@code session_seq}; null when it can't be told, as when the registry can't be read. */
+    interface Sessions {
+        String idOf(long sessionSeq);
+    }
+
     private final Logger logger;
     private final GatewayAlerts alerts;
     private final List<Account> accounts;
@@ -47,6 +55,7 @@ final class StartupSweep implements Runnable {
     private final long waitMillis;
     private final LongSupplier clock;
     private final Sleeper sleeper;
+    private final Sessions sessions;
 
     /**
      * @param startedMillis when this process started, before any account could send: orders the venue created earlier
@@ -60,7 +69,8 @@ final class StartupSweep implements Runnable {
             final long startedMillis,
             final long waitMillis,
             final LongSupplier clock,
-            final Sleeper sleeper) {
+            final Sleeper sleeper,
+            final Sessions sessions) {
         this.logger = logger;
         this.alerts = alerts;
         this.accounts = accounts;
@@ -68,6 +78,7 @@ final class StartupSweep implements Runnable {
         this.waitMillis = waitMillis;
         this.clock = clock;
         this.sleeper = sleeper;
+        this.sessions = sessions;
     }
 
     @Override
@@ -126,29 +137,48 @@ final class StartupSweep implements Runnable {
             }
             final boolean accepted = account.query().cancel(order);
             cancelled++;
+            final Map<String, String> labels = new HashMap<>(Map.of(
+                    "account", account.name(), "order", order.order().exchangeOrderId(), "market", order.market()));
+            final String name = nameOf(account, order, labels);
             this.logger.logf(
                     LogMessage.UNKNOWN_ERROR,
                     "GATEWAY_UNATTRIBUTED_EVENTS: %s: order %s on %s rested with no record and no session claiming it; %s",
                     account.name(),
-                    order.order().exchangeOrderId(),
+                    name,
                     order.market(),
                     accepted ? "cancelled" : "the venue refused the cancel");
             this.alerts.firing(
                     UNATTRIBUTED,
                     account.name() + ":" + order.order().exchangeOrderId(),
-                    "Gateway " + (accepted ? "cancelled" : "couldn't cancel") + " order "
-                            + order.order().exchangeOrderId() + " on " + order.market()
+                    "Gateway " + (accepted ? "cancelled" : "couldn't cancel") + " order " + name + " on "
+                            + order.market()
                             + " that no gateway or session had a record of: any fills it had may be missing from"
                             + " the ledger",
-                    Map.of(
-                            "account",
-                            account.name(),
-                            "order",
-                            order.order().exchangeOrderId(),
-                            "market",
-                            order.market()));
+                    labels);
         }
         this.logger.logf(
                 LogMessage.DEBUG, "Gateway %s: swept its open orders, %d unrecorded", account.name(), cancelled);
+    }
+
+    /**
+     * The order as the ledger and the session know it: {@code <session>-<counter>} where the venue's id names a slot
+     * rather than the session (Polymarket US), the slot itself when its session can't be told, else the venue's id.
+     * Adds what it found to the alert's labels.
+     */
+    private String nameOf(final Account account, final AccountOrder order, final Map<String, String> labels) {
+        final Optional<OrderOwner> owner = account.query().ownerOf(order.order());
+        if (owner.isEmpty()) {
+            return order.order().exchangeOrderId();
+        }
+        final long slot = owner.get().slot();
+        final long counter = owner.get().counter();
+        labels.put("slot", String.valueOf(slot));
+        labels.put("counter", String.valueOf(counter));
+        final String session = this.sessions.idOf(slot);
+        if (session == null) {
+            return "slot " + slot + " order " + counter + " (" + order.order().exchangeOrderId() + ")";
+        }
+        labels.put("session", session);
+        return session + "-" + counter;
     }
 }

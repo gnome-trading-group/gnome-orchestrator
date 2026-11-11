@@ -1,10 +1,14 @@
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
+import {
+  AutoScalingClient, DescribeAutoScalingGroupsCommand, SetDesiredCapacityCommand,
+} from '@aws-sdk/client-auto-scaling';
 import { DynamoDBClient, GetItemCommand, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { AllocateAddressCommand, DescribeAddressesCommand, EC2Client } from '@aws-sdk/client-ec2';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import {
-  CreateServiceCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand, DescribeTasksCommand, ECSClient,
-  KeyValuePair, ListTasksCommand, RegisterTaskDefinitionCommand, UpdateServiceCommand,
+  CreateServiceCommand, DescribeCapacityProvidersCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand,
+  DescribeTasksCommand, ECSClient, KeyValuePair, ListServicesCommand, ListTasksCommand, RegisterTaskDefinitionCommand,
+  UpdateServiceCommand,
 } from '@aws-sdk/client-ecs';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { platformRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
@@ -75,6 +79,7 @@ export interface ReconcileDeps {
   alertsApiUrl(): Promise<string>;
   ecs(region: string): Client;
   ec2(region: string): Client;
+  autoscaling(region: string): Client;
   nowMs(): number;
   // Told what the tick saw of each gateway, for its alerts.
   observed?(observation: Observation): void;
@@ -155,6 +160,7 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
     }
     if ((current.deployments ?? []).length > 1) return seen('starting');
     await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 1 }));
+    await ensureHosts(deps, row.region);
     return seen('started');
   }
   await ecs.send(new CreateServiceCommand({
@@ -166,7 +172,58 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
     // One host per gateway and fixed ports: the old task stops before a new one starts.
     deploymentConfiguration: { minimumHealthyPercent: 0, maximumPercent: 100 },
   }));
+  await ensureHosts(deps, row.region);
   return seen('created');
+}
+
+/**
+ * Raises the region's gateway hosts to one per gateway set to run, when fewer are asked for. Managed scaling would get
+ * there too, but only once its alarm has seen the task waiting for a few minutes. Never lowers the count: managed
+ * scaling takes empty hosts away. A failure is logged and left to managed scaling, so the start still stands.
+ */
+async function ensureHosts(deps: ReconcileDeps, region: string): Promise<void> {
+  const { names } = deps;
+  try {
+    const ecs = deps.ecs(region);
+    const provider = (await ecs.send(new DescribeCapacityProvidersCommand({
+      capacityProviders: [names.capacityProvider],
+    }))).capacityProviders?.[0];
+    const groupArn: string | undefined = provider?.autoScalingGroupProvider?.autoScalingGroupArn;
+    const group = groupArn?.split('autoScalingGroupName/')[1];
+    if (!group) throw new Error(`capacity provider ${names.capacityProvider} names no Auto Scaling group`);
+    const needed = await gatewaysSetToRun(ecs, names);
+    const autoscaling = deps.autoscaling(region);
+    const described = (await autoscaling.send(new DescribeAutoScalingGroupsCommand({
+      AutoScalingGroupNames: [group],
+    }))).AutoScalingGroups?.[0];
+    if (!described) throw new Error(`no Auto Scaling group ${group}`);
+    const wanted = Math.min(needed, described.MaxSize ?? needed);
+    if ((described.DesiredCapacity ?? 0) >= wanted) return;
+    await autoscaling.send(new SetDesiredCapacityCommand({
+      AutoScalingGroupName: group, DesiredCapacity: wanted, HonorCooldown: false,
+    }));
+    console.log(`Gateway hosts in ${region}: ${described.DesiredCapacity ?? 0} -> ${wanted} for ${needed} gateway(s)`);
+  } catch (error) {
+    console.error(`Gateway hosts in ${region}: couldn't raise them; managed scaling will`, error);
+  }
+}
+
+/** The region's gateway services set to run: each needs a host of its own (fixed ports). */
+async function gatewaysSetToRun(ecs: Client, names: GatewayNames): Promise<number> {
+  const arns: string[] = [];
+  let nextToken: string | undefined;
+  do {
+    const page = await ecs.send(new ListServicesCommand({ cluster: names.cluster, maxResults: 100, nextToken }));
+    arns.push(...(page.serviceArns ?? []));
+    nextToken = page.nextToken;
+  } while (nextToken);
+  const ours = arns.map((arn) => arn.substring(arn.lastIndexOf('/') + 1)).filter((n) => n.startsWith(names.servicePrefix));
+  let running = 0;
+  for (let i = 0; i < ours.length; i += 10) {
+    const page = await ecs.send(new DescribeServicesCommand({ cluster: names.cluster, services: ours.slice(i, i + 10) }));
+    running += (page.services ?? []).filter((s: any) => s.status === 'ACTIVE' && s.desiredCount > 0).length;
+  }
+  return running;
 }
 
 // A gateway's endpoint states in which it is up.
@@ -343,6 +400,7 @@ const lambdaDeps: Omit<ReconcileDeps, 'names'> = {
   alertsApiUrl: () => parameter(ALERTS_API_URL_PARAMETER),
   ecs: (region) => new ECSClient({ region }),
   ec2: (region) => new EC2Client({ region }),
+  autoscaling: (region) => new AutoScalingClient({ region }),
   nowMs: () => Date.now(),
 };
 
