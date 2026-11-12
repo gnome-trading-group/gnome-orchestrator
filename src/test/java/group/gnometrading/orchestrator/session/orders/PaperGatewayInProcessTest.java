@@ -134,7 +134,8 @@ class PaperGatewayInProcessTest {
     @Test
     void aSessionPastItsBudgetIsRateLimitedWhileAnotherKeepsAWholeBudgetOfItsOwn() throws Exception {
         final PaperGatewayFixture.Venue venue = venue(EXCHANGE, 1, "venue");
-        // Four requests a session, two a second after: with a quarter kept for cancels, three new orders at once.
+        // Four requests a session, full from the start as on a quiet account, two a second after: with a quarter kept
+        // for cancels, three new orders at once.
         final VenueRateLimits limits = VenueRateLimits.of(
                 "Paper",
                 List.of(new VenueRateLimits.Bucket("all", 2, 4, 0.25)),
@@ -149,8 +150,6 @@ class PaperGatewayInProcessTest {
         final TestSession quiet = session(venue, "session-b", 43, 4, gateway);
         gateway.quote(book, 100 * P, 10 * S, 102 * P, 40 * S);
         settle();
-        // A session's budget starts drained, as every account budget does, and fills in two seconds.
-        Thread.sleep(2_200);
 
         for (long counter = 1; counter <= 6; counter++) {
             busy.order(book, counter, Side.Bid, 99 * P, S);

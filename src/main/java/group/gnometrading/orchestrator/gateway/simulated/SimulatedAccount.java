@@ -27,6 +27,7 @@ import group.gnometrading.utils.CauseChain;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
@@ -45,6 +46,10 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
     /** The seed a session's simulation uses when its config names none, as a session's own simulation did. */
     static final long DEFAULT_SEED = 0x9E3779B97F4A7C15L;
 
+    // A budget starts drained as of when it is made, right for a live gateway that can't know what its account just
+    // spent; a paper session joins as if onto a quiet account, so its budget is made as of long enough ago that every
+    // bucket has refilled (venues refill theirs in seconds).
+    private static final long FULL_BUDGET_NANOS = TimeUnit.HOURS.toNanos(1);
     private static final int COMMAND_QUEUE = 4096;
     private static final int REPORT_QUEUE = 8192;
     private static final int HANDOFFS = 1024;
@@ -273,7 +278,8 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
                         CauseChain.of(e));
                 return;
             }
-            final AccountBudget budget = limits == null ? null : new AccountBudget(limits, nanoClock.getAsLong());
+            final AccountBudget budget =
+                    limits == null ? null : new AccountBudget(limits, nanoClock.getAsLong() - FULL_BUDGET_NANOS);
             hand(new SimulatedLane.AddSession(new SimulatedSession(slot, sessionId, budget, books)));
             sessionIds.put(slot, sessionId);
             streams.addSession(

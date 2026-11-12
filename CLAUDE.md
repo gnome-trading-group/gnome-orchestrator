@@ -117,7 +117,7 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   session gets its own books (gnome-simulation's `MbpSimulatedExchange`, one per listing, built at its hello
   (`SimulatedAccount.Simulations`; deployed, `fromRegistry`) from its
   registry `config.simulation`, as the session's own simulation was; a re-hello keeps them) and its own budget and caps
-  as if alone on the account (gnome-gateways' `account/admission/` queue, caps, hold and expiry, and the venue's
+  as if alone on a quiet account (its budget starts full, where a live one starts drained; gnome-gateways' `account/admission/` queue, caps, hold and expiry, and the venue's
   `VenueRateLimits` where it has order entry, `VenueAccounts.limitsFor`; none otherwise). Each pass: commands first,
   then each session's queued orders as its own budget allows, then at most 256 market-data records, then each book's
   arrivals and reports; a NEW on a book with no clean record yet is refused `GATEWAY_NOT_READY`; a record flagged bad
