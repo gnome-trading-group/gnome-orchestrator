@@ -1,4 +1,4 @@
-package group.gnometrading.orchestrator.session.marketdata;
+package group.gnometrading.orchestrator.marketdata;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,6 +10,9 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 
 /**
  * Reads a session's market-data lease from the market-data API ({@code GET /collection/leases/{sessionId}}): which
@@ -74,6 +77,35 @@ public final class MarketDataLeases {
 
         /** Forgets the key, so the next {@link #get()} reads it again. */
         void invalidate();
+
+        /**
+         * The key from its Secrets Manager copy, which lives in us-east-1 only, read when first needed and again after
+         * a rotation.
+         */
+        static ApiKey fromSecret(final String secretName) {
+            final AtomicReference<String> key = new AtomicReference<>();
+            return new ApiKey() {
+                @Override
+                public String get() {
+                    String known = key.get();
+                    if (known == null) {
+                        try (SecretsManagerClient secrets = SecretsManagerClient.builder()
+                                .region(Region.US_EAST_1)
+                                .build()) {
+                            known = secrets.getSecretValue(request -> request.secretId(secretName))
+                                    .secretString();
+                        }
+                        key.set(known);
+                    }
+                    return known;
+                }
+
+                @Override
+                public void invalidate() {
+                    key.set(null);
+                }
+            };
+        }
     }
 
     private final HttpClient http;

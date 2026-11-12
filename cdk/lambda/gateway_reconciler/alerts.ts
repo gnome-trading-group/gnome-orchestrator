@@ -16,6 +16,8 @@ export const RESTARTED_HOLD_MS = 15 * 60 * 1000;
 /** What one tick saw of one gateway. */
 export interface Observation {
   gatewayKey: string;
+  // Its row's mode, which its alerts carry: the registry's catalog keeps paper alerts below paging.
+  mode: string;
   region: string;
   // Absent when reconciling it failed, with the error instead.
   outcome?: Outcome;
@@ -50,15 +52,23 @@ export interface AlertState {
   gateways: Record<string, GatewayMemory>;
   // Alert key to type, for every alert the last tick left firing.
   firing: Record<string, string>;
+  // Alert key to its gateway's mode, for the same alerts, so each resolves in the mode it fired in.
+  modes?: Record<string, string>;
 }
 
 export interface Alert {
   type: string;
+  mode: string;
   title: string;
   labels: Record<string, string>;
 }
 
-export const EMPTY_STATE: AlertState = { gateways: {}, firing: {} };
+export const EMPTY_STATE: AlertState = { gateways: {}, firing: {}, modes: {} };
+
+/** The mode an alert the last tick left firing was raised in; live for a state kept before alerts had modes. */
+export function firingMode(state: AlertState, key: string): string {
+  return state.modes?.[key] ?? 'live';
+}
 
 const UP = new Set(['READY', 'DEGRADED']);
 
@@ -75,11 +85,17 @@ export function evaluate(observations: Observation[], previous: AlertState, nowM
   for (const seen of observations) {
     const memory = next(previous.gateways[seen.gatewayKey], seen, nowMs);
     gateways[seen.gatewayKey] = memory;
-    for (const alert of alertsFor(seen, memory, nowMs)) firing.set(`${alert.type}:${seen.gatewayKey}`, alert);
+    for (const alert of alertsFor(seen, memory, nowMs)) {
+      firing.set(`${alert.type}:${seen.gatewayKey}`, { ...alert, mode: seen.mode });
+    }
   }
   const keys: Record<string, string> = {};
-  firing.forEach((alert, key) => { keys[key] = alert.type; });
-  return { firing, state: { gateways, firing: keys } };
+  const modes: Record<string, string> = {};
+  firing.forEach((alert, key) => {
+    keys[key] = alert.type;
+    modes[key] = alert.mode;
+  });
+  return { firing, state: { gateways, firing: keys, modes } };
 }
 
 function next(before: GatewayMemory | undefined, seen: Observation, nowMs: number): GatewayMemory {
@@ -127,14 +143,14 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
   return memory;
 }
 
-function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Alert[] {
+function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Omit<Alert, 'mode'>[] {
   const [, exchange = ''] = seen.gatewayKey.split(':');
   const labels = (extra: Record<string, string> = {}) => ({
     gateway: seen.gatewayKey, exchange, region: seen.region, ...extra,
   });
   const reason = seen.stoppedReason ?? seen.serviceEvent;
   const why = reason ? `: ${reason}` : '';
-  const alerts: Alert[] = [];
+  const alerts: Omit<Alert, 'mode'>[] = [];
   if (memory.failedTicks >= FAILED_TICKS) {
     alerts.push({
       type: 'GATEWAY_RECONCILE_FAILED',

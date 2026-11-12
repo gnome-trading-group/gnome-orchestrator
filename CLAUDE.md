@@ -32,7 +32,7 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
 ## Layout
 
 Everything is under `group.gnometrading.orchestrator`, laid out by process: `session/` and `shard/` are separate
-programs that share only the layers below them (`aeron/`, `runtime/`, `aws/`, `credentials/`, `di/`), so neither
+programs that share only the layers below them (`aeron/`, `marketdata/`, `runtime/`, `aws/`, `credentials/`, `di/`), so neither
 uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforces it.
 
 - `Main` - the only entry point anything outside this repo starts: `Main <role>` (`session`, `shard`, `gateway`;
@@ -44,7 +44,7 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   journal source), `SessionStrategy` (python or java strategy), `SessionAgents` (start order, close order, heartbeat),
   `marketdata/SessionMarketData`, `orders/SessionOrders` (simulated exchange or venue gateway per listing, the router,
   rate limiters, bound venue accounts) and `journal/SessionJournal`.
-- `session/marketdata/`: every session reads its streams from shards, live ones from on-demand PRODUCTION shards,
+- `session/marketdata/`: `SessionMarketData` wires the shared `marketdata/` reader for a session. Every session reads its streams from shards, live ones from on-demand PRODUCTION shards,
   paper ones from RESEARCH shards. The launcher leases them (`MARKET_DATA_API_URL` set); a local run names one shard
   instead (`market.data.local.shard`, `MarketDataLeases.local`); a session with neither fails at start. A shard outage
   marks the book bad and the OMS refuses orders on it; the session doesn't exit. `ShardFeedAgent` (HOT_PATH) is the only writer of the journaled strategy buffer and of which subscription
@@ -101,7 +101,22 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   sized by its capacity columns), `WebSocketFeedOpener`, `Assignment` / `DynamoAssignment` (the shard's item in the
   reconciler's `collection-shards` table, us-east-1).
 - `gateway/` - the order gateway (`Main gateway`, `GATEWAY_KEY` `live:<exchange>:<instance>`): one process per venue
-  holding that venue's accounts (registry `venue-accounts/gateway`) for every live session. Layered, and `LayoutTest`
+  holding that venue's accounts (registry `venue-accounts/gateway`) for every live session. A paper gateway
+  (`paper:<exchange>:<instance>`, any exchange the security master has; `GatewaySettings.paper()`) simulates its venue
+  for paper sessions instead, in the same process with the live-only parts left out (no venue accounts, ownership log,
+  restart take-back, startup sweep or PM Intl heartbeats): `gateway/simulated/`'s `SimulatedAccount` (account 0, which
+  paper hellos name; `GatewayControl.servePaper()` takes only PAPER hellos and reports an order it doesn't know as
+  CANCELED, lost with the simulated venue) runs one `SimulatedLane` thread for every paper session on the venue. Each
+  session gets its own books (gnome-simulation's `MbpSimulatedExchange`, one per listing, built at its hello from its
+  registry `config.simulation`, as the session's own simulation was; a re-hello keeps them) and its own budget and caps
+  as if alone on the account (gnome-gateways' `account/admission/` queue, caps, hold and expiry, and the venue's
+  `VenueRateLimits` where it has order entry, `VenueAccounts.limitsFor`; none otherwise). Each pass: commands first,
+  then each session's queued orders as its own budget allows, then at most 256 market-data records, then each book's
+  arrivals and reports; a NEW on a book with no clean record yet is refused `GATEWAY_NOT_READY`; a record flagged bad
+  fills nothing. Its books read from the shards through each session's own lease (`marketdata/ShardMarketData.shared`;
+  `market.data.local.shard` for a local run). The paper profile: Aeron-path parks up to 1 ms, self-trade check `OFF`, a
+  30 s watchdog limit for the simulated lane, alerts in paper mode, a minute line of its sessions, working orders and
+  books' worst lag. Layered, and `LayoutTest`
   enforces it: `core/` is what every thread shares (`GatewaySession`, `SessionTable`, `GatewayMessage`, `ReplayRing`,
   `OrderTotals`, `GatewayStatus`, `JournalRecorder`, `AccountLink`, `CrossKey`/`CrossKeys`) and uses none of the rest; `accounts/` (accounts,
   their lanes' admissions and liveness, `GatewaySettings`), `transport/` (ingress, egress, `CrossIndex`,
@@ -201,6 +216,18 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     waits up to 2 s for that write, so a stop the reconciler didn't ask for (host shut down) is seen to have left
     nothing. Sessions say they want it through `POST /gateways/ensure` (`GatewayLinks`: every
     10 s until linked, then every minute).
+- `marketdata/` - reading market-data streams from collector shards over Aeron, shared by sessions and order gateways
+  (uses neither `session/`, `shard/` nor `gateway/`; `LayoutTest`). `ShardFeedAgent` (HOT_PATH, zero allocation per
+  record) is the only writer of its ring and of which subscription each stream reads; `ShardMarketData`'s control
+  thread makes and closes subscriptions (they block on the driver), polls each lease (`MarketDataLeases`, `GET
+  /collection/leases/{sessionId}`; `MarketDataLeases.ApiKey.fromSecret` reads the key) every 10 s, follows moves and
+  re-subscribes stalled streams, and streams are marked bad exactly as described under `session/marketdata/`. A
+  session builds it with its fixed feeds and one lease, and `start` waits up to `market.data.start.timeout.seconds`
+  for every stream to be live. A process reading for several sessions uses `ShardMarketData.shared(logger, aeron,
+  localIp, ring, nanoTime)`: `start` waits for nothing; `addSession(sessionId, leases, streamIds)` and
+  `removeSession(sessionId)` (any thread, applied on the next 100 ms control tick) count each stream across sessions,
+  so it is read while at least one session names it and dropped when the last goes; a stream several sessions name is
+  one subscription, placed by the earliest such session's lease. Every record goes into the one ring given.
 - `aeron/` - the Aeron layer shards, sessions and order gateways share:
   `AeronRuntime` (embedded media driver + client per process, `AeronProfile` per host kind), `AeronPathIdle` (how long
   Aeron-path agents and drivers park; `AeronPathAgent` marks them), `AeronChannels`
@@ -282,7 +309,7 @@ with orders; one that never wrote an endpoint holds nothing), in its row's regio
 `order-gateway-<key with : as ->` from its own revision (key, release and `ALERTS_API_URL` filled in), and allocates
 its Elastic IP (tag `gnome:order-gateway`), which `gateway-start.sh` attaches at boot; otherwise it sets the service to
 zero. When it starts or creates one, it raises the region's host group (found through the capacity provider) to one
-host per gateway set to run, at once, rather than leave it to managed scaling's alarm (~2 min); it never lowers it. A start on a new revision moves the service onto it at zero and raises the count on a later tick, once the old
+host per gateway set to run, at once, rather than leave it to managed scaling's alarm (~2 min); it never lowers it. Paper gateways (`paper:<exchange>:main`, rows the registry creates on first want, in the exchange's region) run in the same cluster on hosts of their own, `order-gateway-paper-hosts` (on-demand `c7a.medium`, scaling from zero, max 4 per region), from base task definition `order-gateway-paper` (same image and `gateway-start.sh`, 1536 MiB reservation, 384 MiB `/dev/shm`, task role `gnome-order-gateway-paper-task-<region>`: the market-data key `gnome/api-keys/market-data` in us-east-1, the gh token, the registry key and `order-gateway#*` endpoint writes, but no `gnome/accounts/*` and no Elastic IP actions). The reconciler reads rows of every mode; a row's mode picks its base family and capacity provider (`ORDER_GATEWAYS.modes`), a paper revision also gets `MARKET_DATA_API_URL` and `MARKET_DATA_API_KEY_SECRET` to read its sessions' leases, and paper gateways get no Elastic IP (`gateway-start.sh` skips attaching one for a `paper:` key and gives a paper JVM half the host for heap); host raises count only the services on that mode's provider; its alerts carry the row's mode, so paper gateways' never page. `gateway-start.sh` sets ZGC's `ConcGCThreads` from the host's CPUs (1 on a 1-vCPU host, otherwise 2). Paper and live sessions' roles may both read `order-gateway#*` in `service-endpoints`. A start on a new revision moves the service onto it at zero and raises the count on a later tick, once the old
 deployment has drained: raised sooner, ECS starts a task of the previous release on the old one),
 and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
 exchange code; run in the exchange's region, `sm.exchange.region`, where its gateway runs; reads only that region's

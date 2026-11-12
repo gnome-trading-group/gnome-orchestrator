@@ -64,7 +64,8 @@ class LayoutTest {
                         "..orchestrator.gateway.accounts..",
                         "..orchestrator.gateway.transport..",
                         "..orchestrator.gateway.control..",
-                        "..orchestrator.gateway.journal..")
+                        "..orchestrator.gateway.journal..",
+                        "..orchestrator.gateway.simulated..")
                 .check(CLASSES);
     }
 
@@ -74,7 +75,8 @@ class LayoutTest {
             "..orchestrator.gateway.accounts..",
             "..orchestrator.gateway.transport..",
             "..orchestrator.gateway.control..",
-            "..orchestrator.gateway.journal.."
+            "..orchestrator.gateway.journal..",
+            "..orchestrator.gateway.simulated.."
         };
         for (final String part : parts) {
             final String[] others =
@@ -98,6 +100,7 @@ class LayoutTest {
                 .that()
                 .resideInAnyPackage(
                         "..orchestrator.aeron..",
+                        "..orchestrator.marketdata..",
                         "..orchestrator.runtime..",
                         "..orchestrator.aws..",
                         "..orchestrator.credentials..",

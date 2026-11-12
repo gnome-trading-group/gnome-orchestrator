@@ -176,6 +176,9 @@ public final class GatewayControl implements GnomeAgent {
     // Refused hellos whose answer is still waiting for its publication to connect.
     private final List<Refusal> refusals = new ArrayList<>();
     private SessionRegistry.SessionRecord lastRecord;
+    // Simulates its venue for paper sessions: takes only their hellos, on its one simulated account (0), and knows of
+    // no order a restart lost.
+    private boolean paper;
     private final MessageConsumer<GatewayMessage> handler = this::onMessage;
 
     private final MessageHeaderDecoder header = new MessageHeaderDecoder();
@@ -359,7 +362,12 @@ public final class GatewayControl implements GnomeAgent {
         final boolean known = this.sessions.bySlot(hello.sessionSeq()) != null;
         this.settleDeadlineNanos = now + SETTLE_BUDGET_NANOS;
         final GatewaySession session = sessionFor(hello, account);
-        account.markets().addSession(session.slot, session.sessionId);
+        if (this.paper) {
+            account.markets()
+                    .addPaperSession(session.slot, session.sessionId, named(hello), this.lastRecord.simulationJson());
+        } else {
+            account.markets().addSession(session.slot, session.sessionId);
+        }
         introduce(session, this.lastRecord.rateWeight(), hello);
         // Handed to egress with the welcome, which switches to it: nothing goes out on it before the welcome.
         final Publication reply = this.replies.open(hello.replyIp(), hello.replyPort());
@@ -531,10 +539,31 @@ public final class GatewayControl implements GnomeAgent {
             return HelloRefusal.SESSION_NOT_RUNNING;
         }
         final AccountLink account = this.accounts.get(hello.venueAccountId());
-        if (hello.mode() != Mode.LIVE || !"live".equals(record.mode()) || account == null) {
+        final Mode served = this.paper ? Mode.PAPER : Mode.LIVE;
+        if (hello.mode() != served || !served.name().equalsIgnoreCase(record.mode()) || account == null) {
             return HelloRefusal.WRONG_ACCOUNT;
         }
         return checkListings(hello, record, account);
+    }
+
+    /**
+     * Makes this a paper gateway's control, before it starts: it takes only paper sessions' hellos, on the simulated
+     * account, and reports an order it doesn't know as lost with the simulated venue rather than looking it up.
+     */
+    public void servePaper() {
+        this.paper = true;
+    }
+
+    /** The listings a hello names that the security master knows; {@link #checkListings} has refused any other. */
+    private List<Listing> named(final Hello hello) {
+        final List<Listing> named = new ArrayList<>();
+        for (final long[] key : hello.listings()) {
+            final Listing listing = this.listings.listing((int) key[0], key[1]);
+            if (listing != null) {
+                named.add(listing);
+            }
+        }
+        return named;
     }
 
     private HelloRefusal checkListings(
@@ -545,9 +574,10 @@ public final class GatewayControl implements GnomeAgent {
             if (listing == null || !record.listingIds().contains(listing.listingId())) {
                 return HelloRefusal.LISTING_NOT_LEASED;
             }
+            // A paper session is bound to no account: it trades on the simulated one.
             final Integer bound =
                     record.accountByExchange().get(listing.exchange().exchangeId());
-            if (bound == null || bound != hello.venueAccountId()) {
+            if (!this.paper && (bound == null || bound != hello.venueAccountId())) {
                 return HelloRefusal.WRONG_ACCOUNT;
             }
             named.add(listing);
@@ -640,6 +670,17 @@ public final class GatewayControl implements GnomeAgent {
 
     /** An order the session holds open that the gateway doesn't: reported as the venue has it. */
     private void settleUnheld(final GatewaySession session, final Hello.Order order) {
+        if (this.paper) {
+            // A simulated venue's orders live only in this process, so one the session holds that it doesn't was lost
+            // with the process before: gone unfilled, as a venue reports an order cancelled.
+            this.logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Gateway: session %s's order %d was lost with the simulated venue's last process; reported cancelled",
+                    session.sessionId,
+                    order.counter());
+            sendStatus(session, order, OrderState.CANCELED, 0, 0, 0);
+            return;
+        }
         if (this.nanoClock.getAsLong() - this.settleDeadlineNanos >= 0) {
             // A hello's lookups share one budget, so a session listing many keeps the control thread only so long.
             this.logger.logf(

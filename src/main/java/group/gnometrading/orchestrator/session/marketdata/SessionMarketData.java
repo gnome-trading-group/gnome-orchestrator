@@ -10,6 +10,10 @@ import group.gnometrading.orchestrator.aeron.AeronPathIdle;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.HostAddress;
+import group.gnometrading.orchestrator.marketdata.MarketDataLeases;
+import group.gnometrading.orchestrator.marketdata.ShardFeedAgent;
+import group.gnometrading.orchestrator.marketdata.ShardMarketData;
+import group.gnometrading.orchestrator.marketdata.StreamFeed;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.resources.Properties;
@@ -21,9 +25,6 @@ import java.net.http.HttpClient;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 
 /** Builds a session's market data from its config: the streams it reads, from the shards that publish them. */
 public final class SessionMarketData {
@@ -105,7 +106,7 @@ public final class SessionMarketData {
             MarketDataLeases client = new MarketDataLeases(
                     HttpClient.newHttpClient(),
                     URI.create(properties.getStringProperty("market.data.api.url")),
-                    marketDataApiKey(properties.getStringProperty("market.data.api.key.secret")),
+                    MarketDataLeases.ApiKey.fromSecret(properties.getStringProperty("market.data.api.key.secret")),
                     MAPPER);
             return () -> client.get(sessionId);
         }
@@ -117,31 +118,5 @@ public final class SessionMarketData {
         }
         throw new IllegalArgumentException("The session's market data comes from shards: it needs a lease (session.id"
                 + " and market.data.api.url, set by the launcher) or market.data.local.shard for a local run");
-    }
-
-    /** The market-data API key from its Secrets Manager copy, which lives in us-east-1 only; read again after a rotation. */
-    private static MarketDataLeases.ApiKey marketDataApiKey(String secretName) {
-        AtomicReference<String> key = new AtomicReference<>();
-        return new MarketDataLeases.ApiKey() {
-            @Override
-            public String get() {
-                String known = key.get();
-                if (known == null) {
-                    try (SecretsManagerClient secrets = SecretsManagerClient.builder()
-                            .region(Region.US_EAST_1)
-                            .build()) {
-                        known = secrets.getSecretValue(request -> request.secretId(secretName))
-                                .secretString();
-                    }
-                    key.set(known);
-                }
-                return known;
-            }
-
-            @Override
-            public void invalidate() {
-                key.set(null);
-            }
-        };
     }
 }

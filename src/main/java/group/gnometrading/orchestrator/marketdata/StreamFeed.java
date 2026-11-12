@@ -1,4 +1,4 @@
-package group.gnometrading.orchestrator.session.marketdata;
+package group.gnometrading.orchestrator.marketdata;
 
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.sequencer.SequencedEvent;
@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.agrona.concurrent.UnsafeBuffer;
 
 /**
- * One stream a session reads from shards. The ingress thread ({@link ShardFeedAgent}) owns every field: which
+ * One stream read from shards. The ingress thread ({@link ShardFeedAgent}) owns every field: which
  * subscription it reads now and which it is moving to, the last record it passed on (to repeat flagged bad when the
  * stream is lost), and what the liveness checks need. The control thread reads only the volatile views, to decide
  * what to subscribe next, and asks the ingress thread for every change.
@@ -55,6 +55,8 @@ public final class StreamFeed implements GatewayHealth {
     boolean dropsRose;
     long behindSinceNanos;
     boolean joined;
+    // Whether the ingress thread reads it: a stream removed while the control thread subscribed it is never installed.
+    boolean active;
 
     // Written by the ingress thread, read by the control thread.
     volatile ShardLink currentLink;
@@ -103,7 +105,7 @@ public final class StreamFeed implements GatewayHealth {
         bad = false;
     }
 
-    /** A message the session couldn't take: too big for a slot, or not a stream record. */
+    /** A message the ring couldn't take: too big for a slot, or not a stream record. */
     void refuse() {
         refused.lazySet(refused.get() + 1);
     }

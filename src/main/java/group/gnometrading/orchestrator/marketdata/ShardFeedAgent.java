@@ -1,4 +1,4 @@
-package group.gnometrading.orchestrator.session.marketdata;
+package group.gnometrading.orchestrator.marketdata;
 
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.orchestrator.aeron.AeronIngressAgent;
@@ -23,11 +23,14 @@ import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.UnsafeBuffer;
 
 /**
- * The session's market data from shards, on one thread: polls every subscription through an {@link AeronIngressAgent}
- * into the strategy's journaled market-data buffer, which it alone writes. It is also the only writer of which
+ * Market data from shards, on one thread: polls every subscription through an {@link AeronIngressAgent} into one ring
+ * (a session's journaled strategy buffer, or the buffer a process reading for several sessions feeds), which it alone
+ * writes. It is also the only writer of which
  * subscription each stream reads: the control thread ({@link ShardMarketData}) makes and closes subscriptions, which
  * block on the media driver, and asks for every change through {@link #command}; this thread hands back what it has
- * stopped polling, for the control thread to close, through {@link #toControl()}.
+ * stopped polling, for the control thread to close, through {@link #toControl()}. Which streams it reads is fixed at
+ * construction for a session; a process reading for several sessions adds and removes them ({@link AddFeed},
+ * {@link RemoveFeed}).
  *
  * <ul>
  *   <li>A shard re-sends a quiet stream's last record, marked {@link AeronReservedValues#RESENT}; a marked exact
@@ -56,6 +59,12 @@ public final class ShardFeedAgent implements AeronPathAgent {
 
     /** From the control thread: start reading {@code sink} as the stream's subscription, or as the one it moves to. */
     record Install(StreamFeed feed, StreamFeed.FeedSink sink, boolean asPending) {}
+
+    /** From the control thread: start checking a stream; its subscriptions follow as {@link Install}s. */
+    record AddFeed(StreamFeed feed) {}
+
+    /** From the control thread: stop reading a stream; its subscriptions are handed back to be closed. */
+    record RemoveFeed(StreamFeed feed) {}
 
     /** From the control thread: give up a move that hasn't delivered. */
     record CancelPending(StreamFeed feed) {}
@@ -89,9 +98,10 @@ public final class ShardFeedAgent implements AeronPathAgent {
     public ShardFeedAgent(
             final SequencedRingBuffer<?> ring, final List<StreamFeed> feeds, final LongSupplier nanoTime) {
         this.ring = ring;
-        this.feeds = feeds;
+        this.feeds = new ArrayList<>(feeds);
         this.nanoTime = nanoTime;
         for (final StreamFeed feed : feeds) {
+            feed.active = true;
             byStream.put(feed.streamId, feed);
         }
     }
@@ -133,6 +143,10 @@ public final class ShardFeedAgent implements AeronPathAgent {
         while ((command = commands.poll()) != null) {
             if (command instanceof Install install) {
                 install(install);
+            } else if (command instanceof AddFeed add) {
+                addFeed(add.feed());
+            } else if (command instanceof RemoveFeed remove) {
+                removeFeed(remove.feed());
             } else if (command instanceof CancelPending cancel) {
                 cancelPending(cancel.feed());
             } else if (command instanceof Watch watch) {
@@ -153,6 +167,12 @@ public final class ShardFeedAgent implements AeronPathAgent {
         if (sink.link().retired) {
             // Retired while the control thread was subscribing: close it; the next lease read subscribes again.
             handOver(new Close(sink.subscription()));
+            return;
+        }
+        if (!feed.active) {
+            // Removed while the control thread was subscribing, which may have joined a shard only for it.
+            handOver(new Close(sink.subscription()));
+            retireIfUnused(sink.link());
             return;
         }
         ingress.add(
@@ -176,6 +196,40 @@ public final class ShardFeedAgent implements AeronPathAgent {
         // From the subscription, not the last record: a stream that never receives anything is caught as silent.
         feed.lastArrivalNanos = now;
         resetStatus(feed);
+    }
+
+    private void addFeed(final StreamFeed feed) {
+        if (feed.active) {
+            return;
+        }
+        feed.active = true;
+        feeds.add(feed);
+        byStream.put(feed.streamId, feed);
+    }
+
+    private void removeFeed(final StreamFeed feed) {
+        if (!feed.active) {
+            return;
+        }
+        feed.active = false;
+        feeds.remove(feed);
+        if (byStream.get(feed.streamId) == feed) {
+            byStream.remove(feed.streamId);
+        }
+        final ShardLink currentLink = feed.currentLink;
+        final ShardLink pendingLink = feed.pendingLink;
+        if (feed.current != null) {
+            stopReading(feed.current.subscription());
+            feed.current = null;
+        }
+        if (feed.pending != null) {
+            stopReading(feed.pending.subscription());
+            feed.pending = null;
+        }
+        feed.currentLink = null;
+        feed.pendingLink = null;
+        retireIfUnused(currentLink);
+        retireIfUnused(pendingLink);
     }
 
     private void cancelPending(final StreamFeed feed) {

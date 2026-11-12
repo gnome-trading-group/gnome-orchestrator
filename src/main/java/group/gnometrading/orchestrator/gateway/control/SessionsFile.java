@@ -49,7 +49,8 @@ public final class SessionsFile {
                     this.mode,
                     this.listingIds,
                     this.accountByExchange,
-                    Math.max(1, this.rateWeight));
+                    Math.max(1, this.rateWeight),
+                    null);
         }
     }
 

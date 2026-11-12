@@ -1,6 +1,6 @@
 #!/bin/bash
 # Starts an order gateway: downloads its release (pinned per gateway by the registry's gateways/ensure), attaches its
-# Elastic IP, and runs it.
+# Elastic IP (a live one; a paper gateway has none), and runs it.
 set -euo pipefail
 : "${GATEWAY_KEY:?GATEWAY_KEY must be set in the gateway's task definition}"
 : "${ORCHESTRATOR_VERSION:?ORCHESTRATOR_VERSION must be set in the gateway's task definition}"
@@ -23,34 +23,48 @@ curl -fsSL -u "gnome:${GH_TOKEN}" -o "$APP_JAR" \
 unset GH_TOKEN raw
 
 # The gateway's Elastic IP (allocated by gateways/ensure, tagged with its key) follows it to whichever host it runs on:
-# a venue may count its limit per IP, and an allowlist would name it.
-imds_token=$(curl -fsSX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-instance=$(curl -fsSH "X-aws-ec2-metadata-token: ${imds_token}" http://169.254.169.254/latest/meta-data/instance-id)
-found=$(aws ec2 describe-addresses --filters "Name=tag:gnome:order-gateway,Values=${GATEWAY_KEY}" \
-  --query 'Addresses[0].[AllocationId,PublicIp]' --output text)
-read -r allocation address <<< "$found"
-if [ -n "$allocation" ] && [ "$allocation" != "None" ]; then
-  aws ec2 associate-address --allocation-id "$allocation" --instance-id "$instance" --allow-reassociation >/dev/null
-  # The association returns before the host's traffic moves to the new address, and a connection opened while it
-  # moves can go unanswered, so the gateway waits until the metadata names it.
-  for _ in $(seq 1 30); do
-    current=$(curl -fsH "X-aws-ec2-metadata-token: ${imds_token}" \
-      http://169.254.169.254/latest/meta-data/public-ipv4 || true)
-    [ "$current" = "$address" ] && break
-    sleep 1
-  done
-  if [ "$current" = "$address" ]; then
-    echo "gateway-start: ${GATEWAY_KEY} on Elastic IP ${allocation} (${address})"
+# a venue may count its limit per IP, and an allowlist would name it. A paper gateway trades with no venue, and its
+# task role may not look addresses up.
+attach_address() {
+  imds_token=$(curl -fsSX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+  instance=$(curl -fsSH "X-aws-ec2-metadata-token: ${imds_token}" http://169.254.169.254/latest/meta-data/instance-id)
+  found=$(aws ec2 describe-addresses --filters "Name=tag:gnome:order-gateway,Values=${GATEWAY_KEY}" \
+    --query 'Addresses[0].[AllocationId,PublicIp]' --output text)
+  read -r allocation address <<< "$found"
+  if [ -n "$allocation" ] && [ "$allocation" != "None" ]; then
+    aws ec2 associate-address --allocation-id "$allocation" --instance-id "$instance" --allow-reassociation >/dev/null
+    # The association returns before the host's traffic moves to the new address, and a connection opened while it
+    # moves can go unanswered, so the gateway waits until the metadata names it.
+    for _ in $(seq 1 30); do
+      current=$(curl -fsH "X-aws-ec2-metadata-token: ${imds_token}" \
+        http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+      [ "$current" = "$address" ] && break
+      sleep 1
+    done
+    if [ "$current" = "$address" ]; then
+      echo "gateway-start: ${GATEWAY_KEY} on Elastic IP ${allocation} (${address})"
+    else
+      echo "gateway-start: ${GATEWAY_KEY} attached Elastic IP ${allocation} (${address}), but the host still shows ${current:-no public address} after 30 s; starting anyway"
+    fi
   else
-    echo "gateway-start: ${GATEWAY_KEY} attached Elastic IP ${allocation} (${address}), but the host still shows ${current:-no public address} after 30 s; starting anyway"
+    echo "gateway-start: ${GATEWAY_KEY} has no Elastic IP; trading from the host's own address"
   fi
+}
+if [ "${GATEWAY_KEY%%:*}" = "paper" ]; then
+  echo "gateway-start: ${GATEWAY_KEY} is a paper gateway; no Elastic IP"
 else
-  echo "gateway-start: ${GATEWAY_KEY} has no Elastic IP; trading from the host's own address"
+  attach_address
 fi
 
-# ZGC collects concurrently, so a collection doesn't stop the lanes and readers the way a G1 pause does.
-echo "gateway-start: starting ${GATEWAY_KEY}"
-java -XX:+UseZGC -XX:ConcGCThreads=2 -jar "$APP_JAR" gateway &
+# ZGC collects concurrently, so a collection doesn't stop the lanes and readers the way a G1 pause does. Its threads
+# share the host's cores with them: two of a live host's, the one core of a paper host.
+if [ "$(nproc)" -le 1 ]; then gc_threads=1; else gc_threads=2; fi
+# A paper gateway's simulator allocates for every record each session's books take, so its heap gets half the host
+# (a quarter by default); what the rest holds is the media driver's buffers, outside the heap.
+heap=()
+if [ "${GATEWAY_KEY%%:*}" = "paper" ]; then heap=(-XX:MaxRAMPercentage=50); fi
+echo "gateway-start: starting ${GATEWAY_KEY} (${gc_threads} concurrent GC thread(s))"
+java -XX:+UseZGC -XX:ConcGCThreads="$gc_threads" "${heap[@]}" -jar "$APP_JAR" gateway &
 java_pid=$!
 
 # A JVM that stops answering /health altogether (frozen, so its own watchdog can't act) is killed here, so ECS starts it

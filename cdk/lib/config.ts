@@ -31,8 +31,11 @@ export const CONFIGS: { [stage in Stage]?: OrchestratorConfig } = {
  */
 export const ORDER_GATEWAYS = {
   cluster: 'order-gateways',
-  baseFamily: 'order-gateway',
-  capacityProvider: 'order-gateway-hosts',
+  // A gateway row's mode picks the base task definition its revision is copied from and the hosts it runs on.
+  modes: {
+    live: { baseFamily: 'order-gateway', capacityProvider: 'order-gateway-hosts' },
+    paper: { baseFamily: 'order-gateway-paper', capacityProvider: 'order-gateway-paper-hosts' },
+  },
   servicePrefix: 'order-gateway-',
   addressTag: 'gnome:order-gateway',
   reconcilerQueue: 'gateway-reconciler.fifo',

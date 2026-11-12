@@ -7,6 +7,7 @@ import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.fee.FeeTimeline;
 import java.io.IOException;
+import java.util.List;
 
 /**
  * What the gateway's threads need of an account: where sessions' commands go, whether it takes new orders, how many
@@ -25,6 +26,15 @@ public interface AccountLink {
 
         /** A session the account now serves, under its slot; on venues whose order ids carry the session. */
         default void addSession(final long slot, final String sessionId) {}
+
+        /**
+         * A paper session the account now serves: the listings its hello names here, and its simulation as its launch
+         * pinned it, so an account simulating its venue can build the session's own books before its first order.
+         */
+        default void addPaperSession(
+                final long slot, final String sessionId, final List<Listing> listings, final String simulationJson) {
+            addSession(slot, sessionId);
+        }
 
         default void removeSession(final long slot) {}
     }

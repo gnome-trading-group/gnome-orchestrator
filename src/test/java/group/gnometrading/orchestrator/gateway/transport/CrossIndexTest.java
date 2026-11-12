@@ -30,6 +30,17 @@ class CrossIndexTest {
     }
 
     @Test
+    void offChecksNothingAndHoldsNothing() {
+        this.index = new CrossIndex(this.keys, CrossIndex.Mode.OFF, 16, 4);
+        send(A, 1, YES, Side.Bid, 40 * CENTS);
+
+        assertEquals(CrossIndex.CLEAR, this.index.checkNew(B, YES, Side.Ask, 30 * CENTS));
+        assertEquals(CrossIndex.CLEAR, this.index.checkAmend(A, 1, 20 * CENTS));
+        assertEquals(0, this.index.size(), "a paper gateway's sessions trade on books of their own");
+        assertEquals(0, this.index.refused());
+    }
+
+    @Test
     void aSellAtOrBelowAnotherSessionsBidCrossesIt() {
         send(A, 1, YES, Side.Bid, 40 * CENTS);
 

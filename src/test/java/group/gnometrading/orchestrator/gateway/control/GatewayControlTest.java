@@ -129,6 +129,10 @@ class GatewayControlTest {
     private CrossIndex cross;
     private GatewayEgress egress;
     private GatewayControl control;
+    // What the hello names and which account the gateway holds it under: a live session's bound account, or for a
+    // paper gateway its simulated account (0).
+    private Mode helloMode = Mode.LIVE;
+    private int helloAccount = ACCOUNT_ID;
     private Listing listing;
     private SessionsFile sessionsFile;
 
@@ -145,6 +149,8 @@ class GatewayControlTest {
                 new ManyToOneRingBuffer<>(AccountReport[]::new, AccountReport::new, 64);
         final List<Integer> loads = new ArrayList<>();
         final List<String> sessionsAdded = new ArrayList<>();
+        // Paper sessions' simulations, as their hellos handed them over.
+        final List<String> paperSimulations = new ArrayList<>();
         volatile AccountState state = AccountState.READY;
         volatile int working;
 
@@ -191,6 +197,16 @@ class GatewayControlTest {
                 @Override
                 public void addSession(final long slot, final String sessionId) {
                     TestAccount.this.sessionsAdded.add(sessionId);
+                }
+
+                @Override
+                public void addPaperSession(
+                        final long slot,
+                        final String sessionId,
+                        final List<Listing> listings,
+                        final String simulationJson) {
+                    TestAccount.this.sessionsAdded.add(sessionId);
+                    TestAccount.this.paperSimulations.add(simulationJson);
                 }
             };
         }
@@ -243,7 +259,7 @@ class GatewayControlTest {
                 this.alerts,
                 this.sessions,
                 this.status,
-                Map.of(ACCOUNT_ID, this.account),
+                Map.of(this.helloAccount, this.account),
                 this.toControl,
                 this.toEgress,
                 new SessionRegistry(id -> {
@@ -317,7 +333,7 @@ class GatewayControlTest {
     void anAcceptedSessionIsIntroducedToItsLaneWithItsWeightWaitAndCapsBeforeAnyOrder() throws Exception {
         awaitReady();
         this.registryRecord.set(new SessionRegistry.SessionRecord(
-                SLOT, "RUNNING", STRATEGY_ID, "live", Set.of(LISTING_ID), Map.of(EXCHANGE_ID, ACCOUNT_ID), 3));
+                SLOT, "RUNNING", STRATEGY_ID, "live", Set.of(LISTING_ID), Map.of(EXCHANGE_ID, ACCOUNT_ID), 3, null));
         hello(0, 0);
         assertAccepted(awaitWelcome());
         sendOrder();
@@ -356,7 +372,7 @@ class GatewayControlTest {
     void aHelloNamingAListingTheSessionDoesntLeaseIsRefused() throws Exception {
         awaitReady();
         this.registryRecord.set(new SessionRegistry.SessionRecord(
-                SLOT, "RUNNING", STRATEGY_ID, "live", Set.of(), Map.of(EXCHANGE_ID, ACCOUNT_ID), 1));
+                SLOT, "RUNNING", STRATEGY_ID, "live", Set.of(), Map.of(EXCHANGE_ID, ACCOUNT_ID), 1, null));
         hello(0, 0);
         assertRefused(awaitWelcome(), HelloRefusal.LISTING_NOT_LEASED);
     }
@@ -739,6 +755,62 @@ class GatewayControlTest {
         assertEquals(List.of("s42-3"), this.account.query.cancelled);
     }
 
+    /** A paper gateway's control, holding its one simulated account, and a paper session the registry has. */
+    private void paperGateway() {
+        this.helloMode = Mode.PAPER;
+        this.helloAccount = 0;
+        this.registryRecord.set(new SessionRegistry.SessionRecord(
+                SLOT, "RUNNING", STRATEGY_ID, "paper", Set.of(LISTING_ID), Map.of(), 1, "{\"as_of\":\"2026-11-12\"}"));
+        this.control = control(List.of(), GatewayControl.Restart.HELLO_GRACE_NANOS);
+        this.control.servePaper();
+    }
+
+    @Test
+    void aPaperGatewayTakesAPaperSessionBoundToNoAccountAndHandsItsSimulationToTheAccount() throws Exception {
+        paperGateway();
+        awaitReady();
+
+        hello(0, 0);
+
+        assertAccepted(awaitWelcome());
+        assertEquals(List.of(SESSION_ID), this.account.sessionsAdded);
+        assertEquals(List.of("{\"as_of\":\"2026-11-12\"}"), this.account.paperSimulations, "as its launch pinned it");
+    }
+
+    @Test
+    void aPaperGatewayTakesNoLiveHello() throws Exception {
+        paperGateway();
+        this.helloMode = Mode.LIVE;
+        awaitReady();
+
+        hello(0, 0);
+
+        assertRefused(awaitWelcome(), HelloRefusal.WRONG_ACCOUNT);
+    }
+
+    @Test
+    void aLiveGatewayTakesNoPaperHello() throws Exception {
+        this.helloMode = Mode.PAPER;
+        awaitReady();
+
+        hello(0, 0);
+
+        assertRefused(awaitWelcome(), HelloRefusal.WRONG_ACCOUNT);
+    }
+
+    @Test
+    void aPaperSessionsOrderThisGatewayDoesntKnowWasLostWithTheSimulatedVenueAndIsCancelled() throws Exception {
+        paperGateway();
+        awaitReady();
+        hello(7, 1);
+        helloOrders(0, true, new long[] {1, OrderState.NEW.value(), 1});
+
+        await(() -> statuses().size() == 1, "a status for the order it holds open");
+        final OrderStatusDecoder lost = status(statuses().get(0));
+        assertEquals(OrderState.CANCELED, lost.state(), "gone unfilled, as a venue reports an order cancelled");
+        assertEquals(0, this.account.query.lookups.get(), "no venue to ask");
+    }
+
     @Test
     void aSessionNewToTheGatewayHasTheOrdersItHoldsOpenSettledAsTheVenueHasThem() throws Exception {
         // As after a stop whose cancel reports never reached it: the gateway that took them is gone, this one holds
@@ -820,8 +892,8 @@ class GatewayControlTest {
                 .sessionSeq(SLOT)
                 .sessionId(SESSION_ID)
                 .strategyId(STRATEGY_ID)
-                .mode(Mode.LIVE)
-                .venueAccountId(ACCOUNT_ID)
+                .mode(this.helloMode)
+                .venueAccountId(this.helloAccount)
                 .protocolVersion(SessionHelloEncoder.SCHEMA_VERSION)
                 .replyIp(HostAddress.pack("127.0.0.1") & 0xFFFF_FFFFL)
                 .replyPort(REPLY_PORT)
@@ -859,7 +931,7 @@ class GatewayControlTest {
 
     private static SessionRegistry.SessionRecord record(final String status) {
         return new SessionRegistry.SessionRecord(
-                SLOT, status, STRATEGY_ID, "live", Set.of(LISTING_ID), Map.of(EXCHANGE_ID, ACCOUNT_ID), 1);
+                SLOT, status, STRATEGY_ID, "live", Set.of(LISTING_ID), Map.of(EXCHANGE_ID, ACCOUNT_ID), 1, null);
     }
 
     private void hello(final long lastReportSeq, final int pages) throws InterruptedException {
@@ -869,8 +941,8 @@ class GatewayControlTest {
                 .sessionSeq(SLOT)
                 .sessionId(SESSION_ID)
                 .strategyId(STRATEGY_ID)
-                .mode(Mode.LIVE)
-                .venueAccountId(ACCOUNT_ID)
+                .mode(this.helloMode)
+                .venueAccountId(this.helloAccount)
                 .protocolVersion(SessionHelloEncoder.SCHEMA_VERSION)
                 .replyIp(HostAddress.pack("127.0.0.1") & 0xFFFF_FFFFL)
                 .replyPort(REPLY_PORT)

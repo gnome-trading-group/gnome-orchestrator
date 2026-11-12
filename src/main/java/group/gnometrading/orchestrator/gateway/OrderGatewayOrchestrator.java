@@ -1,5 +1,6 @@
 package group.gnometrading.orchestrator.gateway;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.account.GatewayAccounts;
@@ -7,6 +8,7 @@ import group.gnometrading.account.VenueAccount;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.PublishedMap;
 import group.gnometrading.logging.AsyncLogger;
@@ -48,10 +50,13 @@ import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
+import group.gnometrading.orchestrator.gateway.simulated.SimulatedAccount;
 import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
+import group.gnometrading.orchestrator.marketdata.MarketDataLeases;
+import group.gnometrading.orchestrator.marketdata.ShardMarketData;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
 import group.gnometrading.orchestrator.runtime.AlertsApi;
 import group.gnometrading.orchestrator.runtime.BoundedCalls;
@@ -59,12 +64,18 @@ import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.resources.Properties;
+import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.sequencer.GlobalSequence;
+import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.utils.CauseChain;
 import io.aeron.Subscription;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -104,6 +115,11 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     // How long a failing gateway waits for its alert to be taken before it halts.
     private static final long FATAL_ALERT_WAIT_MILLIS = 2_000;
     private static final long CONTROL_STALL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    // How long a paper gateway's simulated lane may go without a pass before it counts as hung.
+    private static final long SIMULATED_STALL_NANOS = TimeUnit.SECONDS.toNanos(30);
+    // A paper gateway's market-data ring: every stream its sessions' books read.
+    private static final int PAPER_MARKET_DATA_RING = 1 << 16;
+    private static final ObjectMapper LEASE_MAPPER = new ObjectMapper();
     // How long the control thread waits on the registry for one record or listing.
     private static final long REGISTRY_TIMEOUT_MILLIS = 5_000;
     // How long sessions have to come back and claim, through their hellos, orders an earlier process left.
@@ -148,23 +164,19 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         install(new SecurityMasterModule(), new AwsModule());
         final Logger logger = getInstance(Logger.class);
         final Properties properties = getInstance(Properties.class);
-        final AeronPathIdle idle = AeronPathIdle.forGateway(properties);
+        final GatewaySettings settings = GatewaySettings.of(properties);
+        final AeronPathIdle idle = idle(settings, properties);
         AgentRuntimeInstaller.installStandard(logger, idle);
 
         // Before any account can send: the startup sweep tells an earlier process's orders by being placed before this.
         final long startedMillis = System.currentTimeMillis();
-        final GatewaySettings settings = GatewaySettings.of(properties);
         final IngestGatewayAlerts alerts = alerts(logger, properties, settings);
         final ProcessExit exit = exit(logger, alerts);
         final CrossKeys crossKeys = new CrossKeys();
         final List<GatewayAccount> accounts = buildAccounts(settings, properties, logger, exit, crossKeys);
         final int crossCapacity = settings.maxOrders() * Math.max(1, accounts.size());
-        final CrossIndex cross = new CrossIndex(
-                crossKeys,
-                CrossIndex.Mode.valueOf(
-                        properties.getStringProperty("gateway.self.trade.mode").toUpperCase(Locale.ROOT)),
-                crossCapacity,
-                2 * crossCapacity);
+        final CrossIndex cross =
+                new CrossIndex(crossKeys, crossMode(settings, properties), crossCapacity, 2 * crossCapacity);
         final String ip = HostAddress.privateIp();
         if (ip == null) {
             throw new IllegalStateException("No private IP for sessions to reach this gateway on");
@@ -177,6 +189,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
         final Subscription ingressSubscription =
                 aeron.aeron().addSubscription(AeronChannels.gatewayIngress(ip, port), AeronStreamIds.GATEWAY_INGRESS);
+        final PaperVenue paper = settings.paper() ? paperVenue(logger, properties, settings, aeron, ip) : null;
 
         final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
         final GatewayStatus status = new GatewayStatus(wallClock.nanoTime());
@@ -189,10 +202,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 new ManyToOneRingBuffer<>(AccountReport[]::new, AccountReport::new, REJECT_QUEUE);
         final List<ManyToOneRingBuffer<AccountReport>> reportRings = new ArrayList<>();
         final Map<Integer, AccountLink> links = new HashMap<>();
-        for (final GatewayAccount account : accounts) {
-            reportRings.add(account.reports());
-            links.put(account.accountId(), account);
-        }
+        linkAccounts(accounts, paper, reportRings, links);
         reportRings.add(rejects);
 
         final GatewayJournal journal = journal(logger, properties, settings, wallClock, accounts.size());
@@ -242,6 +252,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         restart.sessions(),
                         GatewayControl.Restart.HELLO_GRACE_NANOS,
                         restart.loaded()));
+        startPaper(logger, exit, settings, control, paper);
 
         for (final GatewayAccount account : accounts) {
             account.start();
@@ -269,7 +280,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         reportDrops(logger, ingress, egress, sessions, cross);
         reportSelfTrades(logger, cross);
         sweepAtStartup(logger, alerts, accounts, restart, startedMillis, registryCalls);
-        final Thread watchdog = watchdog(logger, properties, exit, ingressRunner, egressRunner, control, accounts)
+        final SimulatedAccount simulated = paper == null ? null : paper.account();
+        final Thread watchdog = watchdog(
+                        logger, properties, exit, ingressRunner, egressRunner, control, accounts, simulated)
                 .start();
 
         Runtime.getRuntime()
@@ -277,7 +290,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         () -> {
                             // Threads are about to stop on purpose.
                             watchdog.interrupt();
-                            stop(logger, control, controlRunner, ingressRunner, egressRunner, accounts, aeron);
+                            stop(logger, control, controlRunner, ingressRunner, egressRunner, accounts, paper, aeron);
                             restart.logs().forEach(OwnershipLog::close);
                             if (journalRunner != null) {
                                 close(logger, journalRunner);
@@ -292,7 +305,145 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                             }
                         },
                         "gateway-shutdown"));
-        serveHealth(accounts);
+        serveHealth(accounts, simulated);
+    }
+
+    /** A paper gateway's sessions wait out simulated venue latency far longer than a park, so it idles as they do. */
+    private static AeronPathIdle idle(final GatewaySettings settings, final Properties properties) {
+        return settings.paper() ? AeronPathIdle.DEFAULT : AeronPathIdle.forGateway(properties);
+    }
+
+    /** A paper gateway checks nothing across sessions: each trades against books of its own. */
+    private static CrossIndex.Mode crossMode(final GatewaySettings settings, final Properties properties) {
+        return settings.paper()
+                ? CrossIndex.Mode.OFF
+                : CrossIndex.Mode.valueOf(
+                        properties.getStringProperty("gateway.self.trade.mode").toUpperCase(Locale.ROOT));
+    }
+
+    /** Each account's reports for egress and its link for ingress and control: the live ones, or the simulated one. */
+    private static void linkAccounts(
+            final List<GatewayAccount> accounts,
+            final PaperVenue paper,
+            final List<ManyToOneRingBuffer<AccountReport>> reportRings,
+            final Map<Integer, AccountLink> links) {
+        for (final GatewayAccount account : accounts) {
+            reportRings.add(account.reports());
+            links.put(account.accountId(), account);
+        }
+        if (paper != null) {
+            reportRings.add(paper.account().reports());
+            links.put(SimulatedAccount.ACCOUNT_ID, paper.account());
+        }
+    }
+
+    /** Starts a paper gateway's simulated venue, once control takes paper sessions' hellos. */
+    private static void startPaper(
+            final Logger logger,
+            final ProcessExit exit,
+            final GatewaySettings settings,
+            final GatewayControl control,
+            final PaperVenue paper) {
+        if (paper == null) {
+            return;
+        }
+        control.servePaper();
+        paper.marketData().start(fatal(logger, exit, "market data"));
+        paper.account().start();
+        logger.logf(LogMessage.DEBUG, "Gateway %s: simulating %s", settings.key(), settings.exchangeCode());
+        reportPaperMinutes(logger, paper.account());
+    }
+
+    /** A paper gateway's venue: the account every paper session trades on, and the shard reader feeding its books. */
+    private record PaperVenue(SimulatedAccount account, ShardMarketData marketData) {}
+
+    /**
+     * The simulated venue a paper gateway runs: its exchange's, from the security master, with that venue's limits
+     * where it has order entry; its books read from the shards through each session's own lease, or a local shard for
+     * a local run.
+     */
+    private PaperVenue paperVenue(
+            final Logger logger,
+            final Properties properties,
+            final GatewaySettings settings,
+            final AeronRuntime aeron,
+            final String ip) {
+        final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
+        final Exchange exchange = securityMaster.getExchange(settings.exchangeCode());
+        if (exchange == null) {
+            throw new IllegalStateException("No exchange " + settings.exchangeCode() + " for " + settings.key());
+        }
+        final SequencedRingBuffer<?> ring =
+                new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence(), PAPER_MARKET_DATA_RING);
+        final ShardMarketData marketData = ShardMarketData.shared(logger, aeron, ip, ring, System::nanoTime);
+        final SimulatedAccount.Streams streams = paperStreams(properties, marketData);
+        final SimulatedAccount account = new SimulatedAccount(
+                logger,
+                exchange.exchangeId(),
+                "paper-" + settings.exchangeCode().toLowerCase(Locale.ROOT),
+                VenueAccounts.limitsFor(settings.exchangeCode(), properties),
+                new AccountLane.Caps(
+                        properties.getIntProperty("gateway.session.max.open.orders"),
+                        properties.getIntProperty("gateway.session.max.new.per.second"),
+                        properties.getIntProperty("gateway.account.max.open.orders")),
+                AccountLane.Timing.defaults().maxQueueDelayNanos(),
+                settings.maxOrders(),
+                securityMaster,
+                ring,
+                streams,
+                System::nanoTime,
+                getInstance(EpochNanoClock.class));
+        return new PaperVenue(account, marketData);
+    }
+
+    /** Each session's streams through its own lease, as the session reads them itself; a local shard for a local run. */
+    private static SimulatedAccount.Streams paperStreams(
+            final Properties properties, final ShardMarketData marketData) {
+        if (properties.hasProperty("market.data.api.url")) {
+            final MarketDataLeases leases = new MarketDataLeases(
+                    HttpClient.newHttpClient(),
+                    URI.create(properties.getStringProperty("market.data.api.url")),
+                    MarketDataLeases.ApiKey.fromSecret(properties.getStringProperty("market.data.api.key.secret")),
+                    LEASE_MAPPER);
+            return new SimulatedAccount.Streams() {
+                @Override
+                public void addSession(final String sessionId, final int[] streamIds) {
+                    marketData.addSession(sessionId, () -> leases.get(sessionId), streamIds);
+                }
+
+                @Override
+                public void removeSession(final String sessionId) {
+                    marketData.removeSession(sessionId);
+                }
+            };
+        }
+        if (properties.hasProperty("market.data.local.shard")) {
+            final String shard = properties.getStringProperty("market.data.local.shard");
+            return new SimulatedAccount.Streams() {
+                @Override
+                public void addSession(final String sessionId, final int[] streamIds) {
+                    final MarketDataLeases.Lease lease = MarketDataLeases.local(shard, streamIds);
+                    marketData.addSession(sessionId, () -> lease, streamIds);
+                }
+
+                @Override
+                public void removeSession(final String sessionId) {
+                    marketData.removeSession(sessionId);
+                }
+            };
+        }
+        throw new IllegalArgumentException("A paper gateway reads its sessions' books from shards: it needs"
+                + " market.data.api.url (and market.data.api.key.secret), or market.data.local.shard for a local run");
+    }
+
+    /** Every minute, how the simulated venue kept up. */
+    private static void reportPaperMinutes(final Logger logger, final SimulatedAccount account) {
+        DaemonThreads.scheduler("gateway-paper-minutes")
+                .scheduleAtFixedRate(
+                        () -> logger.logf(LogMessage.DEBUG, "Gateway %s: %s", account.name(), account.describeMinute()),
+                        1,
+                        1,
+                        TimeUnit.MINUTES);
     }
 
     /** Where the gateway raises its alerts: the alerts API the reconciler names, with the registry's key. */
@@ -490,6 +641,10 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final Logger logger,
             final ProcessExit exit,
             final CrossKeys crossKeys) {
+        if (settings.paper()) {
+            // A paper gateway holds no venue account: its sessions trade on its simulated one.
+            return List.of();
+        }
         final VenueAccounts builder = new VenueAccounts(new VenueAccounts.Context(
                 logger,
                 properties,
@@ -636,7 +791,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final GnomeAgentRunner ingress,
             final GnomeAgentRunner egress,
             final GatewayControl gatewayControl,
-            final List<GatewayAccount> accounts) {
+            final List<GatewayAccount> accounts,
+            final SimulatedAccount simulated) {
         final long stall = TimeUnit.MILLISECONDS.toNanos(properties.getLongProperty("gateway.watchdog.stall.millis"));
         final List<Watchdog.CheckIn> checkIns = new ArrayList<>();
         checkIns.add(new Watchdog.CheckIn("ingress", "gateway-ingress", ingress::cycles, () -> false, stall));
@@ -651,6 +807,17 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             // Every account's reader thread has the same name, so none is picked out for its stack.
             checkIns.add(new Watchdog.CheckIn(
                     account.name() + " reader", null, account::readerPasses, account::readerPaused, stall));
+        }
+        if (simulated != null) {
+            // One pass may feed many sessions' books and run the simulator, which allocates: a slow pass is no hang,
+            // and
+            // a restart would cancel every paper order on the venue.
+            checkIns.add(new Watchdog.CheckIn(
+                    simulated.name() + " lane",
+                    "simulated-lane",
+                    simulated::lanePasses,
+                    () -> false,
+                    SIMULATED_STALL_NANOS));
         }
         return new Watchdog(logger, checkIns, System::nanoTime, exit);
     }
@@ -741,6 +908,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final GnomeAgentRunner ingressRunner,
             final GnomeAgentRunner egressRunner,
             final List<GatewayAccount> accounts,
+            final PaperVenue paper,
             final AeronRuntime aeron) {
         close(logger, controlRunner);
         try {
@@ -756,6 +924,14 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         close(logger, egressRunner);
         for (final GatewayAccount account : accounts) {
             account.close();
+        }
+        if (paper != null) {
+            try {
+                paper.account().close();
+                paper.marketData().close();
+            } catch (Exception e) {
+                logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to stop the simulated venue: %s", CauseChain.of(e));
+            }
         }
         aeron.close();
         logger.logf(LogMessage.DEBUG, "Gateway stopped");
@@ -786,10 +962,13 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         };
     }
 
-    private static void serveHealth(final List<GatewayAccount> accounts) {
+    private static void serveHealth(final List<GatewayAccount> accounts, final SimulatedAccount simulated) {
         final List<LaneLiveness> lanes = new ArrayList<>();
         for (final GatewayAccount account : accounts) {
             lanes.add(new LaneLiveness(account::lanePasses, System::nanoTime, LaneLiveness.STALL_NANOS));
+        }
+        if (simulated != null) {
+            lanes.add(new LaneLiveness(simulated::lanePasses, System::nanoTime, SIMULATED_STALL_NANOS));
         }
         try {
             new HealthCheckServer(HEALTH_PORT, () -> lanes.stream().allMatch(LaneLiveness::getAsBoolean)).start();

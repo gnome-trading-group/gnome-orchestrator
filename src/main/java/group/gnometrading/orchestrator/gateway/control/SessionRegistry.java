@@ -30,6 +30,8 @@ public final class SessionRegistry {
      * One session as the registry has it.
      *
      * @param rateWeight its strategy's weight in its share of an account's request budget
+     * @param simulationJson a paper session's simulation, as its launch pinned it ({@code config.simulation}); null for
+     *     a live one
      */
     public record SessionRecord(
             long sessionSeq,
@@ -38,7 +40,8 @@ public final class SessionRegistry {
             String mode,
             Set<Integer> listingIds,
             Map<Integer, Integer> accountByExchange,
-            int rateWeight) {
+            int rateWeight,
+            String simulationJson) {
 
         boolean running() {
             return "STARTING".equals(this.status) || "RUNNING".equals(this.status);
@@ -119,7 +122,8 @@ public final class SessionRegistry {
                     row.path("mode").asText(),
                     listings,
                     accounts,
-                    row.path("rate_weight").asInt(1));
+                    row.path("rate_weight").asInt(1),
+                    simulationJson(row.path("config").path("simulation")));
         };
     }
 
@@ -130,6 +134,14 @@ public final class SessionRegistry {
     public static String idBySeq(final RegistryConnection registry, final long sessionSeq) throws IOException {
         final JsonNode rows = read(new ObjectMapper(), registry, "/api/strategy-sessions?sessionSeq=" + sessionSeq);
         return rows.isEmpty() ? null : rows.get(0).path("session_id").asText(null);
+    }
+
+    /** A session's simulation as one JSON value, in the form a session reads it from {@code SIMULATION_JSON}. */
+    private static String simulationJson(final JsonNode simulation) {
+        if (simulation.isMissingNode() || simulation.isNull()) {
+            return null;
+        }
+        return simulation.isTextual() ? simulation.asText() : simulation.toString();
     }
 
     private static JsonNode read(final ObjectMapper mapper, final RegistryConnection registry, final String path)

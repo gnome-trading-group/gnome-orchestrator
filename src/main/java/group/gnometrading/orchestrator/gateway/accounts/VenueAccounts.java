@@ -425,6 +425,22 @@ public final class VenueAccounts {
     }
 
     /** The venue's limits with this stage's overrides under {@code prefix}, and a budget over them. */
+    /**
+     * The order-entry limits a paper gateway simulating this exchange gives each of its sessions: the venue's, with the
+     * same overrides a live gateway takes; null where there is no order entry for the exchange, so nothing is limited.
+     */
+    public static VenueRateLimits limitsFor(final String exchangeCode, final Properties properties) {
+        return switch (exchangeCode) {
+            case "KALSHI" -> KalshiVenue.rateLimits()
+                    .withOverrides(properties.getPropertiesByPrefix("kalshi.ratelimit."));
+            case "POLYMARKET_US" -> PolymarketUsVenue.rateLimits()
+                    .withOverrides(properties.getPropertiesByPrefix("polymarket.us.ratelimit."));
+            case "POLYMARKET_INTL" -> PolymarketIntlVenue.rateLimits()
+                    .withOverrides(properties.getPropertiesByPrefix("polymarket.intl.ratelimit."));
+            default -> null;
+        };
+    }
+
     private Budget budget(final VenueRateLimits defaults, final String prefix) {
         final VenueRateLimits limits =
                 defaults.withOverrides(this.context.properties().getPropertiesByPrefix(prefix));

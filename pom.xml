@@ -83,18 +83,18 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-simulation</artifactId>
-            <version>1.7.2</version>
+            <version>1.7.3</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>4.1.1</version>
+            <version>4.2.0</version>
         </dependency>
         <!-- The account path's fakes, for the order gateway's in-process tests. -->
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>4.1.1</version>
+            <version>4.2.0</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>

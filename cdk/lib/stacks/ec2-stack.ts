@@ -24,7 +24,7 @@ export class Ec2Stack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
 
-    // Paper and live sessions run under different roles: only a live session may look up its order gateways. Neither
+    // Paper and live sessions run under different roles, so either can be given what the other must not have. Neither
     // may read a venue account's credentials (gnome/accounts/*), which for a Polymarket wallet include the key that can
     // move its funds: live orders, and startup recovery's questions, go through the gateway, which holds them.
     this.launchTemplate(props, LAUNCH_TEMPLATE_NAME, `gnome-orchestrator-instance-${this.region}`, false);
@@ -73,14 +73,13 @@ export class Ec2Stack extends cdk.Stack {
       actions: ['secretsmanager:GetSecretValue'],
       resources: [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`],
     }));
-    if (live) {
-      // Where each venue's order gateway is; the table is shared with other services, so only gateway items.
-      role.addToPolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:GetItem'],
-        resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
-        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
-      }));
-    }
+    // Where each venue's order gateway is, live or paper; the table is shared with other services, so only gateway
+    // items.
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
+    }));
     // The journal shipper uploads large segments in parts, and abandons a failed multipart upload.
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['s3:PutObject', 's3:AbortMultipartUpload'],

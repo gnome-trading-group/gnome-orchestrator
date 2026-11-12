@@ -35,8 +35,13 @@ public final class CrossIndex {
     public enum Mode {
         /** Refused {@code SELF_TRADE}. */
         ENFORCE,
-        /** Sent, and counted: for paper, to see what enforcing would refuse. */
-        SHADOW
+        /** Sent, and counted: to see what enforcing would refuse. */
+        SHADOW,
+        /**
+         * Not checked, nothing held: a paper gateway, whose sessions each trade against books of their own, so their
+         * orders never meet.
+         */
+        OFF
     }
 
     /** The order may go. */
@@ -129,6 +134,9 @@ public final class CrossIndex {
      * held only once {@link #add} says it went.
      */
     public int checkNew(final long slot, final long listingKey, final Side side, final long price) {
+        if (this.mode == Mode.OFF) {
+            return CLEAR;
+        }
         final CrossKey key = this.crossKeys.get(listingKey);
         if (key == null || price <= 0) {
             return CLEAR;
@@ -143,6 +151,9 @@ public final class CrossIndex {
 
     /** Holds a new order {@link #checkNew} cleared and ingress has sent on to its lane. */
     public void add(final long slot, final long counter, final long listingKey, final Side side, final long price) {
+        if (this.mode == Mode.OFF) {
+            return;
+        }
         final CrossKey key = this.crossKeys.get(listingKey);
         if (key == null || side == null || price <= 0 || this.freeCount == 0) {
             return;
@@ -169,6 +180,9 @@ public final class CrossIndex {
      * room, or the listing has no key) can't be checked, and goes.
      */
     public int checkAmend(final long slot, final long counter, final long price) {
+        if (this.mode == Mode.OFF) {
+            return CLEAR;
+        }
         final Entry entry = this.orders.get(key(slot, counter));
         if (entry == null || price <= 0) {
             return CLEAR;
@@ -178,6 +192,9 @@ public final class CrossIndex {
 
     /** An amend {@link #checkAmend} cleared has gone: the order counts at both prices until it is answered. */
     public void amend(final long slot, final long counter, final long price) {
+        if (this.mode == Mode.OFF) {
+            return;
+        }
         final Entry entry = this.orders.get(key(slot, counter));
         if (entry != null && price > 0) {
             entry.amendPrice = firstSide(price, entry.complement);
@@ -194,6 +211,9 @@ public final class CrossIndex {
 
     /** Takes back an order a restart recovered, before any thread starts. */
     public void restore(final long slot, final long counter, final long listingKey, final Side side, final long price) {
+        if (this.mode == Mode.OFF) {
+            return;
+        }
         add(slot, counter, listingKey, side, price);
     }
 

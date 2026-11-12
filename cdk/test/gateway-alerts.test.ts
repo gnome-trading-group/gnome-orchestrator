@@ -1,5 +1,5 @@
 import {
-  AlertState, EMPTY_STATE, evaluate, Observation, RESTARTED_HOLD_MS, START_STUCK_MS,
+  AlertState, EMPTY_STATE, evaluate, firingMode, Observation, RESTARTED_HOLD_MS, START_STUCK_MS,
 } from '../lambda/gateway_reconciler/alerts';
 import { Activity, Outcome } from '../lambda/gateway_reconciler/reconciler';
 
@@ -12,11 +12,11 @@ const starting: Activity = { state: 'STARTING', linkedSessions: 0, workingOrders
 const degraded: Activity = { state: 'DEGRADED', linkedSessions: 1, workingOrders: 0 };
 
 function seen(outcome: Outcome, activity: Activity | null, serviceEvent?: string): Observation {
-  return { gatewayKey: KEY, region: 'us-east-1', outcome, activity, serviceEvent };
+  return { gatewayKey: KEY, mode: 'live', region: 'us-east-1', outcome, activity, serviceEvent };
 }
 
 function failed(error: string): Observation {
-  return { gatewayKey: KEY, region: 'us-east-1', activity: null, error };
+  return { gatewayKey: KEY, mode: 'live', region: 'us-east-1', activity: null, error };
 }
 
 /** Runs ticks one minute apart (the first at T0), each through JSON as the state is kept, returning each tick's alert types. */
@@ -208,8 +208,46 @@ describe('what the alerts keep', () => {
     expect(state.firing).toEqual({ [`GATEWAY_DOWN:${KEY}`]: 'GATEWAY_DOWN' });
   });
 
+  it('keeps the mode each alert fired in, so it resolves in that mode', () => {
+    const { state } = evaluate([seen('running', null)], evaluate([seen('running', ready(0, 1))], EMPTY_STATE, T0).state,
+      T0 + MINUTE);
+    expect(state.modes).toEqual({ [`GATEWAY_DOWN:${KEY}`]: 'live' });
+    expect(firingMode(state, `GATEWAY_DOWN:${KEY}`)).toBe('live');
+  });
+
+  it('resolves as live an alert kept before alerts had modes', () => {
+    expect(firingMode({ gateways: {}, firing: { [`GATEWAY_DOWN:${KEY}`]: 'GATEWAY_DOWN' } }, `GATEWAY_DOWN:${KEY}`))
+      .toBe('live');
+  });
+
   it('forgets a gateway no longer listed', () => {
     const { state } = evaluate([], evaluate([seen('running', ready(1, 1))], EMPTY_STATE, T0).state, T0 + MINUTE);
     expect(state).toEqual(EMPTY_STATE);
+  });
+});
+
+describe('a paper gateway', () => {
+  const PAPER = 'paper:kalshi:main';
+  const paper = (outcome: Outcome, activity: Activity | null): Observation =>
+    ({ gatewayKey: PAPER, mode: 'paper', region: 'us-east-1', outcome, activity });
+
+  it('raises its alerts in paper mode, so the registry never pages for it', () => {
+    const up = evaluate([paper('running', ready(1, 2)), seen('running', ready(1, 2))], EMPTY_STATE, T0);
+    const down = evaluate([paper('running', null), seen('running', null)], up.state, T0 + MINUTE);
+
+    expect(down.firing.get(`GATEWAY_DOWN:${PAPER}`)).toMatchObject({ mode: 'paper', labels: { gateway: PAPER } });
+    expect(down.firing.get(`GATEWAY_DOWN:${KEY}`)?.mode).toBe('live');
+    expect(firingMode(down.state, `GATEWAY_DOWN:${PAPER}`)).toBe('paper');
+  });
+
+  it('fails to reconcile in paper mode too', () => {
+    const failing: Observation = { gatewayKey: PAPER, mode: 'paper', region: 'us-east-1', activity: null, error: 'nope' };
+    let state = EMPTY_STATE;
+    let result = evaluate([failing], state, T0);
+    for (let i = 1; i < 3; i++) {
+      state = result.state;
+      result = evaluate([failing], state, T0 + i * MINUTE);
+    }
+    expect(result.firing.get(`GATEWAY_RECONCILE_FAILED:${PAPER}`)?.mode).toBe('paper');
   });
 });

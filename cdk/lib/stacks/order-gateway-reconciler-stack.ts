@@ -8,7 +8,9 @@ import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
-import { platformRegions, PRIMARY_REGION, SERVICE_ENDPOINTS } from '@gnome-trading-group/gnome-shared-cdk';
+import {
+  API_KEY_SECRET_NAMES, platformRegions, PRIMARY_REGION, SERVICE_ENDPOINTS,
+} from '@gnome-trading-group/gnome-shared-cdk';
 import { join } from 'path';
 import { ORDER_GATEWAYS } from '../config';
 
@@ -18,11 +20,11 @@ interface Props extends cdk.StackProps {
 }
 
 /**
- * The gateway reconciler (lambda/gateway_reconciler): the only thing that starts and stops live order gateways, in
- * every platform region, run one tick at a time. Its FIFO queue has one message group and the Lambda one concurrent run,
- * so ticks never overlap and a burst of wake-ups (sessions asking for gateways through the registry's gateways/ensure,
- * which sends to this queue by name) costs one tick; a schedule enqueues a tick every minute as the resync. One per
- * account, in the primary region, beside the registry and the service-endpoints table it reads.
+ * The gateway reconciler (lambda/gateway_reconciler): the only thing that starts and stops order gateways, live and
+ * paper, in every platform region, run one tick at a time. Its FIFO queue has one message group and the Lambda one
+ * concurrent run, so ticks never overlap and a burst of wake-ups (sessions asking for gateways through the registry's
+ * gateways/ensure, which sends to this queue by name) costs one tick; a schedule enqueues a tick every minute as the
+ * resync. One per account, in the primary region, beside the registry and the service-endpoints table it reads.
  */
 export class OrderGatewayReconcilerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
@@ -51,8 +53,12 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       environment: {
         REGISTRY_API_KEY_ID: props.registryApiKeyId,
         GATEWAY_CLUSTER: ORDER_GATEWAYS.cluster,
-        GATEWAY_BASE_FAMILY: ORDER_GATEWAYS.baseFamily,
-        GATEWAY_CAPACITY_PROVIDER: ORDER_GATEWAYS.capacityProvider,
+        GATEWAY_LIVE_BASE_FAMILY: ORDER_GATEWAYS.modes.live.baseFamily,
+        GATEWAY_LIVE_CAPACITY_PROVIDER: ORDER_GATEWAYS.modes.live.capacityProvider,
+        GATEWAY_PAPER_BASE_FAMILY: ORDER_GATEWAYS.modes.paper.baseFamily,
+        GATEWAY_PAPER_CAPACITY_PROVIDER: ORDER_GATEWAYS.modes.paper.capacityProvider,
+        // Paper gateways read their sessions' leases as the sessions do, with this key.
+        MARKET_DATA_API_KEY_SECRET: API_KEY_SECRET_NAMES.MARKET_DATA,
         GATEWAY_SERVICE_PREFIX: ORDER_GATEWAYS.servicePrefix,
         GATEWAY_ADDRESS_TAG: ORDER_GATEWAYS.addressTag,
       },
@@ -81,6 +87,7 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
         `arn:aws:ssm:${PRIMARY_REGION}:${this.account}:parameter/gnome/orchestrator/latest-version`,
         `arn:aws:ssm:${PRIMARY_REGION}:${this.account}:parameter/gnome/registry/api-url`,
         `arn:aws:ssm:${PRIMARY_REGION}:${this.account}:parameter/gnome/alerting/api-url`,
+        `arn:aws:ssm:${PRIMARY_REGION}:${this.account}:parameter/gnome/market-data/api-url`,
       ],
     }));
     // What each gateway says of itself: sessions linked, orders working.
@@ -135,15 +142,17 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
     }));
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['autoscaling:SetDesiredCapacity'],
-      // OrderGatewayStack's group, named by CloudFormation after its stack.
-      resources: platformRegions().map(region => `arn:aws:autoscaling:${region}:${this.account}:autoScalingGroup:*:`
-        + `autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-GatewayHosts*`),
+      // OrderGatewayStack's live and paper groups, named by CloudFormation after its stack.
+      resources: platformRegions().flatMap(region => ['GatewayHosts', 'GatewayPaperHosts'].map(group =>
+        `arn:aws:autoscaling:${region}:${this.account}:autoScalingGroup:*:`
+        + `autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-${group}*`)),
     }));
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ec2:AllocateAddress', 'ec2:CreateTags'],
       resources: platformRegions().map(region => `arn:aws:ec2:${region}:${this.account}:elastic-ip/*`),
     }));
-    // The gateways' task and execution roles (OrderGatewayStack names them), for the services it creates.
+    // The gateways' task roles, live and paper, and execution role (OrderGatewayStack names them), for the services it
+    // creates.
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['iam:PassRole'],
       resources: [`arn:aws:iam::${this.account}:role/gnome-order-gateway-*`],

@@ -1,4 +1,4 @@
-package group.gnometrading.orchestrator.session.marketdata;
+package group.gnometrading.orchestrator.marketdata;
 
 import group.gnometrading.schemas.MessageHeaderDecoder;
 import group.gnometrading.schemas.ShardStatusDecoder;
@@ -7,7 +7,7 @@ import org.agrona.DirectBuffer;
 import org.agrona.collections.Int2ObjectHashMap;
 
 /**
- * One shard a session reads from: its status subscription, which also owns the receive port every stream from that
+ * One shard this process reads from: its status subscription, which also owns the receive port every stream from that
  * shard shares (named by {@link #tag}). Made by the control thread; the ingress thread reads its status, and decides
  * when no stream needs it any more ({@link #retired}), after which the control thread closes it and never reuses it.
  */

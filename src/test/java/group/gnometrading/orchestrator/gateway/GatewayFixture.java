@@ -118,7 +118,8 @@ public final class GatewayFixture implements AutoCloseable {
                             "live",
                             Set.of(listingId),
                             Map.of(exchangeId, accountId),
-                            rateWeight));
+                            rateWeight,
+                            null));
         }
 
         /** The session as the registry has it once it stopped. */
@@ -133,7 +134,8 @@ public final class GatewayFixture implements AutoCloseable {
                             running.mode(),
                             running.listingIds(),
                             running.accountByExchange(),
-                            running.rateWeight()));
+                            running.rateWeight(),
+                            null));
         }
     }
 

@@ -14,7 +14,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * The gateway's alerts through the alerts ingest API, as live-mode alerts labelled with the gateway's key and exchange.
+ * The gateway's alerts through the alerts ingest API, in its mode (a paper gateway's are paper alerts, which never
+ * page), labelled with the gateway's key and exchange.
  * A failure to send is logged, never thrown: the condition is in the gateway's log either way.
  */
 final class IngestGatewayAlerts implements GatewayAlerts {
@@ -25,12 +26,14 @@ final class IngestGatewayAlerts implements GatewayAlerts {
     private final AlertsApi api;
     private final String gatewayKey;
     private final String exchange;
+    private final String mode;
 
     IngestGatewayAlerts(final Logger logger, final AlertsApi api, final String gatewayKey) {
         this.logger = logger;
         this.api = api;
         this.gatewayKey = gatewayKey;
         final String[] parts = gatewayKey.split(":");
+        this.mode = "paper".equals(parts[0]) ? "paper" : "live";
         this.exchange = parts.length > 1 ? parts[1] : "";
     }
 
@@ -74,7 +77,7 @@ final class IngestGatewayAlerts implements GatewayAlerts {
         body.put("type", type);
         body.put("key", key);
         body.put("title", title);
-        body.put("mode", "live");
+        body.put("mode", this.mode);
         final Map<String, String> all = new LinkedHashMap<>();
         all.put("gateway", this.gatewayKey);
         all.put("exchange", this.exchange);

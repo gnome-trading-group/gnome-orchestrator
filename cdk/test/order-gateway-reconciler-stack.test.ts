@@ -31,6 +31,42 @@ describe('the gateway reconciler stack', () => {
   });
 });
 
+describe('the gateway reconciler\'s access', () => {
+  const app = new cdk.App();
+  const template = Template.fromStack(new OrderGatewayReconcilerStack(app, 'Access', {
+    env: { account: '123456789012', region: PRIMARY_REGION },
+    registryApiKeyId: 'key-id',
+  }));
+  const statements = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+
+  it('names both modes\' base task definitions and capacity providers, and the market-data key', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({
+        GATEWAY_LIVE_BASE_FAMILY: ORDER_GATEWAYS.modes.live.baseFamily,
+        GATEWAY_LIVE_CAPACITY_PROVIDER: ORDER_GATEWAYS.modes.live.capacityProvider,
+        GATEWAY_PAPER_BASE_FAMILY: ORDER_GATEWAYS.modes.paper.baseFamily,
+        GATEWAY_PAPER_CAPACITY_PROVIDER: ORDER_GATEWAYS.modes.paper.capacityProvider,
+        MARKET_DATA_API_KEY_SECRET: 'gnome/api-keys/market-data',
+      }) },
+    });
+  });
+
+  it('reads where the market-data API is, for paper gateways', () => {
+    expect(statements).toContain('parameter/gnome/market-data/api-url');
+  });
+
+  it('may raise the live and the paper host groups in every region', () => {
+    for (const region of ['us-east-1', 'eu-west-1', 'ap-northeast-1']) {
+      expect(statements).toContain(`autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-GatewayHosts*`);
+      expect(statements).toContain(`autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-GatewayPaperHosts*`);
+    }
+  });
+
+  it('may pass both gateway task roles', () => {
+    expect(statements).toContain(':role/gnome-order-gateway-*');
+  });
+});
+
 describe('the gateway reconciler\'s alarms', () => {
   const app = new cdk.App();
   const template = Template.fromStack(new OrderGatewayReconcilerStack(app, 'Alarms', {
