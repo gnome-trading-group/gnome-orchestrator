@@ -159,6 +159,14 @@ public class SessionOrchestrator extends Orchestrator {
                 System::exit);
     }
 
+    /**
+     * A position tracker with a shared slot for every listing the session trades: each is registered at start, so a
+     * fixed size fails a session holding more listings (a film's RT strikes on three venues, YES and NO each).
+     */
+    static DefaultPositionTracker positionTracker(List<Listing> listings) {
+        return new DefaultPositionTracker(new SharedPositionBuffer(listings.size()));
+    }
+
     private void configureSession(Logger logger, Properties properties) {
         SecurityMaster securityMaster = getInstance(SecurityMaster.class);
         EpochNanoClock nanoClock = getInstance(EpochNanoClock.class);
@@ -173,7 +181,7 @@ public class SessionOrchestrator extends Orchestrator {
         SessionBuffers buffers = SessionBuffers.create();
         ShardMarketData marketData = startAeron(logger, properties, listings, streams, dataStreams, buffers);
 
-        DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(64));
+        DefaultPositionTracker positionTracker = positionTracker(listings);
         String sessionId = properties.hasProperty("session.id") ? properties.getStringProperty("session.id") : null;
         // Without a session (a local run) there is no ledger to write to or to recover from.
         LedgerRing ledgerRing = sessionId == null
