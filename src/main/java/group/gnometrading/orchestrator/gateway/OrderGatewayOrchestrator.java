@@ -88,6 +88,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongFunction;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -254,7 +255,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         restart.sessions(),
                         GatewayControl.Restart.HELLO_GRACE_NANOS,
                         restart.loaded()));
-        startPaper(logger, exit, settings, control, paper);
+        final GatewayMinutes minutes = minutes(logger, properties, settings);
+        startPaper(logger, exit, settings, control, paper, minutes);
 
         for (final GatewayAccount account : accounts) {
             account.start();
@@ -277,7 +279,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 control,
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway control failed: %s", CauseChain.of(error)));
         logger.logf(LogMessage.DEBUG, "Gateway %s: taking sessions on %s:%d", settings.key(), ip, port);
-        reportAdmissions(logger, alerts, accounts, admissions);
+        reportAdmissions(logger, alerts, accounts, admissions, sessions, minutes);
         pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class));
         reportDrops(logger, ingress, egress, sessions, cross);
         reportSelfTrades(logger, cross);
@@ -345,7 +347,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final ProcessExit exit,
             final GatewaySettings settings,
             final GatewayControl control,
-            final PaperVenue paper) {
+            final PaperVenue paper,
+            final GatewayMinutes minutes) {
         if (paper == null) {
             return;
         }
@@ -353,7 +356,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         paper.marketData().start(fatal(logger, exit, "market data"));
         paper.account().start();
         logger.logf(LogMessage.DEBUG, "Gateway %s: simulating %s", settings.key(), settings.exchangeCode());
-        reportPaperMinutes(logger, paper.account());
+        reportPaperMinutes(logger, paper.account(), minutes);
     }
 
     /** A paper gateway's venue: the account every paper session trades on, and the shard reader feeding its books. */
@@ -442,13 +445,35 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     }
 
     /** Every minute, how the simulated venue kept up. */
-    private static void reportPaperMinutes(final Logger logger, final SimulatedAccount account) {
+    private static void reportPaperMinutes(
+            final Logger logger, final SimulatedAccount account, final GatewayMinutes minutes) {
         DaemonThreads.scheduler("gateway-paper-minutes")
                 .scheduleAtFixedRate(
-                        () -> logger.logf(LogMessage.DEBUG, "Gateway %s: %s", account.name(), account.describeMinute()),
+                        () -> {
+                            final SimulatedAccount.Minute minute = account.takeMinute();
+                            logger.logf(LogMessage.DEBUG, "Gateway %s: %s", account.name(), minute.describe());
+                            final long now = System.currentTimeMillis();
+                            minutes.paper(minute, now);
+                            minutes.publish(now);
+                        },
                         1,
                         1,
                         TimeUnit.MINUTES);
+    }
+
+    /**
+     * Where the gateway's minutes go for the controller: their own item beside its endpoint. A local run writes none, as
+     * it advertises no endpoint.
+     */
+    private GatewayMinutes minutes(final Logger logger, final Properties properties, final GatewaySettings settings) {
+        final String mode = settings.paper() ? "paper" : "live";
+        if (localRun(properties)) {
+            return new GatewayMinutes(logger, settings.key(), mode, json -> {});
+        }
+        final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "ENDPOINTS"));
+        final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
+        return new GatewayMinutes(
+                logger, settings.key(), mode, json -> endpoints.putMinutes(settings.key(), json, wallClock.nanoTime()));
     }
 
     /** Where the gateway raises its alerts: the alerts API the reconciler names, with the registry's key. */
@@ -482,8 +507,16 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final Logger logger,
             final GatewayAlerts alerts,
             final List<GatewayAccount> accounts,
-            final List<LaneAdmissions> admissions) {
+            final List<LaneAdmissions> admissions,
+            final SessionTable sessions,
+            final GatewayMinutes minutes) {
         final long[] refusalsSeen = new long[accounts.size()];
+        // The lane's minutes end on its own clock: each is published once, whenever this tick first sees it.
+        final long[] published = new long[accounts.size()];
+        final LongFunction<String> sessionIdOfSlot = slot -> {
+            final GatewaySession session = sessions.bySlot(slot);
+            return session == null ? null : session.sessionId;
+        };
         final AccountAlert rateLimited = new AccountAlert(alerts, "GATEWAY_VENUE_RATE_LIMITED", accounts.size());
         final AccountAlert unanswered = new AccountAlert(alerts, "GATEWAY_ORDERS_UNANSWERED", accounts.size());
         DaemonThreads.scheduler("gateway-admissions")
@@ -519,6 +552,22 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                 if (minute != null) {
                                     logger.logf(LogMessage.DEBUG, "Gateway %s: %s", account.name(), minute);
                                 }
+                                final LaneAdmissions.Minute summary =
+                                        admissions.get(i).minute(now);
+                                if (summary != null && summary.endedAtNanos() != published[i]) {
+                                    published[i] = summary.endedAtNanos();
+                                    minutes.account(
+                                            account.accountId(),
+                                            account.name(),
+                                            summary,
+                                            System.currentTimeMillis()
+                                                    - TimeUnit.NANOSECONDS.toMillis(now - summary.endedAtNanos()),
+                                            newRefusals,
+                                            sessionIdOfSlot);
+                                }
+                            }
+                            if (!accounts.isEmpty()) {
+                                minutes.publish(System.currentTimeMillis());
                             }
                         },
                         1,

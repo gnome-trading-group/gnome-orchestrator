@@ -186,10 +186,25 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
         return this.lane.passes();
     }
 
-    /** What the last minute looked like, for the gateway's minute line. */
-    public String describeMinute() {
-        return String.format(
-                "%d orders working, %d sessions, books' worst lag %d ms, %d new orders refused for a book without data",
+    /**
+     * The simulated venue's last minute.
+     *
+     * @param lagMaxMillis the oldest new record any book took, from the venue's receipt
+     * @param refusedNotReady new orders refused for a book without data, since the gateway started
+     */
+    public record Minute(int workingOrders, int sessions, long lagMaxMillis, long refusedNotReady) {
+        /** As the gateway's minute line gives it. */
+        public String describe() {
+            return String.format(
+                    "%d orders working, %d sessions, books' worst lag %d ms, %d new orders refused for a book without"
+                            + " data",
+                    this.workingOrders, this.sessions, this.lagMaxMillis, this.refusedNotReady);
+        }
+    }
+
+    /** What the minute since the last call looked like; once a minute, from one thread. */
+    public Minute takeMinute() {
+        return new Minute(
                 this.lane.workingOrders(),
                 this.sessionIds.size(),
                 this.lane.takeLagMaxNanos() / 1_000_000,

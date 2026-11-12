@@ -33,6 +33,9 @@ public final class ServiceEndpoints {
     static final String EXPIRES_AT = "expires_at";
     static final String LINKED_SESSIONS = "linked_sessions";
     static final String WORKING_ORDERS = "working_orders";
+    static final String MINUTES = "minutes_json";
+    /** An order gateway's minutes outlive a stop by this long, so its last numbers can still be read. */
+    public static final long MINUTES_TTL_SECONDS = TimeUnit.MINUTES.toSeconds(10);
 
     private final DynamoDbClient dynamo;
     private final String table;
@@ -64,6 +67,27 @@ public final class ServiceEndpoints {
         item.put(EXPIRES_AT, AttributeValue.fromN(Long.toString(writtenAtSeconds + TTL_SECONDS)));
         this.dynamo.putItem(
                 PutItemRequest.builder().tableName(this.table).item(item).build());
+    }
+
+    /**
+     * An order gateway's recent minutes (its own JSON), in their own item beside its endpoint,
+     * {@code order-gateway#<key>#minutes}: written once a minute, so the endpoint, written every 15 s and read by every
+     * session looking for it, stays small.
+     */
+    public void putMinutes(final String gatewayKey, final String json, final long writtenAtNanos) {
+        final long writtenAtSeconds = TimeUnit.NANOSECONDS.toSeconds(writtenAtNanos);
+        this.dynamo.putItem(PutItemRequest.builder()
+                .tableName(this.table)
+                .item(Map.of(
+                        KEY, AttributeValue.fromS(minutesId(gatewayKey)),
+                        MINUTES, AttributeValue.fromS(json),
+                        WRITTEN_AT, AttributeValue.fromN(Long.toString(writtenAtNanos)),
+                        EXPIRES_AT, AttributeValue.fromN(Long.toString(writtenAtSeconds + MINUTES_TTL_SECONDS))))
+                .build());
+    }
+
+    public static String minutesId(final String gatewayKey) {
+        return ServiceEndpoint.serviceId(ServiceEndpoint.Kind.ORDER_GATEWAY, gatewayKey) + "#minutes";
     }
 
     /**

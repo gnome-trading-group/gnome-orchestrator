@@ -63,6 +63,20 @@ class ServiceEndpointsTest {
     }
 
     @Test
+    void aGatewaysMinutesGoInTheirOwnItemBesideItsEndpointAndOutliveAStopByTenMinutes() {
+        this.endpoints.putMinutes("live:kalshi:main", "{\"accounts\":[]}", WRITTEN);
+
+        final Map<String, AttributeValue> item = this.stored.get();
+        assertEquals(
+                "order-gateway#live:kalshi:main#minutes",
+                item.get(ServiceEndpoints.KEY).s());
+        assertEquals("{\"accounts\":[]}", item.get(ServiceEndpoints.MINUTES).s());
+        assertEquals(
+                Long.toString(TimeUnit.NANOSECONDS.toSeconds(WRITTEN) + ServiceEndpoints.MINUTES_TTL_SECONDS),
+                item.get(ServiceEndpoints.EXPIRES_AT).n());
+    }
+
+    @Test
     void anItemExpiresAMinuteAfterItsLastWrite() {
         this.endpoints.put(this.shard);
 

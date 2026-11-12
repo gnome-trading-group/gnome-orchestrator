@@ -40,14 +40,14 @@ class LaneAdmissionsAllocationTest {
         assertTrue(allocated < 1_024, "allocated " + allocated + " bytes");
     }
 
-    /** Every kind of decision, answers and busy connections too, with a minute ending every 10,000. */
+    /** Every kind of decision from as many sessions as an account takes, answers and busy connections too, with a minute ending every 10,000. */
     private static void decide(final LaneAdmissions admissions, final long[] now, final int count) {
         final AdmissionAction[] actions = AdmissionAction.values();
         for (int i = 0; i < count; i++) {
             now[0] += LaneAdmissions.MINUTE_NANOS / 10_000;
             final AdmissionAction action = actions[i % (actions.length - 1)];
             final RequestClass type = i % 3 == 0 ? RequestClass.CANCEL : RequestClass.NEW;
-            admissions.decided(i % 7, i, type, action, i, i % 50);
+            admissions.decided(i % 1_024, i, type, action, i, i % 50);
             admissions.answered(type, 1_000L * i, i % 11 != 0);
             if (i % 13 == 0) {
                 admissions.connectionsBusy();

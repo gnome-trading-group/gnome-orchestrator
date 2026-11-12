@@ -7,8 +7,12 @@ import group.gnometrading.orchestrator.runtime.LatencyHistogram;
 import group.gnometrading.schemas.gateway.AdmissionAction;
 import group.gnometrading.schemas.gateway.AdmissionRecordEncoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
+import org.agrona.collections.Hashing;
+import org.agrona.collections.Long2LongHashMap;
 import org.agrona.concurrent.UnsafeBuffer;
 
 /**
@@ -21,6 +25,35 @@ import org.agrona.concurrent.UnsafeBuffer;
 public final class LaneAdmissions implements AccountLane.Admissions {
 
     public static final long MINUTE_NANOS = TimeUnit.MINUTES.toNanos(1);
+    // Room for every session an account takes (AccountLane.MAX_SESSIONS, 1,024) without the map ever growing on the
+    // lane's thread.
+    private static final int SESSION_CAPACITY = 4096;
+
+    /**
+     * One account's last full minute, as the gateway publishes it.
+     *
+     * @param endedAtNanos when the minute ended, on the gateway's nano clock
+     * @param sentBySlot requests each session's slot had sent to the venue (new orders, amends and cancels)
+     */
+    public record Minute(
+            long endedAtNanos,
+            long cancels,
+            long cancelWaitP99Micros,
+            long cancelWaitMaxMicros,
+            long orders,
+            long orderWaitP99Micros,
+            long orderWaitMaxMicros,
+            long held,
+            long refusedWaiting,
+            long refusedWithoutConnection,
+            long dropped,
+            long orderAnswerP50Micros,
+            long orderAnswerP99Micros,
+            long cancelAnswerP50Micros,
+            long cancelAnswerP99Micros,
+            long unanswered,
+            long connectionsBusy,
+            Map<Long, Long> sentBySlot) {}
 
     private final int accountId;
     private final JournalRecorder journal;
@@ -42,6 +75,13 @@ public final class LaneAdmissions implements AccountLane.Admissions {
     private long expiredWithoutConnection;
     private long dropped;
     private long minuteEndsNanos;
+    // Each session's sends this minute, and last minute's, swapped at the minute's end so the lane never allocates.
+    private final Long2LongHashMap[] sentBySlot = {
+        new Long2LongHashMap(SESSION_CAPACITY, Hashing.DEFAULT_LOAD_FACTOR, 0),
+        new Long2LongHashMap(SESSION_CAPACITY, Hashing.DEFAULT_LOAD_FACTOR, 0)
+    };
+    private int counting;
+    private volatile Long2LongHashMap lastSentBySlot;
 
     // The last full minute, for the status line.
     private volatile long lastCancels;
@@ -79,6 +119,10 @@ public final class LaneAdmissions implements AccountLane.Admissions {
             final long tokensLeft) {
         rollMinute();
         count(type, action, queuedNanos);
+        if (action == AdmissionAction.SENT) {
+            final Long2LongHashMap sent = this.sentBySlot[this.counting];
+            sent.put(sessionSlot, sent.get(sessionSlot) + 1);
+        }
         this.encoder
                 .wrapAndApplyHeader(this.buffer, 0, this.header)
                 .venueAccountId(this.accountId)
@@ -171,7 +215,50 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         this.expired = 0;
         this.expiredWithoutConnection = 0;
         this.dropped = 0;
+        this.lastSentBySlot = this.sentBySlot[this.counting];
+        this.counting ^= 1;
+        this.sentBySlot[this.counting].clear();
         this.minuteEndsNanos = now + MINUTE_NANOS;
+    }
+
+    /**
+     * The last full minute, or null if it ended over two minutes ago (a lane that decided nothing since has nothing to
+     * say). Allocates; for a side thread, within the minute after it ended (the lane clears its sessions' counts the
+     * minute after).
+     */
+    public Minute minute(final long now) {
+        final long ended = this.lastMinuteEndedNanos;
+        if (ended == 0 || now - ended > 2 * MINUTE_NANOS) {
+            return null;
+        }
+        final Map<Long, Long> sent = new HashMap<>();
+        final Long2LongHashMap counts = this.lastSentBySlot;
+        if (counts != null) {
+            final Long2LongHashMap.KeyIterator slots = counts.keySet().iterator();
+            while (slots.hasNext()) {
+                final long slot = slots.nextValue();
+                sent.put(slot, counts.get(slot));
+            }
+        }
+        return new Minute(
+                ended,
+                this.lastCancels,
+                this.lastCancelP99Micros,
+                this.lastCancelMaxMicros,
+                this.lastOrders,
+                this.lastOrderP99Micros,
+                this.lastOrderMaxMicros,
+                this.lastHeld,
+                this.lastExpired,
+                this.lastExpiredWithoutConnection,
+                this.lastDropped,
+                this.lastOrderAnswerP50Micros,
+                this.lastOrderAnswerP99Micros,
+                this.lastCancelAnswerP50Micros,
+                this.lastCancelAnswerP99Micros,
+                this.lastUnanswered,
+                this.lastConnectionsBusy,
+                sent);
     }
 
     /** Requests the venue never answered in the last full minute; 0 once that minute ended over two minutes ago. */

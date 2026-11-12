@@ -145,7 +145,12 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     listings they name, opens reply publications, sends the welcome and replay, cancels a silent or deaf session's
     orders (lane `CANCEL_SESSION`) and asks it to hello again, evicts a session that sends something unreadable
     (refused 5 min), keeps the state (STARTING/READY/DEGRADED) and writes `order-gateway#<key>` to `service-endpoints`
-    every 15 s and at once on a change of state (sessions link only to one it calls READY or DEGRADED). SIGTERM is a planned stop: every session's orders cancelled, then, once the lanes are empty, a goodbye
+    every 15 s and at once on a change of state (sessions link only to one it calls READY or DEGRADED). Once a minute
+    `GatewayMinutes` writes its last hour beside it, as JSON in `order-gateway#<key>#minutes` (10-minute TTL; none for
+    a local run): per account each minute's sends, budget waits, holds and refusals, the venue's answer times, 429s and
+    unanswered requests (`LaneAdmissions.minute`), and the last minute's sends per session slot (counted on the lane in
+    presized maps, so nothing allocates there); for a paper gateway, its simulated venue's minutes. The registry's
+    `GET /gateways/status` reads both items for the controller's Order Gateways page. SIGTERM is a planned stop: every session's orders cancelled, then, once the lanes are empty, a goodbye
     sent last (after those cancels' reports) before anything closes.
   - Caps: `gateway.session.max.open.orders` (200) and `gateway.session.max.new.per.second` (50) per session,
     `gateway.account.max.open.orders` (2,000) per account, in each lane (`AccountLane.Caps`); a session's hello may
