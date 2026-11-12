@@ -122,6 +122,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     private static final ObjectMapper LEASE_MAPPER = new ObjectMapper();
     // How long the control thread waits on the registry for one record or listing.
     private static final long REGISTRY_TIMEOUT_MILLIS = 5_000;
+    // Set only for a gateway run on a developer's machine beside one session: that session's record, as JSON.
+    private static final String LOCAL_SESSION = "gateway.local.session";
     // How long sessions have to come back and claim, through their hellos, orders an earlier process left.
     private static final long SWEEP_WAIT_MILLIS = 30_000;
 
@@ -228,7 +230,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 journal == null ? JournalRecorder.NONE : journal.egress(),
                 cross);
         final BoundedCalls registryCalls = new BoundedCalls("gateway-registry");
-        final SessionRegistry registry = sessionRegistry(registryCalls);
+        final SessionRegistry registry = sessionRegistry(properties, registryCalls);
         final GatewayControl.Listings listings = listings(registryCalls, getInstance(SecurityMaster.class));
         final GatewayRestart.Result restart =
                 restart(logger, properties, settings, accounts, listings, registry, cross);
@@ -388,7 +390,10 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         properties.getIntProperty("gateway.account.max.open.orders")),
                 AccountLane.Timing.defaults().maxQueueDelayNanos(),
                 settings.maxOrders(),
-                securityMaster,
+                SimulatedAccount.fromRegistry(
+                        securityMaster,
+                        logger,
+                        "paper-" + settings.exchangeCode().toLowerCase(Locale.ROOT)),
                 ring,
                 streams,
                 System::nanoTime,
@@ -823,7 +828,10 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     }
 
     /** The sessions' registry records, asked on the control thread, so with a deadline (a miss falls back to its cache). */
-    private SessionRegistry sessionRegistry(final BoundedCalls registryCalls) {
+    private SessionRegistry sessionRegistry(final Properties properties, final BoundedCalls registryCalls) {
+        if (localRun(properties)) {
+            return new SessionRegistry(SessionRegistry.local(properties.getStringProperty(LOCAL_SESSION)));
+        }
         final SessionRegistry.Source source = SessionRegistry.over(getInstance(RegistryConnection.class));
         return new SessionRegistry(
                 sessionId -> registryCalls.call(() -> source.fetch(sessionId), REGISTRY_TIMEOUT_MILLIS));
@@ -858,13 +866,19 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         };
     }
 
-    /** Writes where sessions reach the gateway and its state, on a thread of its own; a failed write waits for the next. */
+    /**
+     * Writes where sessions reach the gateway and its state, on a thread of its own; a failed write waits for the next. A
+     * local run writes nothing: its session names it, and an item under its key would pass for the deployed gateway.
+     */
     private GatewayControl.Advertiser advertiser(
             final Logger logger,
             final GatewaySettings settings,
             final Properties properties,
             final String ip,
             final int port) {
+        if (localRun(properties)) {
+            return (state, linkedSessions, workingOrders) -> {};
+        }
         final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "ENDPOINTS"));
         final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
         final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
@@ -885,6 +899,12 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                 linkedSessions,
                                 workingOrders)))
                 .start();
+    }
+
+    /** A gateway run beside one session on a developer's machine ({@link SessionRegistry#local}), not deployed. */
+    private static boolean localRun(final Properties properties) {
+        return properties.hasProperty(LOCAL_SESSION)
+                && !properties.getStringProperty(LOCAL_SESSION).isBlank();
     }
 
     private static String instance() {

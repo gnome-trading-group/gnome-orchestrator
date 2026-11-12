@@ -52,8 +52,7 @@ class SessionAgentsCloseTest {
                 feed.close();
             }
         };
-        final SessionAgents started =
-                new SessionAgents(marketData, strategy, oms, List.of(slowOrderWriter), null, null, null);
+        final SessionAgents started = new SessionAgents(marketData, strategy, oms, slowOrderWriter, null, null);
         final Thread closing = new Thread(() -> SessionAgents.close(started, null, null, new NullLogger()));
         closing.setDaemon(true);
         closing.start();

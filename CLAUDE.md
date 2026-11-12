@@ -20,7 +20,12 @@ data writes `/etc/gnome/session.json` and starts the `gnome-strategy` systemd un
   manual checks against real venues (run by hand with `-D` flags documented in each class). Surefire skips them; never
   wire them into `mvn test`.
 - Local runs (Docker, same install script as the AMI; needs `~/.m2/settings.xml` and `~/.aws` with a `dev`
-  profile): `docker compose up --build strategy` (a paper session; starts `collector` too) or `collector` alone.
+  profile): `docker compose up --build strategy` (a paper session; starts `collector` and `paper-gateway`, the paper
+  gateway it trades through, too) or `collector` alone. `paper-gateway` runs without the registry: it takes only the
+  session in its `GATEWAY_LOCAL_SESSION` (`gateway.local.session`: slot, strategy, listings and simulation, matching
+  `strategy`'s `SESSION_SEQ`, `STRATEGY_ID` and `LISTINGS`), advertises nothing to `service-endpoints`, and simulates
+  one venue (its `GATEWAY_KEY`'s), so a local session trades one exchange. The two share a network namespace and
+  reach each other on 127.0.0.1.
   `docker compose stop strategy` sends the same SIGTERM an instance stop does. The `collector` service is shard
   `local`: put its item in the dev `collection-shards` table first (`shard_id` `local`, numeric `generation`,
   `streams` and `publish` as packed big-endian int32s, see `DynamoAssignment.pack`). `strategy` has no lease: its
@@ -42,8 +47,8 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
 - `session/SessionOrchestrator` - the session process: listings, the OMS, positions, ledger (with startup recovery)
   and risk sync, wired from the pieces beside it: `SessionBuffers` (every ring buffer on the session sequence and its
   journal source), `SessionStrategy` (python or java strategy), `SessionAgents` (start order, close order, heartbeat),
-  `marketdata/SessionMarketData`, `orders/SessionOrders` (simulated exchange or venue gateway per listing, the router,
-  rate limiters, bound venue accounts) and `journal/SessionJournal`.
+  `marketdata/SessionMarketData`, `orders/SessionOrders` (a gateway link per venue, live or paper, and the bound venue
+  accounts) and `journal/SessionJournal`.
 - `session/marketdata/`: `SessionMarketData` wires the shared `marketdata/` reader for a session. Every session reads its streams from shards, live ones from on-demand PRODUCTION shards,
   paper ones from RESEARCH shards. The launcher leases them (`MARKET_DATA_API_URL` set); a local run names one shard
   instead (`market.data.local.shard`, `MarketDataLeases.local`); a session with neither fails at start. A shard outage
@@ -70,13 +75,15 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
 - `session/lifecycle/`: `SessionExit` (graceful exit), `SessionFatalHandler` (every error exit),
   `SessionHeartbeatAgent`, `SessionStatusReporter` (STARTING -> RUNNING), `SessionReports` (alerts + registry PATCH).
 - `session/journal/`: `JournalManagerAgent`, `JournalSegmentSealer`, `JournalSource`.
-- `session/orders/`: paper sessions trade on `PaperTradingOutboundGateway` (one per listing, `ListingRouter` with
-  several). Live sessions trade only through order gateways, and hold no trading key: one `GatewayLink` per venue
-  (`live:<exchange>:main`, found in `service-endpoints`, or `order.gateway.local=<ip>:<port>`), opened by
+- `session/orders/`: every session trades only through order gateways: one `GatewayLink` per venue (`live:<exchange>:main`
+  on the venue account the registry bound it to, holding no trading key; or for paper `paper:<exchange>:main` on
+  account 0, which simulates the venue; found in `service-endpoints`, or `order.gateway.local=<ip>:<port>`; the key's
+  kind is the hello's mode; a run without a registry session names its slot in `session.seq`), opened by
   `GatewayLinks` on a control thread, and one `GatewayClient` agent reading the OMS's orders and writing its reports
   (no router). A NEW on a link not ready is rejected `GATEWAY_UNAVAILABLE`; cancels wait for the link; a gateway's
   `OrderStatus` becomes the reports the OMS lacks. The client starts, and every link is welcomed (within
-  `order.gateway.start.timeout.seconds`), before startup recovery, which asks the venue through it
+  `order.gateway.start.timeout.seconds`), before startup recovery, which asks a live venue through it (a paper session
+  asks nothing: it settles from the ledger alone, the simulated venue keeping nothing past a gateway's process)
   (`GatewayVenueOrderQuery`: `VenueQuery` for open orders and lookups, `CancelEnded` to cancel what an ended session
   of the strategy left; a query a dropped link lost is sent again). On close the client sends each ready link what it
   still holds, then a `SessionGoodbye` (`SESSION_EXIT`), so the gateway cancels and unlinks the session at once
@@ -107,7 +114,8 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   restart take-back, startup sweep or PM Intl heartbeats): `gateway/simulated/`'s `SimulatedAccount` (account 0, which
   paper hellos name; `GatewayControl.servePaper()` takes only PAPER hellos and reports an order it doesn't know as
   CANCELED, lost with the simulated venue) runs one `SimulatedLane` thread for every paper session on the venue. Each
-  session gets its own books (gnome-simulation's `MbpSimulatedExchange`, one per listing, built at its hello from its
+  session gets its own books (gnome-simulation's `MbpSimulatedExchange`, one per listing, built at its hello
+  (`SimulatedAccount.Simulations`; deployed, `fromRegistry`) from its
   registry `config.simulation`, as the session's own simulation was; a re-hello keeps them) and its own budget and caps
   as if alone on the account (gnome-gateways' `account/admission/` queue, caps, hold and expiry, and the venue's
   `VenueRateLimits` where it has order entry, `VenueAccounts.limitsFor`; none otherwise). Each pass: commands first,
@@ -208,7 +216,10 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     `VenueOrderQuery.ownerOf`), `<session>-<counter>`, the session found by `session_seq` in the registry, else the
     slot. A list that fails is retried every 10 s, alerting `GATEWAY_SWEEP_FAILED` past 5 minutes.
   - Tests: `GatewayFixture` (test scope, from gnome-gateways' test jar) runs a whole gateway in process on a fake
-    venue; `session/orders/GatewayInProcessTest` drives sessions through it, restart included.
+    venue; `session/orders/GatewayInProcessTest` drives sessions through it, restart included. `PaperGatewayFixture`
+    runs a paper gateway on books the test feeds (re-sending each quote every 20 ms, as a shard re-sends a quiet
+    stream), driven by `PaperGatewayInProcessTest`; `SimulatedParityTest` holds the paper gateway to the reports
+    sessions' own simulation gave (`src/test/resources/paper/`).
   - Whether it runs is not its own decision: the gateway reconciler (`cdk/lambda/gateway_reconciler`) starts and stops
     it. Its endpoint item
     (every 15 s) carries `linked_sessions` and `working_orders`, which the reconciler reads; scaled to zero, ECS sends

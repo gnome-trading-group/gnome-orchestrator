@@ -46,24 +46,24 @@ class JournalManagerAgentTest {
         Map<SequencedRingBuffer<?>, JournalSource> sources = new IdentityHashMap<>();
         SequencedRingBuffer<Mbp10Schema> marketData =
                 buffer(Mbp10Schema::new, sessionSequence, sources, JournalSource.STRATEGY_MARKET_DATA);
+        SequencedRingBuffer<Intent> intents =
+                buffer(Intent::new, sessionSequence, sources, JournalSource.STRATEGY_INTENT);
         SequencedRingBuffer<Intent> omsOrders = buffer(Intent::new, sessionSequence, sources, JournalSource.OMS_ORDER);
-        SequencedRingBuffer<Intent> routedOrders =
-                buffer(Intent::new, sessionSequence, sources, JournalSource.ROUTED_ORDER);
-        SequencedRingBuffer<OrderExecutionReport> routedReports =
-                buffer(OrderExecutionReport::new, sessionSequence, sources, JournalSource.ROUTED_EXEC_REPORT);
         SequencedRingBuffer<OrderExecutionReport> omsReports =
                 buffer(OrderExecutionReport::new, sessionSequence, sources, JournalSource.OMS_EXEC_REPORT);
+        SequencedRingBuffer<OrderExecutionReport> strategyReports =
+                buffer(OrderExecutionReport::new, sessionSequence, sources, JournalSource.STRATEGY_EXEC_REPORT);
         SessionJournal.verifyCoverage(sessionSequence, sources);
         JournalManagerAgent agent = agent(sessionSequence, sources);
         agent.onStart();
 
-        // A book update, then one order's round trip through a multi-listing session: OMS order, the router's copy
-        // to the venue, the venue's report, and the router's copy of that back to the OMS.
+        // A book update, then one order's round trip: the strategy's intent, the OMS's order to the venue, the venue's
+        // report to the OMS, and the OMS's report to the strategy.
         publish(marketData);
+        publish(intents);
         publish(omsOrders);
-        publish(routedOrders);
-        publish(routedReports);
         publish(omsReports);
+        publish(strategyReports);
         assertEquals(5, agent.doWork());
         agent.onClose();
 
@@ -73,10 +73,10 @@ class JournalManagerAgentTest {
         assertEquals(
                 List.of(
                         JournalSource.STRATEGY_MARKET_DATA.id(),
+                        JournalSource.STRATEGY_INTENT.id(),
                         JournalSource.OMS_ORDER.id(),
-                        JournalSource.ROUTED_ORDER.id(),
-                        JournalSource.ROUTED_EXEC_REPORT.id(),
-                        JournalSource.OMS_EXEC_REPORT.id()),
+                        JournalSource.OMS_EXEC_REPORT.id(),
+                        JournalSource.STRATEGY_EXEC_REPORT.id()),
                 recordedSources);
         assertEquals(5, last);
     }

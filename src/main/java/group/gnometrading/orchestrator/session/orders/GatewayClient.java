@@ -26,7 +26,6 @@ import group.gnometrading.schemas.gateway.GatewayMessageLimits;
 import group.gnometrading.schemas.gateway.GoodbyeReason;
 import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
-import group.gnometrading.schemas.gateway.Mode;
 import group.gnometrading.schemas.gateway.OrderState;
 import group.gnometrading.schemas.gateway.OrderStatusDecoder;
 import group.gnometrading.schemas.gateway.QueryStatus;
@@ -586,7 +585,7 @@ public final class GatewayClient implements AeronPathAgent {
                 .sessionSeq(this.identity.sessionSeq())
                 .sessionId(this.identity.sessionId())
                 .strategyId(this.identity.strategyId())
-                .mode(Mode.LIVE)
+                .mode(link.mode)
                 .venueAccountId(link.venueAccountId)
                 .protocolVersion(SessionHelloEncoder.SCHEMA_VERSION)
                 .replyIp(HostAddress.pack(link.replyIp) & 0xFFFF_FFFFL)

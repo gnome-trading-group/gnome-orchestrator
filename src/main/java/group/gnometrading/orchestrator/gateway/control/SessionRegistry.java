@@ -128,6 +128,36 @@ public final class SessionRegistry {
     }
 
     /**
+     * A local run's only session, whatever its id: a gateway run beside one session without the registry answers every
+     * hello with this record, so the session's slot ({@code session.seq}) and listings must match it.
+     *
+     * @param json {@code session_seq}, {@code strategy_id}, {@code listings} (ids) and {@code simulation} (as a session's
+     *     {@code SIMULATION_JSON}); a paper session, running, bound to no account
+     */
+    public static Source local(final String json) {
+        final JsonNode config;
+        try {
+            config = new ObjectMapper().readTree(json);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("A local session's record isn't JSON: " + e.getMessage(), e);
+        }
+        final Set<Integer> listings = new HashSet<>();
+        for (final JsonNode listing : config.path("listings")) {
+            listings.add(listing.asInt());
+        }
+        final SessionRecord record = new SessionRecord(
+                config.path("session_seq").asLong(),
+                "RUNNING",
+                config.path("strategy_id").asInt(),
+                "paper",
+                Set.copyOf(listings),
+                Map.of(),
+                1,
+                simulationJson(config.path("simulation")));
+        return sessionId -> record;
+    }
+
+    /**
      * The id of the session with this {@code session_seq}; null if the registry has none. Polymarket US orders name a
      * session's slot, which is its {@code session_seq} until 100,000 sessions wrap it.
      */

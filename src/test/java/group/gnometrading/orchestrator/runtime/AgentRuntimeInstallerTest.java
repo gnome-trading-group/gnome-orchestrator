@@ -63,7 +63,7 @@ class AgentRuntimeInstallerTest {
 
     @Test
     void testStandardProfileNeverSpins() throws Exception {
-        AgentRuntimeInstaller.install(new Properties("agent-runtime/standard.properties"), logger, 1);
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/standard.properties"), logger);
 
         assertInstanceOf(BackoffIdleStrategy.class, AgentRuntime.attach(HOT));
         assertInstanceOf(SleepingIdleStrategy.class, AgentRuntime.attach(BACKGROUND));
@@ -71,7 +71,7 @@ class AgentRuntimeInstallerTest {
 
     @Test
     void testLowLatencyWithoutAffinityNeverSpins() throws Exception {
-        AgentRuntimeInstaller.install(new Properties("agent-runtime/no-affinity.properties"), logger, 1);
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/no-affinity.properties"), logger);
 
         assertInstanceOf(BackoffIdleStrategy.class, AgentRuntime.attach(HOT));
         assertInstanceOf(SleepingIdleStrategy.class, AgentRuntime.attach(BACKGROUND));
@@ -81,7 +81,7 @@ class AgentRuntimeInstallerTest {
     @Test
     @DisabledOnOs(OS.LINUX)
     void testAffinityGivesHotAgentsDedicatedCoresAndSleepsTheRest() throws Exception {
-        AgentRuntimeInstaller.install(new Properties("agent-runtime/affinity.properties"), logger, 1);
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/affinity.properties"), logger);
 
         assertInstanceOf(NoOpIdleStrategy.class, AgentRuntime.attach(HOT));
         assertInstanceOf(NoOpIdleStrategy.class, AgentRuntime.attach(HOT));
@@ -92,7 +92,7 @@ class AgentRuntimeInstallerTest {
     @Test
     @DisabledOnOs(OS.LINUX)
     void testWarnsWhenIsolatedCoresCannotFitTheHotThreads() throws Exception {
-        AgentRuntimeInstaller.install(new Properties("agent-runtime/affinity.properties"), logger, 3);
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/affinity.properties"), logger);
 
         verify(logger).logf(eq(LogMessage.UNKNOWN_ERROR), contains("undersized"), any(Object[].class));
     }
@@ -101,20 +101,12 @@ class AgentRuntimeInstallerTest {
     void testRejectsUnknownProfile() {
         assertThrows(
                 IllegalArgumentException.class,
-                () -> AgentRuntimeInstaller.install(new Properties("agent-runtime/unknown.properties"), logger, 1));
-    }
-
-    @Test
-    void testExpectedHotThreads() {
-        assertEquals(5, AgentRuntimeInstaller.expectedHotThreads("paper", 1));
-        assertEquals(8, AgentRuntimeInstaller.expectedHotThreads("paper", 3));
-        assertEquals(6, AgentRuntimeInstaller.expectedHotThreads("live", 1));
-        assertEquals(9, AgentRuntimeInstaller.expectedHotThreads("live", 2));
+                () -> AgentRuntimeInstaller.install(new Properties("agent-runtime/unknown.properties"), logger));
     }
 
     @Test
     void marketDataAgentsParkNoLongerThanConfigured() throws Exception {
-        AgentRuntimeInstaller.install(new Properties("agent-runtime/market-data-idle.properties"), logger, 1);
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/market-data-idle.properties"), logger);
 
         assertTrue(AgentRuntime.attach(MARKET_DATA).toString().contains("maxParkPeriodNs=50000"));
         assertTrue(AgentRuntime.attach(HOT).toString().contains("maxParkPeriodNs=1000000"));
@@ -122,7 +114,7 @@ class AgentRuntimeInstallerTest {
 
     @Test
     void marketDataAgentsParkUpToAMillisecondByDefault() throws Exception {
-        AgentRuntimeInstaller.install(new Properties("agent-runtime/standard.properties"), logger, 1);
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/standard.properties"), logger);
 
         assertTrue(AgentRuntime.attach(MARKET_DATA).toString().contains("maxParkPeriodNs=1000000"));
     }

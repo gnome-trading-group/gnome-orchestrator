@@ -18,7 +18,6 @@ import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.orchestrator.session.journal.SessionJournal;
 import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.orchestrator.session.lifecycle.SessionHeartbeatAgent;
-import group.gnometrading.orchestrator.session.orders.ListingRouter;
 import group.gnometrading.strategies.StrategyAgent;
 import java.io.File;
 import java.util.ArrayList;
@@ -32,15 +31,14 @@ import org.agrona.concurrent.SystemEpochClock;
  * watches them.
  *
  * @param marketData the session's market data, started before the agents that read it
- * @param router null with one listing
+ * @param orderEntry the gateway client, which carries every listing's orders to its venue's order gateway
  * @param ledger null without a registry session
  */
 record SessionAgents(
         MarketData marketData,
         GnomeAgentRunner strategy,
         GnomeAgentRunner oms,
-        List<GnomeAgentRunner> outboundAgents,
-        GnomeAgentRunner router,
+        GnomeAgentRunner orderEntry,
         GnomeAgentRunner ledger,
         GnomeAgentRunner riskSync) {
 
@@ -53,20 +51,15 @@ record SessionAgents(
      * Starts order entry ahead of everything else: a live session's gateway client must be welcomed before startup
      * recovery, which asks the venue through it. Nothing reaches it until the OMS starts.
      */
-    static List<GnomeAgentRunner> startOrderEntry(List<GnomeAgent> outboundAgents, ErrorHandler errorHandler) {
-        List<GnomeAgentRunner> outboundRunners = new ArrayList<>(outboundAgents.size());
-        for (GnomeAgent outbound : outboundAgents) {
-            outboundRunners.add(startOn(outbound, errorHandler));
-        }
-        return outboundRunners;
+    static GnomeAgentRunner startOrderEntry(GnomeAgent client, ErrorHandler errorHandler) {
+        return startOn(client, errorHandler);
     }
 
-    /** @param outboundRunners order entry, already started by {@link #startOrderEntry} */
+    /** @param orderEntry already started by {@link #startOrderEntry} */
     static SessionAgents start(
             MarketData marketData,
             OmsAgent omsAgent,
-            List<GnomeAgentRunner> outboundRunners,
-            ListingRouter routerAgent,
+            GnomeAgentRunner orderEntry,
             StrategyAgent strategy,
             LedgerAgent ledgerAgent,
             RiskSyncAgent riskSyncAgent,
@@ -88,11 +81,9 @@ record SessionAgents(
             throw new IllegalStateException("Market data didn't start", e);
         }
         GnomeAgentRunner omsRunner = startOn(omsAgent, errorHandler);
-        GnomeAgentRunner routerRunner = routerAgent == null ? null : startOn(routerAgent, errorHandler);
         GnomeAgentRunner strategyRunner = startOn(strategy, errorHandler);
         GnomeAgentRunner ledgerRunner = ledgerAgent == null ? null : startOn(ledgerAgent, errorHandler);
-        return new SessionAgents(
-                marketData, strategyRunner, omsRunner, outboundRunners, routerRunner, ledgerRunner, riskSyncRunner);
+        return new SessionAgents(marketData, strategyRunner, omsRunner, orderEntry, ledgerRunner, riskSyncRunner);
     }
 
     private static GnomeAgentRunner startOn(GnomeAgent agent, ErrorHandler errorHandler) {
@@ -117,10 +108,7 @@ record SessionAgents(
         closeQuietly(started.marketData(), "market data", logger);
         closeQuietly(started.strategy(), logger);
         closeQuietly(started.oms(), logger);
-        closeQuietly(started.router(), logger);
-        for (GnomeAgentRunner outbound : started.outboundAgents()) {
-            closeQuietly(outbound, logger);
-        }
+        closeQuietly(started.orderEntry(), logger);
         // After the OMS and gateways, so its final write holds everything they recorded while closing.
         closeQuietly(started.ledger(), logger);
         closeQuietly(started.riskSync(), logger);
@@ -151,12 +139,11 @@ record SessionAgents(
         List<GnomeAgentRunner> watched = new ArrayList<>();
         // A stuck journal holds up market data and every trading buffer once their rings fill.
         for (GnomeAgentRunner runner :
-                new GnomeAgentRunner[] {strategy, oms, router, ledger, riskSync, journal.runner()}) {
+                new GnomeAgentRunner[] {strategy, oms, orderEntry, ledger, riskSync, journal.runner()}) {
             if (runner != null) {
                 watched.add(runner);
             }
         }
-        watched.addAll(outboundAgents);
         int bodyCapacity =
                 SessionHeartbeatAgent.bodyCapacity(sessionId, watched, gateways, orderGateways, priceSlotRegistry);
         GnomeAgentRunner runner = new GnomeAgentRunner(

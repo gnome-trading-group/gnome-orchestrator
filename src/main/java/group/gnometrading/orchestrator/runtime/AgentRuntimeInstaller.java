@@ -35,13 +35,15 @@ public final class AgentRuntimeInstaller {
     static final String LOW_LATENCY = "low_latency";
     private static final String DEFAULT_HOUSEKEEPING = "0-1";
 
+    /**
+     * Hot agents per session, however many listings it trades, live or paper: the gateway client (every listing's
+     * order entry), the strategy, the OMS, the shard ingress agent and the media driver's network thread.
+     */
+    static final int EXPECTED_HOT_THREADS = 5;
+
     private AgentRuntimeInstaller() {}
 
-    /**
-     * Installs the runtime for this session.
-     *
-     * @param listingCount used only to warn when the instance has fewer isolated cores than hot threads
-     */
+    /** Installs the runtime for this session. */
     /**
      * Whether hot agents get isolated cores of their own. Inbound socket readers spin exactly when this holds, so a
      * reader never busy-polls a core it shares.
@@ -51,7 +53,7 @@ public final class AgentRuntimeInstaller {
                 && Boolean.parseBoolean(optional(properties, "cpu.affinity.enabled", "false"));
     }
 
-    public static void install(Properties properties, Logger logger, int listingCount) {
+    public static void install(Properties properties, Logger logger) {
         String profile = profile(properties);
         AgentRuntime.Listener listener = new LoggingListener(logger);
         AeronPathIdle idle = AeronPathIdle.from(properties);
@@ -89,14 +91,12 @@ public final class AgentRuntimeInstaller {
                 Arrays.toString(housekeeping),
                 pinner == ThreadPinner.NONE ? "unavailable" : "loaded");
 
-        int expectedHot = expectedHotThreads(optional(properties, "mode", "paper"), listingCount);
-        if (expectedHot > isolated.length) {
+        if (EXPECTED_HOT_THREADS > isolated.length) {
             logger.logf(
                     LogMessage.UNKNOWN_ERROR,
-                    "Instance undersized: ~%d hot threads expected for %d listing(s) but only %d isolated cores;"
+                    "Instance undersized: ~%d hot threads expected but only %d isolated cores;"
                             + " the overflow will back off on housekeeping cores",
-                    expectedHot,
-                    listingCount,
+                    EXPECTED_HOT_THREADS,
                     isolated.length);
         }
     }
@@ -123,17 +123,6 @@ public final class AgentRuntimeInstaller {
         return (agent, placement) -> agent instanceof AeronPathAgent && !placement.dedicated()
                 ? idle.agentStrategy()
                 : base.idleStrategyFor(agent, placement);
-    }
-
-    /**
-     * Hot agents per session: each listing's outbound side (the simulated exchange in paper, writer and reader in
-     * live), the strategy and the OMS, the shard ingress agent and the media driver's network thread, and the router
-     * once there is more than one listing.
-     */
-    static int expectedHotThreads(String mode, int listingCount) {
-        int perListing = "live".equals(mode) ? 2 : 1;
-        int router = listingCount > 1 ? 1 : 0;
-        return perListing * listingCount + 4 + router;
     }
 
     private static String profile(Properties properties) {

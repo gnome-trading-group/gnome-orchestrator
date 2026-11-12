@@ -21,10 +21,39 @@ services:
       - ./market-data:/app/market-data
     shm_size: '4gb'
 
+  # The paper gateway the `strategy` session trades through, simulating its listing's venue (listing 6 is Hyperliquid's)
+  # as a deployed one does, from the same `collector` streams. Without the registry: GATEWAY_LOCAL_SESSION is the one
+  # session it takes (slot, strategy and listings as `strategy` sets them, and its simulation: the listing simulates
+  # with its exchange's registry parameters as recorded by as_of, fees zeroed), and it advertises
+  # nothing, so the dev gateways stay untouched. `strategy` shares its network, so each reaches the other on 127.0.0.1.
+  paper-gateway:
+    build:
+      context: .
+      secrets:
+        - maven_settings
+    image: gnome-orchestrator:latest
+    container_name: gnome-orchestrator-paper-gateway
+    depends_on:
+      - collector
+    stop_grace_period: 30s
+    environment:
+      ORCHESTRATOR_ROLE: gateway
+      GATEWAY_KEY: paper:hyperliquid:main
+      STAGE: dev
+      AWS_PROFILE: dev
+      AWS_REGION: us-east-1
+      JOURNAL_ENABLED: "false"
+      GATEWAY_STATE_DIRECTORY: /tmp/gateway
+      MARKET_DATA_LOCAL_SHARD: collector:40000
+      GATEWAY_LOCAL_SESSION: '{"session_seq": 1, "strategy_id": 5, "listings": [6], "simulation": {"as_of": "2026-10-16T00:00:00Z", "listings": {"6": {"fee_model": {"type": "static", "taker_fee": 0, "maker_fee": 0}}}}}'
+    volumes:
+      - ~/.aws/:/root/.aws:ro
+    shm_size: '1gb'
+
   # A paper session run exactly as on EC2, minus the EC2 wrapper and the lease: it reads its streams from the
-  # `collector` service, whose `local` shard item must collect and publish them (see CLAUDE.md). Uses the jar built
-  # from this checkout unless ORCHESTRATOR_VERSION is set; `docker compose stop strategy` sends the same SIGTERM an
-  # instance stop does.
+  # `collector` service, whose `local` shard item must collect and publish them (see CLAUDE.md), and trades through
+  # `paper-gateway`. Uses the jar built from this checkout unless ORCHESTRATOR_VERSION is set; `docker compose stop
+  # strategy` sends the same SIGTERM an instance stop does.
   strategy:
     build:
       context: .
@@ -34,6 +63,8 @@ services:
     container_name: gnome-orchestrator-strategy
     depends_on:
       - collector
+      - paper-gateway
+    network_mode: service:paper-gateway
     stop_grace_period: 60s
     environment:
       STAGE: dev
@@ -48,8 +79,8 @@ services:
       RESEARCH_COMMIT: main
       LATENCY_PROFILE: standard
       MARKET_DATA_LOCAL_SHARD: collector:40000
-      # The listing simulates with its exchange's registry parameters as recorded by then, with fees zeroed.
-      SIMULATION_JSON: '{"as_of": "2026-10-16T00:00:00Z", "listings": {"6": {"fee_model": {"type": "static", "taker_fee": 0, "maker_fee": 0}}}}'
+      ORDER_GATEWAY_LOCAL: 127.0.0.1:40010
+      SESSION_SEQ: 1
     volumes:
       - ~/.aws/:/root/.aws:ro
 

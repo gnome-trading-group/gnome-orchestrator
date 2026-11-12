@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.AsyncLogger;
@@ -70,8 +71,8 @@ import org.agrona.concurrent.SystemEpochNanoClock;
  * wired over sequenced ring buffers on one session sequence that the journal records.
  *
  * <ul>
- *   <li>{@code mode}: {@code paper} trades against {@link group.gnometrading.simulation.exchange.MbpSimulatedExchange};
- *       {@code live} through the venue's order gateway on the account the registry bound to the session.
+ *   <li>{@code mode}: {@code paper} trades through each venue's paper gateway, which simulates it; {@code live}
+ *       through the venue's order gateway on the account the registry bound to the session.
  *   <li>{@code strategy.type} and {@code strategy.class}: see {@link SessionStrategy}.
  *   <li>{@code strategy.id}: the registry strategy, which scopes PnL and risk.
  *   <li>{@code listings}: the traded listing ids (JSON array, e.g. {@code [1,2,3]}).
@@ -94,7 +95,7 @@ public class SessionOrchestrator extends Orchestrator {
     private volatile SessionJournal journal = SessionJournal.OFF;
     private volatile GnomeAgentRunner heartbeatRunner;
     // Order entry, started ahead of the other agents; closed on its own if the session fails before they start.
-    private volatile List<GnomeAgentRunner> orderEntry = List.of();
+    private volatile GnomeAgentRunner orderEntry;
     private volatile Logger logger;
     // A session's way out on an error; null for a local run, which throws instead.
     private volatile SessionFatalHandler fatalHandler;
@@ -167,9 +168,9 @@ public class SessionOrchestrator extends Orchestrator {
         StreamDirectory streams = SessionMarketData.streams(securityMaster, listings, dataStreams);
         ListingDirectory listingDirectory = RiskModule.directory(listings);
         RiskEngine riskEngine = RiskModule.riskEngine(properties, listingDirectory);
-        AgentRuntimeInstaller.install(properties, logger, listings.size());
+        AgentRuntimeInstaller.install(properties, logger);
 
-        SessionBuffers buffers = SessionBuffers.create(listings.size());
+        SessionBuffers buffers = SessionBuffers.create();
         ShardMarketData marketData = startAeron(logger, properties, listings, streams, dataStreams, buffers);
 
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(64));
@@ -211,17 +212,10 @@ public class SessionOrchestrator extends Orchestrator {
 
         Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
         this.orders = new SessionOrders(
-                logger, properties, securityMaster, nanoClock, () -> getInstance(RegistryConnection.class), this.aeron);
-        SessionOrders.Wiring outbound = orders.wire(
-                listings,
-                streams,
-                buffers.marketData(),
-                buffers.orders(),
-                buffers.omsExecReports(),
-                buffers.routed(),
-                venueQueries);
+                logger, properties, nanoClock, () -> getInstance(RegistryConnection.class), this.aeron);
+        GnomeAgent client = orders.wire(listings, buffers.orders(), buffers.omsExecReports(), venueQueries);
         // Before recovery: a live session asks the venue through its gateways, which must have welcomed it first.
-        List<GnomeAgentRunner> orderEntry = SessionAgents.startOrderEntry(outbound.agents(), errorHandler);
+        GnomeAgentRunner orderEntry = SessionAgents.startOrderEntry(client, errorHandler);
         this.orderEntry = orderEntry;
         awaitGateways(properties);
 
@@ -275,7 +269,6 @@ public class SessionOrchestrator extends Orchestrator {
                 marketData,
                 omsAgent,
                 orderEntry,
-                outbound.router(),
                 strategy,
                 ledgerAgent,
                 riskSyncAgent,
@@ -354,7 +347,8 @@ public class SessionOrchestrator extends Orchestrator {
 
     /** A session that failed before its agents started: order entry may already be running, and its links open. */
     private void closeOrderEntry() {
-        for (GnomeAgentRunner runner : this.orderEntry) {
+        GnomeAgentRunner runner = this.orderEntry;
+        if (runner != null) {
             try {
                 runner.close();
             } catch (Exception e) {

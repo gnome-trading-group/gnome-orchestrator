@@ -3,31 +3,22 @@ package group.gnometrading.orchestrator.session.orders;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
-import group.gnometrading.SecurityMaster;
 import group.gnometrading.account.SessionAccounts;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
-import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.HostAddress;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.SessionTag;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
-import group.gnometrading.orchestrator.session.journal.JournalSource;
 import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.OrderExecutionReport;
-import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
-import group.gnometrading.simulation.config.ExchangeSimulationConfig;
-import group.gnometrading.simulation.config.SessionSimulationConfig;
-import group.gnometrading.simulation.config.SimulationResolver;
-import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
-import group.gnometrading.simulation.latency.LatencySeeds;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.strings.ViewString;
 import java.io.IOException;
@@ -49,30 +40,23 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
 /**
- * A session's order entry. Live, every listing's orders go through its venue's order gateway: one link per venue, one
- * client thread, and startup recovery asks the venue through the same links, so the session holds no trading key.
- * Paper, each listing has its own simulated exchange, and with several listings a router between them and the OMS.
+ * A session's order entry: every listing's orders go through its venue's order gateway, one link per venue and one
+ * client thread. Live, the gateway trades the session's bound venue account, and startup recovery asks the venue through
+ * the same links, so the session holds no trading key; paper, the venue's paper gateway simulates it, and recovery
+ * settles from the ledger alone.
  */
 public final class SessionOrders {
 
     // The OMS waits when one is full, and it reads the market data the strategy sees (to price takes against it): room
     // for a kill sweep's cancels or a busy strategy's reports keeps a slow venue writer from stopping the books too.
     public static final int OUTBOUND_BUFFER_SIZE = 1024;
-    // Paper sessions are reproducible by default; set simulation.seed to vary the latency draws.
-    private static final long PAPER_TRADING_DEFAULT_SEED = 0x9E3779B97F4A7C15L;
     // How long startup recovery waits for the gateway's answer, which waits on the venue and the account's read budget.
     private static final long RECOVERY_QUERY_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
-
-    /** The router's copy of each order and execution report, one pair of buffers per listing. */
-    public record RoutedBuffers(
-            List<SequencedRingBuffer<Intent>> orders, List<SequencedRingBuffer<OrderExecutionReport>> execReports) {}
-
-    /** What runs order entry: the gateway client (live) or an agent per listing and the router (paper). */
-    public record Wiring(List<GnomeAgent> agents, ListingRouter router) {}
+    // A paper session is bound to no venue account: it trades on its paper gateway's one simulated account.
+    private static final int PAPER_ACCOUNT_ID = 0;
 
     private final Logger logger;
     private final Properties properties;
-    private final SecurityMaster securityMaster;
     private final EpochNanoClock clock;
     private final Supplier<RegistryConnection> registry;
     private SessionAccounts sessionAccounts;
@@ -84,113 +68,39 @@ public final class SessionOrders {
     public SessionOrders(
             Logger logger,
             Properties properties,
-            SecurityMaster securityMaster,
             EpochNanoClock clock,
             Supplier<RegistryConnection> registry,
             AeronRuntime aeron) {
         this.logger = logger;
         this.properties = properties;
-        this.securityMaster = securityMaster;
         this.clock = clock;
         this.registry = registry;
         this.aeron = aeron;
     }
 
-    /** Paper only: with one listing the OMS's buffers are the simulated exchange's; with several, the router's pairs. */
-    public static RoutedBuffers routedBuffers(
-            int listingCount,
-            GlobalSequence sessionSequence,
-            Map<SequencedRingBuffer<?>, JournalSource> journalSources) {
-        if (listingCount == 1) {
-            return null;
-        }
-        List<SequencedRingBuffer<Intent>> orders = new ArrayList<>(listingCount);
-        List<SequencedRingBuffer<OrderExecutionReport>> execReports = new ArrayList<>(listingCount);
-        for (int i = 0; i < listingCount; i++) {
-            SequencedRingBuffer<Intent> order =
-                    new SequencedRingBuffer<>(Intent::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
-            SequencedRingBuffer<OrderExecutionReport> execReport =
-                    new SequencedRingBuffer<>(OrderExecutionReport::new, sessionSequence, OUTBOUND_BUFFER_SIZE);
-            journalSources.put(order, JournalSource.ROUTED_ORDER);
-            journalSources.put(execReport, JournalSource.ROUTED_EXEC_REPORT);
-            orders.add(order);
-            execReports.add(execReport);
-        }
-        return new RoutedBuffers(orders, execReports);
-    }
-
-    /**
-     * Builds each listing's order entry, reading the session's market data from {@code marketData}, and records each
-     * live listing's venue order lookup, through its gateway, in {@code venueQueries} for startup recovery.
-     */
-    public Wiring wire(
-            List<Listing> listings,
-            StreamDirectory streams,
-            SequencedRingBuffer<?> marketData,
-            SequencedRingBuffer<Intent> orderOutboundBuffer,
-            SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
-            RoutedBuffers routedBuffers,
-            Map<Integer, VenueOrderQuery> venueQueries) {
-        if ("live".equals(properties.getStringProperty("mode"))) {
-            return wireGateway(listings, orderOutboundBuffer, omsExecReportBuffer, venueQueries);
-        }
-        List<GnomeAgent> agents = new ArrayList<>(listings.size());
-        if (routedBuffers == null) {
-            agents.add(paperGateway(listings.get(0), streams, marketData, orderOutboundBuffer, omsExecReportBuffer));
-            return new Wiring(agents, null);
-        }
-        Map<Long, SequencedRingBuffer<?>> perListingOutBufs = new HashMap<>();
-        List<SequencedRingBuffer<OrderExecutionReport>> perExchangeExecBufs = routedBuffers.execReports();
-        for (int i = 0; i < listings.size(); i++) {
-            Listing listing = listings.get(i);
-            long routingKey = ListingRouter.routingKey(
-                    listing.exchange().exchangeId(), listing.security().securityId());
-            SequencedRingBuffer<Intent> perExchangeOutBuf =
-                    routedBuffers.orders().get(i);
-            perListingOutBufs.put(routingKey, perExchangeOutBuf);
-            agents.add(paperGateway(listing, streams, marketData, perExchangeOutBuf, perExchangeExecBufs.get(i)));
-        }
-        return new Wiring(
-                agents,
-                new ListingRouter(orderOutboundBuffer, perListingOutBufs, perExchangeExecBufs, omsExecReportBuffer));
-    }
-
     /**
      * Every listing's orders through its venue's order gateway: one link per venue, read and written by one
-     * {@link GatewayClient} straight from the OMS's buffers, with no router. Startup recovery asks the venue through the
-     * client too, so the client starts, and is welcomed, before recovery runs.
+     * {@link GatewayClient} straight from the OMS's buffers. Startup recovery asks a live venue through the client too,
+     * so the client starts, and is welcomed, before recovery runs; each live listing's lookup goes in
+     * {@code venueQueries}. A paper session's go nowhere: its simulated venue holds nothing a restart could ask about.
+     *
+     * @return the client, to run on its own thread
      */
-    private Wiring wireGateway(
+    public GnomeAgent wire(
             List<Listing> listings,
             SequencedRingBuffer<Intent> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,
             Map<Integer, VenueOrderQuery> venueQueries) {
-        String sessionId = properties.getStringProperty("session.id");
-        Map<Integer, List<long[]>> byExchange = new LinkedHashMap<>();
-        Map<Integer, String> codes = new HashMap<>();
-        for (Listing listing : listings) {
-            int exchangeId = listing.exchange().exchangeId();
-            byExchange
-                    .computeIfAbsent(exchangeId, id -> new ArrayList<>())
-                    .add(new long[] {exchangeId, listing.security().securityId()});
-            codes.put(exchangeId, listing.exchange().exchangeCode().toLowerCase(Locale.ROOT));
-        }
-        List<GatewayLink> links = new ArrayList<>();
-        for (Map.Entry<Integer, List<long[]>> exchange : byExchange.entrySet()) {
-            links.add(new GatewayLink(
-                    "live:" + codes.get(exchange.getKey()) + ":main",
-                    exchange.getKey(),
-                    sessionAccounts().forExchange(exchange.getKey()).accountId(),
-                    exchange.getValue(),
-                    properties.getIntProperty("order.gateway.pending.messages")));
-        }
+        boolean live = "live".equals(properties.getStringProperty("mode"));
+        String sessionId = SessionTag.of(properties);
+        List<GatewayLink> links = links(listings, live);
         this.links = links;
         GatewayClient client = new GatewayClient(
                 links,
                 orderOutboundBuffer,
                 omsExecReportBuffer,
                 new GatewayClient.Identity(
-                        sessionSeq(sessionId),
+                        sessionSeq(),
                         sessionId,
                         properties.getIntProperty("strategy.id"),
                         properties.getIntProperty("order.gateway.cod.timeout.ms"),
@@ -200,9 +110,11 @@ public final class SessionOrders {
                 properties.getIntProperty("order.gateway.max.orders"),
                 System::nanoTime,
                 clock);
-        VenueOrderQuery recovery = new GatewayVenueOrderQuery(client, RECOVERY_QUERY_TIMEOUT_NANOS);
-        for (Listing listing : listings) {
-            venueQueries.put(listing.listingId(), recovery);
+        if (live) {
+            VenueOrderQuery recovery = new GatewayVenueOrderQuery(client, RECOVERY_QUERY_TIMEOUT_NANOS);
+            for (Listing listing : listings) {
+                venueQueries.put(listing.listingId(), recovery);
+            }
         }
         String local = properties.hasProperty("order.gateway.local")
                 ? properties.getStringProperty("order.gateway.local").trim()
@@ -219,7 +131,30 @@ public final class SessionOrders {
         this.gatewayControl = DaemonThreads.scheduler("gateway-links");
         this.gatewayControl.scheduleWithFixedDelay(gatewayLinks, 0, 100, TimeUnit.MILLISECONDS);
         logger.logf(LogMessage.DEBUG, "Orders go through %d order gateway(s)", links.size());
-        return new Wiring(List.of(client), null);
+        return client;
+    }
+
+    /** One link per venue the listings are on, to its live gateway or its paper one. */
+    private List<GatewayLink> links(List<Listing> listings, boolean live) {
+        Map<Integer, List<long[]>> byExchange = new LinkedHashMap<>();
+        Map<Integer, String> codes = new HashMap<>();
+        for (Listing listing : listings) {
+            int exchangeId = listing.exchange().exchangeId();
+            byExchange
+                    .computeIfAbsent(exchangeId, id -> new ArrayList<>())
+                    .add(new long[] {exchangeId, listing.security().securityId()});
+            codes.put(exchangeId, listing.exchange().exchangeCode().toLowerCase(Locale.ROOT));
+        }
+        List<GatewayLink> links = new ArrayList<>();
+        for (Map.Entry<Integer, List<long[]>> exchange : byExchange.entrySet()) {
+            links.add(new GatewayLink(
+                    (live ? "live:" : "paper:") + codes.get(exchange.getKey()) + ":main",
+                    exchange.getKey(),
+                    live ? sessionAccounts().forExchange(exchange.getKey()).accountId() : PAPER_ACCOUNT_ID,
+                    exchange.getValue(),
+                    properties.getIntProperty("order.gateway.pending.messages")));
+        }
+        return links;
     }
 
     /** Tells the registry the session wants the gateway: it starts one that isn't running and keeps it running. */
@@ -232,8 +167,19 @@ public final class SessionOrders {
                         0);
     }
 
-    /** The session's slot at every gateway: its registry {@code session_seq}, never reused. */
-    private long sessionSeq(String sessionId) {
+    /**
+     * The session's slot at every gateway: its registry {@code session_seq}, never reused; a local run, which has no
+     * registry session, names its own ({@code session.seq}).
+     */
+    private long sessionSeq() {
+        if (!properties.hasProperty("session.id")) {
+            long seq = properties.hasProperty("session.seq") ? properties.getLongProperty("session.seq") : 0;
+            if (seq <= 0) {
+                throw new IllegalStateException("A run without a registry session needs session.seq for its gateways");
+            }
+            return seq;
+        }
+        String sessionId = properties.getStringProperty("session.id");
         ByteBuffer body = registry.get()
                 .get(new ViewString(
                         "/api/strategy-sessions?sessionId=" + URLEncoder.encode(sessionId, StandardCharsets.UTF_8)));
@@ -273,19 +219,17 @@ public final class SessionOrders {
         return key -> endpoint;
     }
 
-    /**
-     * Waits until every order gateway link is ready, so the strategy's first orders aren't refused as the session
-     * starts; the links' control thread meanwhile asks the registry for any gateway not running. Without gateways there
-     * is nothing to wait for.
-     *
-     * @throws IllegalStateException if they aren't ready in time: a live session that can't reach its gateway can't
-     *     trade
-     */
-    /** Each order gateway link, for the heartbeat; none for a paper session. */
+    /** Each order gateway link, for the heartbeat. */
     public List<? extends OrderGatewayLinkStatus> gatewayLinks() {
         return this.links;
     }
 
+    /**
+     * Waits until every order gateway link is ready, so the strategy's first orders aren't refused as the session
+     * starts; the links' control thread meanwhile asks the registry for any gateway not running.
+     *
+     * @throws IllegalStateException if they aren't ready in time: a session that can't reach its gateway can't trade
+     */
     public void awaitGateways(long timeoutNanos) throws InterruptedException {
         long deadline = System.nanoTime() + timeoutNanos;
         while (!links.stream().allMatch(link -> link.state == GatewayLink.READY)) {
@@ -307,36 +251,6 @@ public final class SessionOrders {
             gatewayControl.awaitTermination(5, TimeUnit.SECONDS);
             gatewayLinks.close();
         }
-    }
-
-    private GnomeAgent paperGateway(
-            Listing listing,
-            StreamDirectory streams,
-            SequencedRingBuffer<?> marketDataBuffer,
-            SequencedRingBuffer<?> orderOutboundBuffer,
-            SequencedRingBuffer<OrderExecutionReport> execReportBuffer) {
-        // The session's config carries its simulation as one JSON value, in the shape a backtest config takes.
-        SessionSimulationConfig simulation =
-                SessionSimulationConfig.fromJson(properties.getStringProperty("simulation.json"));
-        SimulationResolver resolver = new SimulationResolver(securityMaster, simulation.asOf);
-        ExchangeSimulationConfig config = resolver.resolve(listing, false, simulation.layersFor(listing));
-        logger.logf(
-                LogMessage.DEBUG,
-                "Listing %d simulates as of %s with %s",
-                listing.listingId(),
-                simulation.asOf,
-                config.toJson());
-        long baseSeed = simulation.seed != null ? simulation.seed : PAPER_TRADING_DEFAULT_SEED;
-        MbpSimulatedExchange exchange = (MbpSimulatedExchange) config.toSimulatedExchange(
-                listing.listingId(), LatencySeeds.derive(baseSeed, listing.listingId()), resolver.registryFees());
-        return new PaperTradingOutboundGateway(
-                exchange,
-                marketDataBuffer,
-                streams.streamId(listing.listingId()),
-                orderOutboundBuffer,
-                execReportBuffer,
-                clock,
-                SessionTag.of(properties));
     }
 
     /**

@@ -49,6 +49,44 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
     private static final int REPORT_QUEUE = 8192;
     private static final int HANDOFFS = 1024;
 
+    /** What one listing simulates as for a session, and the stream its book reads. */
+    public record Simulated(MbpSimulatedExchange exchange, int streamId) {}
+
+    /** Builds a session's simulated exchange for one of its listings, from its simulation as its launch pinned it. */
+    @FunctionalInterface
+    public interface Simulations {
+        Simulated simulate(String sessionId, Listing listing, SessionSimulationConfig simulation) throws Exception;
+    }
+
+    /**
+     * Each listing as the session's own simulation built it: the exchange's (and listing's) registry parameters as of
+     * the simulation's {@code as_of}, under its layers, seeded per listing; the listing's book stream from the security
+     * master.
+     */
+    public static Simulations fromRegistry(
+            final SecurityMaster securityMaster, final Logger logger, final String name) {
+        return (sessionId, listing, simulation) -> {
+            final SimulationResolver resolver = new SimulationResolver(securityMaster, simulation.asOf);
+            final long baseSeed = simulation.seed != null ? simulation.seed : DEFAULT_SEED;
+            final ExchangeSimulationConfig config = resolver.resolve(listing, false, simulation.layersFor(listing));
+            final MbpSimulatedExchange exchange = (MbpSimulatedExchange) config.toSimulatedExchange(
+                    listing.listingId(), LatencySeeds.derive(baseSeed, listing.listingId()), resolver.registryFees());
+            final Stream stream = securityMaster.streamForListing(listing.listingId());
+            if (stream == null) {
+                throw new IllegalStateException("Listing " + listing.listingId() + " has no book stream");
+            }
+            logger.logf(
+                    LogMessage.DEBUG,
+                    "Gateway %s: session %s's listing %d simulates as of %s with %s",
+                    name,
+                    sessionId,
+                    listing.listingId(),
+                    simulation.asOf,
+                    config.toJson());
+            return new Simulated(exchange, stream.streamId());
+        };
+    }
+
     /** Where the gateway reads the streams a session's books need, through the session's own lease. */
     public interface Streams {
         void addSession(String sessionId, int[] streamIds);
@@ -60,7 +98,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
     private final int exchangeId;
     private final String name;
     private final VenueRateLimits limits;
-    private final SecurityMaster securityMaster;
+    private final Simulations simulations;
     private final Streams streams;
     private final LongSupplier nanoClock;
     private final ManyToOneRingBuffer<LaneCommand> commands;
@@ -74,6 +112,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
     /**
      * @param limits the venue's order-entry limits, each session getting them whole; null where the venue has no order
      *     entry of ours, so nothing is limited
+     * @param simulations builds each session's books
      * @param marketData where the shard reader writes every stream the books read
      */
     @SuppressWarnings("checkstyle:ParameterNumber")
@@ -85,7 +124,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
             final AccountLane.Caps caps,
             final long defaultMaxQueueNanos,
             final int maxOrders,
-            final SecurityMaster securityMaster,
+            final Simulations simulations,
             final SequencedRingBuffer<?> marketData,
             final Streams streams,
             final LongSupplier nanoClock,
@@ -94,7 +133,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
         this.exchangeId = exchangeId;
         this.name = name;
         this.limits = limits;
-        this.securityMaster = securityMaster;
+        this.simulations = simulations;
         this.streams = streams;
         this.nanoClock = nanoClock;
         this.commands = new ManyToOneRingBuffer<>(LaneCommand[]::new, LaneCommand::new, COMMAND_QUEUE);
@@ -210,38 +249,19 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
             final List<Integer> streamIds = new ArrayList<>();
             try {
                 final SessionSimulationConfig simulation = SessionSimulationConfig.fromJson(simulationJson);
-                final SimulationResolver resolver = new SimulationResolver(securityMaster, simulation.asOf);
-                final long baseSeed = simulation.seed != null ? simulation.seed : DEFAULT_SEED;
                 for (final Listing listing : listings) {
                     if (listing.exchange().exchangeId() != exchangeId) {
                         continue;
                     }
-                    final ExchangeSimulationConfig config =
-                            resolver.resolve(listing, false, simulation.layersFor(listing));
-                    final MbpSimulatedExchange exchange = (MbpSimulatedExchange) config.toSimulatedExchange(
-                            listing.listingId(),
-                            LatencySeeds.derive(baseSeed, listing.listingId()),
-                            resolver.registryFees());
-                    final Stream stream = securityMaster.streamForListing(listing.listingId());
-                    if (stream == null) {
-                        throw new IllegalStateException("Listing " + listing.listingId() + " has no book stream");
-                    }
+                    final Simulated simulated = simulations.simulate(sessionId, listing, simulation);
                     books.add(new SimulatedBook(
                             slot,
                             listingKey(exchangeId, listing.security().securityId()),
                             listing.listingId(),
-                            stream.streamId(),
-                            exchange,
+                            simulated.streamId(),
+                            simulated.exchange(),
                             sessionId));
-                    streamIds.add(stream.streamId());
-                    logger.logf(
-                            LogMessage.DEBUG,
-                            "Gateway %s: session %s's listing %d simulates as of %s with %s",
-                            name,
-                            sessionId,
-                            listing.listingId(),
-                            simulation.asOf,
-                            config.toJson());
+                    streamIds.add(simulated.streamId());
                 }
             } catch (Exception e) {
                 // Its new orders are refused for want of a book: nothing it sends can trade on a venue never built.

@@ -3,6 +3,7 @@ package group.gnometrading.orchestrator.session.orders;
 import group.gnometrading.orchestrator.aeron.PendingMessages;
 import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.schemas.gateway.HelloRefusal;
+import group.gnometrading.schemas.gateway.Mode;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import java.util.List;
@@ -31,6 +32,8 @@ public final class GatewayLink implements OrderGatewayLinkStatus {
     static final int GONE = 4;
 
     final String gatewayKey;
+    // A gateway's key says which kind it is, and its hellos must say the same.
+    final Mode mode;
     final int exchangeId;
     final int venueAccountId;
     // The session's listings on this venue, as (exchange id, security id) pairs.
@@ -67,6 +70,7 @@ public final class GatewayLink implements OrderGatewayLinkStatus {
             final List<long[]> listings,
             final int pendingCapacity) {
         this.gatewayKey = gatewayKey;
+        this.mode = gatewayKey.startsWith("paper:") ? Mode.PAPER : Mode.LIVE;
         this.exchangeId = exchangeId;
         this.venueAccountId = venueAccountId;
         this.listings = List.copyOf(listings);

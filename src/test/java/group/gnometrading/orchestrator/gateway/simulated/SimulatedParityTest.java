@@ -3,18 +3,14 @@ package group.gnometrading.orchestrator.gateway.simulated;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.gateways.account.reader.AccountReport;
-import group.gnometrading.orchestrator.session.orders.PaperTradingOutboundGateway;
-import group.gnometrading.schemas.CancelOrder;
-import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ExecType;
-import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.OrderType;
@@ -25,10 +21,10 @@ import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.schemas.book.Action;
 import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.GlobalSequence;
-import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
 import group.gnometrading.simulation.queues.QueueModel;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,10 +34,10 @@ import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
 import org.junit.jupiter.api.Test;
 
 /**
- * The same market data and orders through a session's own simulation and through a paper gateway's give the same
- * reports: moving the simulator into the gateway changes where it runs, not what it fills. With latency off: the
- * session's simulation draws a latency on every pass, so with latency on the two draw differently however alike they
- * are.
+ * The same market data and orders through a paper gateway's simulation give the reports a session's own simulation gave
+ * them, recorded in {@link #GOLDEN} when sessions still simulated their venues themselves: moving the simulator into the
+ * gateway changed where it runs, not what it fills. With latency off: the session's simulation drew a latency on every
+ * pass, so with latency on the two drew differently however alike they were.
  */
 class SimulatedParityTest {
 
@@ -53,6 +49,7 @@ class SimulatedParityTest {
     private static final String TAG = "parity-session";
     private static final long P = 1_000_000_000L;
     private static final long S = 1_000_000L;
+    private static final String GOLDEN = "/paper/parity-script.json";
 
     /** What a report says that a strategy would act on. */
     record Report(
@@ -111,54 +108,14 @@ class SimulatedParityTest {
 
     @Test
     void theGatewaysSimulationReportsWhatTheSessionsOwnDid() throws Exception {
-        final List<Report> session = runInSession();
+        final List<Report> session;
+        try (InputStream golden = SimulatedParityTest.class.getResourceAsStream(GOLDEN)) {
+            session = new ObjectMapper().readValue(golden, new TypeReference<List<Report>>() {});
+        }
         final List<Report> gateway = runInGateway();
 
         assertFalse(session.isEmpty());
         assertEquals(session, gateway);
-    }
-
-    // ----- the session's own simulation -----
-
-    private List<Report> runInSession() throws Exception {
-        final GlobalSequence sequence = new GlobalSequence();
-        final SequencedRingBuffer<Mbp10Schema> marketData = new SequencedRingBuffer<>(Mbp10Schema::new, sequence, 1024);
-        final SequencedRingBuffer<Intent> orders = new SequencedRingBuffer<>(Intent::new, sequence, 1024);
-        final SequencedRingBuffer<OrderExecutionReport> reports =
-                new SequencedRingBuffer<>(OrderExecutionReport::new, sequence, 1024);
-        final PaperTradingOutboundGateway gateway =
-                new PaperTradingOutboundGateway(venue(), marketData, STREAM, orders, reports, this.wallNanos::get, TAG);
-        final List<Report> heard = new ArrayList<>();
-        final OrderExecutionReport read = new OrderExecutionReport();
-        final SequencedPoller poller = reports.createPoller((seq, templateId, buffer, length) -> {
-            read.wrap(buffer);
-            heard.add(Report.of(read));
-        });
-        final Order order = new Order();
-        final CancelOrder cancel = new CancelOrder();
-        for (final Step step : SCRIPT) {
-            if (step instanceof Book book) {
-                publish(marketData, bookRecord(book));
-            } else if (step instanceof Trade trade) {
-                publish(marketData, tradeRecord(trade));
-            } else if (step instanceof New n) {
-                order.encoder.exchangeId(EXCHANGE).securityId(SECURITY).timestampSend(this.wallNanos.get());
-                order.encodeClientOid(n.counter(), STRATEGY);
-                order.encoder.price(n.price()).size(n.size()).side(n.side());
-                order.encoder.orderType(OrderType.LIMIT).timeInForce(TimeInForce.GOOD_TILL_CANCELED);
-                order.encoder.flags().clear();
-                orders.publishRaw(order.buffer, OrderDecoder.TEMPLATE_ID, order.totalMessageSize());
-            } else if (step instanceof Cancel c) {
-                cancel.encoder.exchangeId(EXCHANGE).securityId(SECURITY).timestampSend(this.wallNanos.get());
-                cancel.encodeClientOid(c.counter(), STRATEGY);
-                orders.publishRaw(cancel.buffer, CancelOrderDecoder.TEMPLATE_ID, cancel.totalMessageSize());
-            }
-            for (int i = 0; i < 4; i++) {
-                gateway.doWork();
-            }
-            poller.poll();
-        }
-        return heard;
     }
 
     // ----- a paper gateway's -----
