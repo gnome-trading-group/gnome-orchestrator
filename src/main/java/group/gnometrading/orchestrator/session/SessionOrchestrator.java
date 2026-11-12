@@ -47,9 +47,11 @@ import group.gnometrading.orchestrator.session.marketdata.SessionMarketData;
 import group.gnometrading.orchestrator.session.orders.SessionOrders;
 import group.gnometrading.orchestrator.session.recovery.SessionNotRunnableException;
 import group.gnometrading.orchestrator.session.recovery.StartupRecovery;
+import group.gnometrading.orchestrator.session.rewards.RewardsAgent;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.sequencer.metrics.JournaledMetricRecorder;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.strategies.StrategyAgent;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -273,6 +275,9 @@ public class SessionOrchestrator extends Orchestrator {
                 strategyId,
                 "live".equals(properties.getStringProperty("mode")));
 
+        RewardsAgent rewardsAgent =
+                rewardsAgent(sessionId, properties, listings, securityMaster, streams, buffers, epochClock, logger);
+
         SessionAgents started = SessionAgents.start(
                 marketData,
                 omsAgent,
@@ -280,6 +285,7 @@ public class SessionOrchestrator extends Orchestrator {
                 strategy,
                 ledgerAgent,
                 riskSyncAgent,
+                rewardsAgent,
                 riskEngine,
                 logger,
                 errorHandler);
@@ -433,6 +439,43 @@ public class SessionOrchestrator extends Orchestrator {
                         .withMaxRetries(0)
                         .withHttpClient(httpClient)
                         .build());
+    }
+
+    /**
+     * A paper session's venue reward estimates, or null: in live, without a registry session, when switched off, or
+     * when no listing's venue runs a program the scorer estimates. Built before any producer starts, so its pollers
+     * see everything.
+     */
+    private RewardsAgent rewardsAgent(
+            String sessionId,
+            Properties properties,
+            List<Listing> listings,
+            SecurityMaster securityMaster,
+            StreamDirectory streams,
+            SessionBuffers buffers,
+            EpochClock epochClock,
+            Logger logger) {
+        if (sessionId == null
+                || !"paper".equals(properties.getStringProperty("mode"))
+                || !properties.getBooleanProperty("rewards.enabled")) {
+            return null;
+        }
+        List<ListingSpec> specs = listings.stream()
+                .map(listing -> securityMaster.getListingSpec(listing.listingId()))
+                .toList();
+        return RewardsAgent.create(
+                sessionId,
+                listings,
+                specs,
+                streams,
+                buffers.marketData(),
+                buffers.orders(),
+                buffers.omsExecReports(),
+                registryWriterConnection(registryWriterClient().withWriteBufferSize(RewardsAgent.BODY_BYTES)),
+                epochClock,
+                properties.getLongProperty("rewards.programs.refresh.interval.ms"),
+                properties.getLongProperty("rewards.post.interval.ms"),
+                logger);
     }
 
     private static HTTPClientBuilder registryWriterClient() {

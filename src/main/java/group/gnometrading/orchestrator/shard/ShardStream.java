@@ -1,6 +1,5 @@
 package group.gnometrading.orchestrator.shard;
 
-import group.gnometrading.collector.MarketDataCollector;
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.sequencer.LappingPoller;

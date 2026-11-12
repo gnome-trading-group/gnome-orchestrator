@@ -18,6 +18,7 @@ import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.orchestrator.session.journal.SessionJournal;
 import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.orchestrator.session.lifecycle.SessionHeartbeatAgent;
+import group.gnometrading.orchestrator.session.rewards.RewardsAgent;
 import group.gnometrading.strategies.StrategyAgent;
 import java.io.File;
 import java.util.ArrayList;
@@ -33,6 +34,7 @@ import org.agrona.concurrent.SystemEpochClock;
  * @param marketData the session's market data, started before the agents that read it
  * @param orderEntry the gateway client, which carries every listing's orders to its venue's order gateway
  * @param ledger null without a registry session
+ * @param rewards null unless a paper session estimates venue rewards
  */
 record SessionAgents(
         MarketData marketData,
@@ -40,7 +42,8 @@ record SessionAgents(
         GnomeAgentRunner oms,
         GnomeAgentRunner orderEntry,
         GnomeAgentRunner ledger,
-        GnomeAgentRunner riskSync) {
+        GnomeAgentRunner riskSync,
+        GnomeAgentRunner rewards) {
 
     private static final long HEARTBEAT_SAMPLE_INTERVAL_MS = 1_000;
     private static final long HEARTBEAT_POST_INTERVAL_MS = 5_000;
@@ -63,6 +66,7 @@ record SessionAgents(
             StrategyAgent strategy,
             LedgerAgent ledgerAgent,
             RiskSyncAgent riskSyncAgent,
+            RewardsAgent rewardsAgent,
             RiskEngine riskEngine,
             Logger logger,
             ErrorHandler errorHandler) {
@@ -83,7 +87,9 @@ record SessionAgents(
         GnomeAgentRunner omsRunner = startOn(omsAgent, errorHandler);
         GnomeAgentRunner strategyRunner = startOn(strategy, errorHandler);
         GnomeAgentRunner ledgerRunner = ledgerAgent == null ? null : startOn(ledgerAgent, errorHandler);
-        return new SessionAgents(marketData, strategyRunner, omsRunner, orderEntry, ledgerRunner, riskSyncRunner);
+        GnomeAgentRunner rewardsRunner = rewardsAgent == null ? null : startOn(rewardsAgent, errorHandler);
+        return new SessionAgents(
+                marketData, strategyRunner, omsRunner, orderEntry, ledgerRunner, riskSyncRunner, rewardsRunner);
     }
 
     private static GnomeAgentRunner startOn(GnomeAgent agent, ErrorHandler errorHandler) {
@@ -111,6 +117,9 @@ record SessionAgents(
         closeQuietly(started.orderEntry(), logger);
         // After the OMS and gateways, so its final write holds everything they recorded while closing.
         closeQuietly(started.ledger(), logger);
+        // It only reads the buffers, so it can close any time before the journal; its last post holds what the
+        // session's orders earned until they closed.
+        closeQuietly(started.rewards(), logger);
         closeQuietly(started.riskSync(), logger);
         // Last, so the journal holds everything the agents wrote while closing.
         closeQuietly(journalRunner, logger);
@@ -139,7 +148,7 @@ record SessionAgents(
         List<GnomeAgentRunner> watched = new ArrayList<>();
         // A stuck journal holds up market data and every trading buffer once their rings fill.
         for (GnomeAgentRunner runner :
-                new GnomeAgentRunner[] {strategy, oms, orderEntry, ledger, riskSync, journal.runner()}) {
+                new GnomeAgentRunner[] {strategy, oms, orderEntry, ledger, riskSync, rewards, journal.runner()}) {
             if (runner != null) {
                 watched.add(runner);
             }

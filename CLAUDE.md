@@ -93,9 +93,18 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   session's `AeronRuntime` is launched by `SessionOrchestrator` (shared by market data and the links) and closed
   last.
 - `session/recovery/`: `StartupRecovery`.
+- `session/rewards/`: `RewardsAgent` (BACKGROUND, paper sessions only, `rewards.enabled`): estimates the venue
+  liquidity rewards the session's resting orders earn with gnome-simulation's `RewardScorer`, for listings whose venue
+  `RewardVenues` supports. It reads the market-data, OMS-order and OMS-report rings through controlled lapping pollers
+  (never gating them; adds no ring, so journal coverage is unchanged), merged by global sequence, rebuilding our resting
+  orders from orders and reports; a lap marks every market a gap until its next book. It reloads programs from
+  `/incentive-programs` every `rewards.programs.refresh.interval.ms` and posts to `/ledger/reward-accruals` every
+  `rewards.post.interval.ms` and on close, on its own registry connection; failures are logged, never fatal.
 - `shard/` - `ShardOrchestrator` (a shard: `SHARD_ID`), `ShardRuntime` (applies the assignment every 10 s,
   records state changes in `StreamTransitions`, opens an Aeron publication for each stream in the item's `publish`),
-  `ShardStream` + `MarketDataCollectorAgent` (minute files), `StreamPublisherAgent` (drains every ring a second time,
+  `ShardStream` + `MarketDataCollectorAgent` (minute files, written by `MarketDataCollector` / `RawDataCollector`
+  into pooled direct memory (`DirectBufferPool`, `CycleBuffer`, `CycleManager`) and uploaded off the data thread by
+  `CycleUploader`), `StreamPublisherAgent` (drains every ring a second time,
   offers leased streams' records, re-sends a quiet stream's last record every 5 s (marked `RESENT`), sends the core SBE `ShardStatus`
   every 1 s; reads the rings through a controlled `LappingPoller`, so it never gates collection: a record its
   publication has no room for (one venue message can carry hundreds of fills, past the 128 KB window) waits in the

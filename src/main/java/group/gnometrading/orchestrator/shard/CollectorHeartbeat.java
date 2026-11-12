@@ -2,7 +2,6 @@ package group.gnometrading.orchestrator.shard;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import group.gnometrading.collector.CycleUploader;
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.LogMessage;

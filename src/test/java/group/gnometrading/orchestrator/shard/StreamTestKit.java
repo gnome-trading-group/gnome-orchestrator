@@ -4,9 +4,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import group.gnometrading.collector.CycleUploader;
-import group.gnometrading.collector.DirectBufferPool;
-import group.gnometrading.collector.MarketDataCollector;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.RecordType;

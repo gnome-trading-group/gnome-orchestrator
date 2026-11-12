@@ -63,17 +63,17 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.62.3</version>
+            <version>1.71.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-oms</artifactId>
-            <version>1.13.3</version>
+            <version>1.13.4</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-strategies</artifactId>
-            <version>1.7.9</version>
+            <version>1.8.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -83,7 +83,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-simulation</artifactId>
-            <version>1.7.3</version>
+            <version>1.8.2</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -125,6 +125,20 @@
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-logging</artifactId>
             <version>1.5.0</version>
+        </dependency>
+        <!-- The shard's collectors write minute files in its layout (StreamEntry), zstd-compressed. -->
+        <dependency>
+            <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-market-data-core</artifactId>
+            <version>3.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
