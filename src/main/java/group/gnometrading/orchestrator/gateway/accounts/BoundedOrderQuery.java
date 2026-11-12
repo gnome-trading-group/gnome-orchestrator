@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.gateway.accounts;
 
 import group.gnometrading.gateways.orders.recovery.AccountOrder;
+import group.gnometrading.gateways.orders.recovery.OrderOwner;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.orchestrator.runtime.BoundedCalls;
@@ -56,6 +57,12 @@ public final class BoundedOrderQuery implements VenueOrderQuery {
     @Override
     public boolean cancel(final AccountOrder order) throws IOException {
         return bounded(() -> this.venue.cancel(order));
+    }
+
+    /** Read from the id alone, never from the venue, so it needs no deadline. */
+    @Override
+    public Optional<OrderOwner> ownerOf(final VenueOrder order) {
+        return this.venue.ownerOf(order);
     }
 
     private <T> T bounded(final Callable<T> call) throws IOException {

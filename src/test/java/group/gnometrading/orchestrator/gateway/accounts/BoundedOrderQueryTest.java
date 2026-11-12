@@ -5,11 +5,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.gateways.orders.recovery.AccountOrder;
+import group.gnometrading.gateways.orders.recovery.OrderOwner;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.orchestrator.runtime.BoundedCalls;
 import group.gnometrading.sm.Listing;
 import java.io.IOException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
@@ -62,6 +66,11 @@ class BoundedOrderQueryTest {
             throw new IOException("venue refused");
         }
 
+        @Override
+        public Optional<OrderOwner> ownerOf(final VenueOrder order) {
+            return Optional.of(new OrderOwner(545, 7));
+        }
+
         private synchronized void enter() {
             this.concurrent++;
             this.mostConcurrent = Math.max(this.mostConcurrent, this.concurrent);
@@ -99,5 +108,29 @@ class BoundedOrderQueryTest {
                 "venue refused",
                 assertThrows(IOException.class, () -> this.query.cancel(null, null))
                         .getMessage());
+    }
+
+    @Test
+    void anOrdersOwnerComesFromTheVenueItWraps() {
+        assertEquals(
+                Optional.of(new OrderOwner(545, 7)),
+                this.query.ownerOf(new VenueOrder("2100-03-05T01:53:20.007Z", "v", 0, 0, 0, false)));
+    }
+
+    @Test
+    void forwardsEveryQueryTheVenueAnswers_DefaultsIncluded() {
+        // A method the interface gains with a default would otherwise answer the default, never the venue's.
+        final List<String> missing = new ArrayList<>();
+        for (final Method method : VenueOrderQuery.class.getMethods()) {
+            if (Modifier.isStatic(method.getModifiers())) {
+                continue;
+            }
+            try {
+                BoundedOrderQuery.class.getDeclaredMethod(method.getName(), method.getParameterTypes());
+            } catch (NoSuchMethodException e) {
+                missing.add(method.getName());
+            }
+        }
+        assertTrue(missing.isEmpty(), "BoundedOrderQuery doesn't forward " + missing);
     }
 }
