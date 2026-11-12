@@ -124,7 +124,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   fills nothing. Its books read from the shards through each session's own lease (`marketdata/ShardMarketData.shared`;
   `market.data.local.shard` for a local run). The paper profile: Aeron-path parks up to 1 ms, self-trade check `OFF`, a
   30 s watchdog limit for the simulated lane, alerts in paper mode, a minute line of its sessions, working orders and
-  books' worst lag. Layered, and `LayoutTest`
+  books' worst lag (the oldest record new to its stream when a book took it, from the venue's receipt: a book's
+  first record and a shard's re-send of a quiet stream's last record don't count, being old without being late).
+  Layered, and `LayoutTest`
   enforces it: `core/` is what every thread shares (`GatewaySession`, `SessionTable`, `GatewayMessage`, `ReplayRing`,
   `OrderTotals`, `GatewayStatus`, `JournalRecorder`, `AccountLink`, `CrossKey`/`CrossKeys`) and uses none of the rest; `accounts/` (accounts,
   their lanes' admissions and liveness, `GatewaySettings`), `transport/` (ingress, egress, `CrossIndex`,

@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.LongSupplier;
 import org.agrona.collections.Int2ObjectHashMap;
+import org.agrona.collections.Long2LongHashMap;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
@@ -43,6 +44,7 @@ final class SimulatedLane implements GnomeAgent {
     // Market-data records a pass takes at most, so a burst can't hold cancels and admission up for long.
     static final int RECORDS_PER_PASS = 256;
     private static final int COMMANDS_PER_PASS = 256;
+    private static final long NO_RECORD = Long.MIN_VALUE;
 
     /** A session's books, built on the control thread, or a session to forget; handed over to this thread. */
     record AddSession(SimulatedSession session) {}
@@ -62,6 +64,10 @@ final class SimulatedLane implements GnomeAgent {
     private final EpochNanoClock wallClock;
     private final Long2ObjectHashMap<SimulatedSession> sessions = new Long2ObjectHashMap<>();
     private final Int2ObjectHashMap<List<SimulatedBook>> booksByStream = new Int2ObjectHashMap<>();
+    // Each read stream's newest venue receive time, so only a record newer than it counts towards lag: a shard re-sends
+    // a quiet stream's last record with its original time, and a book's first record may be that re-send, minutes old
+    // on a quiet market though nothing is late.
+    private final Long2LongHashMap lastRecvByStream = new Long2LongHashMap(NO_RECORD);
     private final List<SimulatedBook> books = new ArrayList<>();
     private final Mbp10Schema record = new Mbp10Schema();
     private final OrderExecutionReport reject = new OrderExecutionReport();
@@ -72,7 +78,8 @@ final class SimulatedLane implements GnomeAgent {
 
     private volatile int working;
     private volatile long passes;
-    // Refused because the listing's book had no clean record yet, and the most a record waited for the books.
+    // Refused because the listing's book had no clean record yet, and the oldest new record any book took, from the
+    // venue's receipt of it: shard to gateway, then the gateway's own queue.
     private volatile long refusedNotReady;
     private volatile long lagMaxNanos;
 
@@ -196,6 +203,8 @@ final class SimulatedLane implements GnomeAgent {
                 onStream.remove(book);
                 if (onStream.isEmpty()) {
                     this.booksByStream.remove(book.streamId);
+                    // Read again later, the stream starts over: its first record then is a join, not a delay.
+                    this.lastRecvByStream.remove(book.streamId);
                 }
             }
         }
@@ -412,9 +421,14 @@ final class SimulatedLane implements GnomeAgent {
         if (onStream == null) {
             return;
         }
-        final long lag = this.wallNow - this.record.getRecvTimestamp();
-        if (lag > this.lagMaxNanos) {
-            this.lagMaxNanos = lag;
+        final long recv = this.record.getRecvTimestamp();
+        final long newest = this.lastRecvByStream.get(this.record.streamId());
+        if (newest == NO_RECORD || recv > newest) {
+            this.lastRecvByStream.put(this.record.streamId(), recv);
+            final long lag = this.wallNow - recv;
+            if (newest != NO_RECORD && lag > this.lagMaxNanos) {
+                this.lagMaxNanos = lag;
+            }
         }
         for (int i = 0; i < onStream.size(); i++) {
             onStream.get(i).onMarketData(this.record, this.wallNow);

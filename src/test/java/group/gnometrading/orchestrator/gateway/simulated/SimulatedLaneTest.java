@@ -143,6 +143,12 @@ class SimulatedLaneTest {
     }
 
     private void book(final long bid, final long bidSize, final long ask, final long askSize) {
+        bookReceivedAt(this.wallNanos.get(), bid, bidSize, ask, askSize);
+    }
+
+    /** A book record the venue's feed received at {@code recvNanos} (wall clock). */
+    private void bookReceivedAt(
+            final long recvNanos, final long bid, final long bidSize, final long ask, final long askSize) {
         final Mbp10Schema record = new Mbp10Schema();
         record.encoder.action(Action.Add);
         record.encoder.side(group.gnometrading.schemas.book.Side.None);
@@ -150,7 +156,7 @@ class SimulatedLaneTest {
         record.encoder.size(Mbp10Decoder.sizeNullValue());
         record.encoder.bidPrice0(bid).bidSize0(bidSize).askPrice0(ask).askSize0(askSize);
         emptyBelowTop(record);
-        publish(record, false);
+        publish(record, false, recvNanos);
     }
 
     private void trade(
@@ -166,7 +172,7 @@ class SimulatedLaneTest {
         record.encoder.bidPrice0(Mbp10Decoder.priceNullValue()).bidSize0(Mbp10Decoder.sizeNullValue());
         record.encoder.askPrice0(Mbp10Decoder.priceNullValue()).askSize0(Mbp10Decoder.sizeNullValue());
         emptyBelowTop(record);
-        publish(record, bad);
+        publish(record, bad, this.wallNanos.get());
     }
 
     private static void emptyBelowTop(final Mbp10Schema record) {
@@ -183,10 +189,10 @@ class SimulatedLaneTest {
         record.encoder.bidPrice9(px).bidSize9(sz).askPrice9(px).askSize9(sz);
     }
 
-    private void publish(final Mbp10Schema record, final boolean bad) {
+    private void publish(final Mbp10Schema record, final boolean bad, final long recvNanos) {
         final int header = SbeMessage.HEADER_LENGTH;
         record.buffer.putInt(header + StreamHeader.STREAM_ID_OFFSET, STREAM);
-        record.buffer.putLong(header + StreamHeader.TIMESTAMP_RECV_OFFSET, this.wallNanos.get());
+        record.buffer.putLong(header + StreamHeader.TIMESTAMP_RECV_OFFSET, recvNanos);
         record.buffer.putByte(header + StreamHeader.FLAGS_OFFSET, (byte) (bad ? 1 << StreamHeader.BAD_DATA_BIT : 0));
         this.marketData.publishRaw(record.buffer, Mbp10Decoder.TEMPLATE_ID, record.totalMessageSize());
         pass();
@@ -210,6 +216,21 @@ class SimulatedLaneTest {
     }
 
     // ----- tests -----
+
+    @Test
+    void lagCountsOnlyRecordsNewerThanTheStreamsLastNotAJoinOrAReSend() {
+        join(A, "session-a", null);
+        final long quietSince = this.wallNanos.get() - TimeUnit.SECONDS.toNanos(90);
+
+        // A book joining a quiet stream gets the shard's re-send of its last record, received long ago.
+        bookReceivedAt(quietSince, 100 * P, 10 * S, 102 * P, 10 * S);
+        this.wallNanos.addAndGet(TimeUnit.SECONDS.toNanos(5));
+        bookReceivedAt(quietSince, 100 * P, 10 * S, 102 * P, 10 * S);
+        assertEquals(0, this.lane.takeLagMaxNanos(), "neither the join nor the re-send is a delay");
+
+        bookReceivedAt(this.wallNanos.get() - TimeUnit.MILLISECONDS.toNanos(3), 100 * P, 12 * S, 102 * P, 10 * S);
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(3), this.lane.takeLagMaxNanos(), "a new record's age counts");
+    }
 
     @Test
     void aNewOrderWaitsForItsBookToHaveData_ThenRestsAndFillsAsTheVenueSaysWithTheSessionsVenueId() {
