@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.session.lifecycle;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.sm.Listing;
@@ -19,7 +20,8 @@ import java.util.function.IntConsumer;
 
 /**
  * Ends the session once its strategy has asked to exit and been taken out of the market: says why (an INFO alert, or
- * a WARNING when it was asked to close everything and couldn't), marks the session STOPPING so the instance going
+ * a WARNING when it was asked to close everything and couldn't; a clean exit only reaches Slack when the strategy
+ * asked for that), marks the session STOPPING so the instance going
  * away reads as a stop rather than a failure, then closes the session and ends the process.
  *
  * <p>Runs on a thread of its own: closing the session closes the strategy agent whose thread reports the exit.
@@ -148,7 +150,7 @@ public final class SessionExit implements ExitListener {
     String alertBody(final ExitResult result) {
         final String sessionId = reports.sessionId();
         final boolean warn = result.leftPositions();
-        return MAPPER.createObjectNode()
+        final ObjectNode alert = MAPPER.createObjectNode()
                 .put("type", "SESSION_EXITED")
                 .put("key", "SESSION_EXITED:" + sessionId)
                 .put("severity", warn ? "WARNING" : "INFO")
@@ -162,8 +164,12 @@ public final class SessionExit implements ExitListener {
                 .put("actor", STOPPED_BY)
                 .put("sessionId", sessionId)
                 .put("strategyId", strategyId)
-                .put("mode", mode)
-                .toString();
+                .put("mode", mode);
+        if (!warn && !result.notifyExit()) {
+            // The registry records a silent INFO alert for the Alerts page without posting it anywhere.
+            alert.putObject("labels").put("route", "silent");
+        }
+        return alert.toString();
     }
 
     private String describe(final ExitResult result) {

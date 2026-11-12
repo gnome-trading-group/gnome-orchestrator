@@ -86,7 +86,7 @@ class SessionExitTest {
 
     @Test
     void reportsTheExitAndMarksTheSessionStoppingBeforeClosing() throws Exception {
-        sessionExit(reports()).exit(new ExitResult("match went live", false, false, List.of()));
+        sessionExit(reports()).exit(new ExitResult("match went live", false, false, false, List.of()));
 
         assertEquals(List.of("PATCH 200", "close", "halt 0"), steps);
         JsonNode update = body("PATCH");
@@ -108,10 +108,43 @@ class SessionExitTest {
     }
 
     @Test
+    void aCleanExitIsOnlyRecordedUnlessTheStrategyAskedToNotify() throws Exception {
+        sessionExit(reports()).exit(new ExitResult("done", false, false, false, List.of()));
+
+        assertEquals("silent", body("POST").path("labels").path("route").asText());
+    }
+
+    @Test
+    void aCleanExitTheStrategyAskedToNotifyIsPosted() throws Exception {
+        sessionExit(reports()).exit(new ExitResult("done", false, true, false, List.of()));
+
+        assertTrue(body("POST").path("labels").isMissingNode());
+    }
+
+    @Test
+    void positionsLeftAreNeverSilent() throws Exception {
+        sessionExit(reports())
+                .exit(new ExitResult(
+                        "done",
+                        true,
+                        false,
+                        true,
+                        List.of(new HeldPosition(12, 2_500_000L, ExitResult.Why.TIMED_OUT))));
+
+        JsonNode alert = body("POST");
+        assertEquals("WARNING", alert.get("severity").asText());
+        assertTrue(alert.path("labels").isMissingNode());
+    }
+
+    @Test
     void warnsWhenItCouldNotCloseEverythingItWasAskedTo() throws Exception {
         sessionExit(reports())
                 .exit(new ExitResult(
-                        "done", true, true, List.of(new HeldPosition(12, 2_500_000L, ExitResult.Why.TIMED_OUT))));
+                        "done",
+                        true,
+                        false,
+                        true,
+                        List.of(new HeldPosition(12, 2_500_000L, ExitResult.Why.TIMED_OUT))));
 
         JsonNode alert = body("POST");
         assertEquals("WARNING", alert.get("severity").asText());
@@ -128,7 +161,7 @@ class SessionExitTest {
     void keepingPositionsByChoiceIsNotAWarning() throws Exception {
         sessionExit(reports())
                 .exit(new ExitResult(
-                        "done", false, false, List.of(new HeldPosition(12, -3_000_000L, ExitResult.Why.KEPT))));
+                        "done", false, false, false, List.of(new HeldPosition(12, -3_000_000L, ExitResult.Why.KEPT))));
 
         JsonNode alert = body("POST");
         assertEquals("INFO", alert.get("severity").asText());
@@ -140,7 +173,7 @@ class SessionExitTest {
     void saysWhenAPositionWasTooSmallToClose() throws Exception {
         sessionExit(reports())
                 .exit(new ExitResult(
-                        "done", true, false, List.of(new HeldPosition(12, 220_000L, ExitResult.Why.TOO_SMALL))));
+                        "done", true, false, false, List.of(new HeldPosition(12, 220_000L, ExitResult.Why.TOO_SMALL))));
 
         JsonNode alert = body("POST");
         assertEquals("WARNING", alert.get("severity").asText());
@@ -153,7 +186,7 @@ class SessionExitTest {
     void retriesMarkingItStoppingSoItIsNotLeftToFail() throws Exception {
         patchStatuses.addAll(List.of(500, 200));
 
-        sessionExit(reports()).exit(new ExitResult("done", false, false, List.of()));
+        sessionExit(reports()).exit(new ExitResult("done", false, false, false, List.of()));
 
         assertEquals(List.of("PATCH 500", "PATCH 200", "close", "halt 0"), steps);
     }
@@ -162,7 +195,7 @@ class SessionExitTest {
     void aSessionAlreadyStoppingIsLeftAsItIs() throws Exception {
         patchStatuses.add(409);
 
-        sessionExit(reports()).exit(new ExitResult("done", false, false, List.of()));
+        sessionExit(reports()).exit(new ExitResult("done", false, false, false, List.of()));
 
         assertEquals(List.of("PATCH 409", "close", "halt 0"), steps);
     }
@@ -171,14 +204,14 @@ class SessionExitTest {
     void stillClosesAndExitsWhenTheRegistryIsUnreachable() {
         server.stop(0);
 
-        sessionExit(reports()).exit(new ExitResult("done", false, false, List.of()));
+        sessionExit(reports()).exit(new ExitResult("done", false, false, false, List.of()));
 
         assertEquals(List.of("close", "halt 0"), steps);
     }
 
     @Test
     void withoutARegistrySessionItOnlyClosesAndExits() {
-        sessionExit(null).exit(new ExitResult("done", false, false, List.of()));
+        sessionExit(null).exit(new ExitResult("done", false, false, false, List.of()));
 
         assertEquals(List.of("close", "halt 0"), steps);
         assertTrue(received.isEmpty());
@@ -197,8 +230,8 @@ class SessionExitTest {
                 () -> threads.add(Thread.currentThread().getName()),
                 status -> halted.countDown());
 
-        exit.onExitComplete(new ExitResult("done", false, false, List.of()));
-        exit.onExitComplete(new ExitResult("again", false, false, List.of()));
+        exit.onExitComplete(new ExitResult("done", false, false, false, List.of()));
+        exit.onExitComplete(new ExitResult("again", false, false, false, List.of()));
 
         assertTrue(halted.await(5, TimeUnit.SECONDS));
         Thread.sleep(100);

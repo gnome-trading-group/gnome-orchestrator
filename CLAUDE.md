@@ -389,7 +389,8 @@ unset means no alerts; posted through `runtime/AlertsApi`):
 - `FATAL_ERROR` - any agent error, gateway that can't reconnect, failed startup, or uncaught exception. Also PATCHes
   `failureReason`, then exits 1. Check the log stream tail and the failure reason.
 - `SESSION_EXITED` - INFO on a graceful exit; WARNING when positions were left (too small, rejected, timed out).
-  Check the listed positions on the venue.
+  Check the listed positions on the venue. A clean exit is labelled `route: silent` (recorded, not posted to Slack)
+  unless the strategy's request set `notifyExit`.
 - Everything else about a session is raised by the registry's session monitor from heartbeat fields
   (gnome-registry `cdk/lambda/monitoring/rules/sessions.ts`): `AGENT_STALLED`, `AGENT_EXITED`, `RECONNECTING`,
   `BOOK_RESYNCS`, `MARKET_DATA_BAD`, `MARKET_DATA_BAD_HELD`, `LEDGER_FAILING`, `LEDGER_FENCED`, `RISK_STALE`, `RISK_UNGUARDED`, `POLICY_UNBUILDABLE`,
