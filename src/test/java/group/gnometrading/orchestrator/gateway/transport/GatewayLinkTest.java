@@ -197,8 +197,10 @@ class GatewayLinkTest {
     void anOrderFromASessionOnANewerSchemaIsReadByItsOwnHeader() throws Exception {
         linkedSession();
         final Order order = order(1, LEASED);
-        // A newer version appends fields to the block: the gateway reads the ones it knows and skips the rest.
-        final int added = 24;
+        // A newer version appends fields to the block: the gateway reads the ones it knows and skips the rest. More
+        // than
+        // the flyweight's alignment slack, so the message is always longer than the buffer it is read into.
+        final int added = 200;
         final int length = order.totalMessageSize() + added;
         final UnsafeBuffer newer = new UnsafeBuffer(new byte[length]);
         newer.putBytes(0, order.buffer, 0, order.totalMessageSize());

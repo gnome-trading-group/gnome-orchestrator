@@ -23,6 +23,7 @@ import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.SbeMessage;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.gateway.SessionHeartbeatDecoder;
+import group.gnometrading.sequencer.SequencedEvent;
 import io.aeron.Subscription;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.FrameDescriptor;
@@ -164,16 +165,14 @@ public final class GatewayIngress implements AeronPathAgent {
     private ControlledFragmentHandler.Action onOrder(
             final int templateId, final DirectBuffer buffer, final int offset, final int length, final int image) {
         final boolean done;
-        if (templateId == OrderDecoder.TEMPLATE_ID && fits(this.order, buffer, offset, length, ORDER_V2_BLOCK)) {
-            this.order.buffer.putBytes(0, buffer, offset, length);
+        if (templateId == OrderDecoder.TEMPLATE_ID && fits(buffer, offset, length, ORDER_V2_BLOCK)) {
+            copy(this.order, buffer, offset, length);
             done = onNew(image);
-        } else if (templateId == CancelOrderDecoder.TEMPLATE_ID
-                && fits(this.cancel, buffer, offset, length, CANCEL_V2_BLOCK)) {
-            this.cancel.buffer.putBytes(0, buffer, offset, length);
+        } else if (templateId == CancelOrderDecoder.TEMPLATE_ID && fits(buffer, offset, length, CANCEL_V2_BLOCK)) {
+            copy(this.cancel, buffer, offset, length);
             done = onCancel(image);
-        } else if (templateId == ModifyOrderDecoder.TEMPLATE_ID
-                && fits(this.modify, buffer, offset, length, MODIFY_V2_BLOCK)) {
-            this.modify.buffer.putBytes(0, buffer, offset, length);
+        } else if (templateId == ModifyOrderDecoder.TEMPLATE_ID && fits(buffer, offset, length, MODIFY_V2_BLOCK)) {
+            copy(this.modify, buffer, offset, length);
             done = onAmend(image);
         } else {
             return toControl(GatewayMessage.UNREADABLE, image, buffer, offset, 0);
@@ -187,16 +186,25 @@ public final class GatewayIngress implements AeronPathAgent {
      * message from an older or newer session is read as long as its block reaches the core v2 fields: the gateway reads
      * no field added since. Fixed numbers, not the decoders' {@code BLOCK_LENGTH}, which grows with each version.
      */
-    private static boolean fits(
-            final SbeMessage message,
-            final DirectBuffer buffer,
-            final int offset,
-            final int length,
-            final int minimumBlock) {
+    private static boolean fits(final DirectBuffer buffer, final int offset, final int length, final int minimumBlock) {
         final int block = SbeMessage.blockLength(buffer, offset);
         return block >= minimumBlock
                 && length >= SbeMessage.HEADER_LENGTH + block
-                && length <= message.buffer.capacity();
+                && length <= SequencedEvent.MAX_MESSAGE_SIZE;
+    }
+
+    /**
+     * Copies a session's message into the gateway's own flyweight, which holds exactly this gateway's version of it:
+     * a newer session's extra fields are left out, and an older session's missing ones read as zero rather than as
+     * whatever the last message left there. Only the decoded fields are read after; the journal keeps the raw frame.
+     */
+    private static void copy(final SbeMessage message, final DirectBuffer buffer, final int offset, final int length) {
+        final int capacity = message.buffer.capacity();
+        final int copied = Math.min(length, capacity);
+        message.buffer.putBytes(0, buffer, offset, copied);
+        if (copied < capacity) {
+            message.buffer.setMemory(copied, capacity - copied, (byte) 0);
+        }
     }
 
     /** @return false if there was no room to act on it: the message is read again on the next poll */
