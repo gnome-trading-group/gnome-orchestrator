@@ -9,19 +9,55 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.orchestrator.gateway.accounts.LaneAdmissions;
 import group.gnometrading.orchestrator.gateway.simulated.SimulatedAccount;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** The gateway's minutes as the controller reads them. */
 class GatewayMinutesTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    @TempDir
+    static Path dir;
+
     private final List<String> written = new ArrayList<>();
     private final GatewayMinutes minutes =
-            new GatewayMinutes(new NullLogger(), "live:kalshi:main", "live", this.written::add);
+            new GatewayMinutes(new NullLogger(), "live:kalshi:main", "live", this.written::add, noClock());
+
+    private static ClockReadings noClock() {
+        return new ClockReadings(Path.of("/nonexistent/clock.status"), () -> 0L);
+    }
+
+    @Test
+    void eachDocumentSaysHowFarTheHostsClockCanBeFromUtc() throws Exception {
+        final Path file = dir.resolve("clock.status");
+        Files.writeString(
+                file,
+                "written_ms 1000\nsource PHC\nstratum 1\noffset_ns 12\nerror_bound_ns 23617\nphc_error_bound_ns 18372\n");
+        final GatewayMinutes timed = new GatewayMinutes(
+                new NullLogger(), "live:kalshi:main", "live", this.written::add, new ClockReadings(file, () -> 3_500L));
+        timed.publish(3_500);
+
+        final JsonNode clock = MAPPER.readTree(this.written.get(0)).get("clock");
+        assertEquals("PHC", clock.get("source").asText());
+        assertEquals(23_617, clock.get("errorBoundNanos").asLong());
+        assertEquals(12, clock.get("offsetNanos").asLong());
+        assertEquals(2_500, clock.get("ageMs").asLong());
+    }
+
+    @Test
+    void aHostWithNoClockStatusSaysSo() throws Exception {
+        this.minutes.publish(1);
+        final JsonNode clock = MAPPER.readTree(this.written.get(0)).get("clock");
+        assertEquals("UNKNOWN", clock.get("source").asText());
+        assertTrue(clock.get("errorBoundNanos").isNull());
+    }
 
     private static LaneAdmissions.Minute minute(final long orders, final Map<Long, Long> sentBySlot) {
         return new LaneAdmissions.Minute(
@@ -72,7 +108,7 @@ class GatewayMinutesTest {
     @Test
     void aPaperGatewaysMinutesCarryItsBooksLag() throws Exception {
         final GatewayMinutes paper =
-                new GatewayMinutes(new NullLogger(), "paper:kalshi:main", "paper", this.written::add);
+                new GatewayMinutes(new NullLogger(), "paper:kalshi:main", "paper", this.written::add, noClock());
         paper.paper(new SimulatedAccount.Minute(3, 30, 42, 26), 5_000);
         paper.publish(6_000);
 
@@ -89,12 +125,17 @@ class GatewayMinutesTest {
     void aWriteThatFailsIsLoggedNotThrownAndTheNextCarriesEverything() throws Exception {
         final List<String> after = new ArrayList<>();
         final boolean[] failing = {true};
-        final GatewayMinutes flaky = new GatewayMinutes(new NullLogger(), "live:kalshi:main", "live", json -> {
-            if (failing[0]) {
-                throw new IllegalStateException("throttled");
-            }
-            after.add(json);
-        });
+        final GatewayMinutes flaky = new GatewayMinutes(
+                new NullLogger(),
+                "live:kalshi:main",
+                "live",
+                json -> {
+                    if (failing[0]) {
+                        throw new IllegalStateException("throttled");
+                    }
+                    after.add(json);
+                },
+                noClock());
         flaky.account(5, "a", minute(1, Map.of()), 1, 0, slot -> null);
         flaky.publish(1);
         failing[0] = false;

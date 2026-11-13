@@ -25,6 +25,7 @@ import group.gnometrading.orchestrator.di.Orchestrator;
 import group.gnometrading.orchestrator.di.Provides;
 import group.gnometrading.orchestrator.di.Singleton;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
 import group.gnometrading.orchestrator.runtime.SchedulingLatencyProbe;
@@ -55,6 +56,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
+import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -325,6 +327,7 @@ public class ShardOrchestrator extends Orchestrator {
                 },
                 uploader,
                 HostReadings.ofThisProcess(new File("/")),
+                ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
                 latencyProbe,
                 System.nanoTime());
     }

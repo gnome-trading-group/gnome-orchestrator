@@ -6,6 +6,7 @@ import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.SchedulingLatencyProbe;
 import group.gnometrading.utils.CauseChain;
 import java.lang.management.GarbageCollectorMXBean;
@@ -58,6 +59,7 @@ final class CollectorHeartbeat implements Runnable {
     private final Shard shard;
     private final CycleUploader uploader;
     private final HostReadings host;
+    private final ClockReadings clock;
     private final SchedulingLatencyProbe probe;
     private final List<GarbageCollectorMXBean> collectors = ManagementFactory.getGarbageCollectorMXBeans();
     private Map<Integer, Long> previousRecords = new HashMap<>();
@@ -74,6 +76,7 @@ final class CollectorHeartbeat implements Runnable {
             Shard shard,
             CycleUploader uploader,
             HostReadings host,
+            ClockReadings clock,
             SchedulingLatencyProbe probe,
             long startNanos) {
         this.logger = logger;
@@ -81,6 +84,7 @@ final class CollectorHeartbeat implements Runnable {
         this.shard = shard;
         this.uploader = uploader;
         this.host = host;
+        this.clock = clock;
         this.probe = probe;
         this.previousNanos = startNanos;
     }
@@ -212,6 +216,8 @@ final class CollectorHeartbeat implements Runnable {
         process.put("uploads_queued", uploader.queuedUploads());
         process.put("uploads_failed", uploader.failedUploads());
         process.put("sched_latency", latency(probe == null ? null : probe.latest()));
+        clock.sample();
+        process.put("clock", clock(clock));
 
         processLine = mapper.writeValueAsString(process);
         final List<String> lines = new ArrayList<>(streamLines.size() + connectionLines.size() + 1);
@@ -229,6 +235,20 @@ final class CollectorHeartbeat implements Runnable {
     /** Seconds since {@code thenNanos}, to a tenth; null if it never happened. */
     private static Double age(final long wallNanos, final long thenNanos) {
         return thenNanos == 0 ? null : Math.round((wallNanos - thenNanos) / 1e8) / 10.0;
+    }
+
+    /** How far the host's clock can be from UTC: what the records' receive times, read by sessions elsewhere, carry. */
+    static Map<String, Object> clock(final ClockReadings readings) {
+        final Map<String, Object> clock = new LinkedHashMap<>();
+        clock.put("source", readings.source().name());
+        clock.put("error_bound_ns", orNull(readings.errorBoundNanos()));
+        clock.put("offset_ns", readings.offsetNanos());
+        clock.put("age_ms", orNull(readings.ageMs()));
+        return clock;
+    }
+
+    private static Long orNull(final long value) {
+        return value == ClockReadings.UNAVAILABLE ? null : value;
     }
 
     static Map<String, Object> latency(final SchedulingLatencyProbe.Window window) {

@@ -60,6 +60,7 @@ import group.gnometrading.orchestrator.marketdata.ShardMarketData;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
 import group.gnometrading.orchestrator.runtime.AlertsApi;
 import group.gnometrading.orchestrator.runtime.BoundedCalls;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
@@ -468,12 +469,17 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     private GatewayMinutes minutes(final Logger logger, final Properties properties, final GatewaySettings settings) {
         final String mode = settings.paper() ? "paper" : "live";
         if (localRun(properties)) {
-            return new GatewayMinutes(logger, settings.key(), mode, json -> {});
+            return new GatewayMinutes(
+                    logger, settings.key(), mode, json -> {}, ClockReadings.ofThisHost(SystemEpochClock.INSTANCE));
         }
         final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "ENDPOINTS"));
         final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
         return new GatewayMinutes(
-                logger, settings.key(), mode, json -> endpoints.putMinutes(settings.key(), json, wallClock.nanoTime()));
+                logger,
+                settings.key(),
+                mode,
+                json -> endpoints.putMinutes(settings.key(), json, wallClock.nanoTime()),
+                ClockReadings.ofThisHost(SystemEpochClock.INSTANCE));
     }
 
     /** Where the gateway raises its alerts: the alerts API the reconciler names, with the registry's key. */

@@ -24,6 +24,7 @@ import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.orchestrator.runtime.GatewayRunners;
 import group.gnometrading.orchestrator.session.journal.JournalSegmentSealer;
@@ -60,6 +61,7 @@ class SessionHeartbeatAgentTest {
     private LedgerAgent ledger;
     private RiskEngine riskEngine;
     private HostReadings host;
+    private ClockReadings hostClock;
 
     @TempDir
     Path tempDir;
@@ -110,11 +112,13 @@ class SessionHeartbeatAgentTest {
                 1_000);
         riskEngine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), ListingDirectory.EMPTY);
         host = new HostReadings(tempDir.resolve("proc"), tempDir.toFile());
+        hostClock = new ClockReadings(tempDir.resolve("clock.status"), () -> now[0]);
     }
 
     @AfterEach
     void tearDown() throws Exception {
         host.close();
+        hostClock.close();
         for (GnomeAgentRunner runner : started) {
             runner.close();
         }
@@ -212,6 +216,7 @@ class SessionHeartbeatAgentTest {
                 ledgerRing,
                 riskEngine,
                 host,
+                hostClock,
                 null,
                 SAMPLE_MS,
                 POST_MS);
@@ -386,6 +391,7 @@ class SessionHeartbeatAgentTest {
                 ledgerRing,
                 riskEngine,
                 host,
+                hostClock,
                 null,
                 SAMPLE_MS,
                 Long.MAX_VALUE / 2);
@@ -407,6 +413,32 @@ class SessionHeartbeatAgentTest {
             agent.doWork();
         }
         assertEquals(0, threads.getThreadAllocatedBytes(threadId) - before);
+    }
+
+    @Test
+    void reportsTheHostsClockAndHowOldItsStatusIs() throws Exception {
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
+        agent.onStart();
+        agent.encode(now[0]);
+        final JsonNode unknown = mapper.readTree(agent.lastBody()).get("clock");
+        assertEquals("UNKNOWN", unknown.get("source").asText());
+        assertTrue(unknown.get("errorBoundNanos").isNull());
+        assertTrue(unknown.get("ageMs").isNull());
+
+        writeClockStatus(now[0] - 7_000);
+        agent.encode(now[0]);
+        final JsonNode clock = mapper.readTree(agent.lastBody()).get("clock");
+        assertEquals("PHC", clock.get("source").asText());
+        assertEquals(23_617, clock.get("errorBoundNanos").asLong());
+        assertEquals(-5, clock.get("offsetNanos").asLong());
+        assertEquals(7_000, clock.get("ageMs").asLong());
+    }
+
+    private void writeClockStatus(final long writtenAtMs) throws Exception {
+        Files.writeString(
+                tempDir.resolve("clock.status"),
+                "written_ms " + writtenAtMs + "\nsource PHC\nstratum 1\noffset_ns -5\nerror_bound_ns 23617\n"
+                        + "phc_error_bound_ns 18372\n");
     }
 
     private HostReadings fixtureHost() throws Exception {
@@ -446,6 +478,7 @@ class SessionHeartbeatAgentTest {
                 ledgerRing,
                 riskEngine,
                 readings,
+                hostClock,
                 journal,
                 SAMPLE_MS,
                 POST_MS);
@@ -490,6 +523,7 @@ class SessionHeartbeatAgentTest {
     @Test
     void writingTheHeartbeatAllocatesNothing() throws Exception {
         final JournalSegmentSealer journal = sealed(3);
+        writeClockStatus(now[0]);
         try (HostReadings readings = fixtureHost()) {
             final SessionHeartbeatAgent agent = heartbeat(readings, journal);
             agent.onStart();
@@ -508,6 +542,7 @@ class SessionHeartbeatAgentTest {
             final long allocated = threads.getThreadAllocatedBytes(threadId) - before;
 
             assertTrue(agent.lastBody().contains("\"pendingSegments\":3"), "the readings were written");
+            assertTrue(agent.lastBody().contains("\"source\":\"PHC\""), "the clock was read");
             assertEquals(0, allocated);
         }
     }

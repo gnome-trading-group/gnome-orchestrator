@@ -5,9 +5,11 @@ import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import {
-  API_KEY_SECRET_NAMES, lookupPlatformNetwork, PRIMARY_REGION, SERVICE_ENDPOINTS, Stage,
+  API_KEY_SECRET_NAMES, CLOCK_STATUS_DIR, hostClockUserData, lookupPlatformNetwork, PLATFORM_SSM, PRIMARY_REGION,
+  SERVICE_ENDPOINTS, Stage,
 } from '@gnome-trading-group/gnome-shared-cdk';
 import { join } from 'path';
 import { ORDER_GATEWAYS } from '../config';
@@ -15,8 +17,10 @@ import { ORDER_GATEWAYS } from '../config';
 
 // Provisional until the gateways are sized under load: two cores and 4 GiB, as a gateway's ingress, egress, Aeron driver,
 // and each account's lane and reader all wake every few tens of microseconds; not burstable (credits would run out in
-// a burst of orders) and not Graviton (the native socket library is x86 only).
-const INSTANCE_TYPE = 'c7a.large';
+// a burst of orders) and not Graviton (the native socket library is x86 only). The same size on Intel is the fallback:
+// a live host launches into the precision-time placement group, which fails when the zone has none of the first type's
+// hardware with the Nitro clock, and a venue's order path waits on that launch.
+const INSTANCE_TYPES = ['c7a.large', 'c7i.large'];
 // A paper gateway simulates its venue for paper sessions and holds nothing anyone would lose: one core and 2 GiB, not
 // burstable for the same reason as live.
 const PAPER_INSTANCE_TYPE = 'c7a.medium';
@@ -63,9 +67,12 @@ export class OrderGatewayStack extends cdk.Stack {
         iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
       ],
     });
-    this.hosts(cluster, vpc, securityGroup, hostRole, 'Gateway', INSTANCE_TYPE, MAX_HOSTS,
-      ORDER_GATEWAYS.modes.live.capacityProvider);
-    this.hosts(cluster, vpc, securityGroup, hostRole, 'GatewayPaper', PAPER_INSTANCE_TYPE, MAX_PAPER_HOSTS,
+    // Live gateways time what they send and what the venue answers, which sessions compare with their own clocks; a
+    // paper gateway's venue is simulated, so its clock stays on Amazon Time Sync.
+    const precisionTimeGroup = ssm.StringParameter.valueForStringParameter(this, PLATFORM_SSM.precisionTimeGroup);
+    this.hosts(cluster, vpc, securityGroup, hostRole, 'Gateway', INSTANCE_TYPES, MAX_HOSTS,
+      ORDER_GATEWAYS.modes.live.capacityProvider, precisionTimeGroup);
+    this.hosts(cluster, vpc, securityGroup, hostRole, 'GatewayPaper', [PAPER_INSTANCE_TYPE], MAX_PAPER_HOSTS,
       ORDER_GATEWAYS.modes.paper.capacityProvider);
 
     // Named, so the gateway reconciler may pass them to the services it creates.
@@ -131,24 +138,44 @@ export class OrderGatewayStack extends cdk.Stack {
     });
   }
 
-  /** A group of gateway hosts that scales from zero, and its capacity provider in the cluster. */
+  /**
+   * A group of gateway hosts that scales from zero, and its capacity provider in the cluster. With more than one type,
+   * the first is used whenever it launches and the rest only when it can't.
+   */
   private hosts(
     cluster: ecs.Cluster, vpc: ec2.IVpc, securityGroup: ec2.ISecurityGroup, hostRole: iam.IRole, id: string,
-    instanceType: string, maxHosts: number, capacityProviderName: string,
+    instanceTypes: string[], maxHosts: number, capacityProviderName: string, placementGroup?: string,
   ) {
+    const userData = ec2.UserData.forLinux();
+    userData.addCommands(...hostClockUserData());
+    const launchTemplate = new ec2.LaunchTemplate(this, `${id}HostTemplate`, {
+      instanceType: new ec2.InstanceType(instanceTypes[0]),
+      machineImage: ecs.EcsOptimizedImage.amazonLinux2023(),
+      role: hostRole,
+      securityGroup,
+      requireImdsv2: true,
+      // Hop limit 2: the gateway reads the instance's metadata from its container.
+      httpPutResponseHopLimit: 2,
+      userData,
+      blockDevices: [{ deviceName: '/dev/xvda', volume: ec2.BlockDeviceVolume.ebs(30, { encrypted: true }) }],
+    });
+    if (placementGroup) {
+      (launchTemplate.node.defaultChild as ec2.CfnLaunchTemplate)
+        .addPropertyOverride('LaunchTemplateData.Placement.GroupName', placementGroup);
+    }
     const hosts = new autoscaling.AutoScalingGroup(this, `${id}Hosts`, {
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-      launchTemplate: new ec2.LaunchTemplate(this, `${id}HostTemplate`, {
-        instanceType: new ec2.InstanceType(instanceType),
-        machineImage: ecs.EcsOptimizedImage.amazonLinux2023(),
-        role: hostRole,
-        securityGroup,
-        requireImdsv2: true,
-        // Hop limit 2: the gateway reads the instance's metadata from its container.
-        httpPutResponseHopLimit: 2,
-        userData: ec2.UserData.forLinux(),
-        blockDevices: [{ deviceName: '/dev/xvda', volume: ec2.BlockDeviceVolume.ebs(30, { encrypted: true }) }],
+      ...(instanceTypes.length === 1 ? { launchTemplate } : {
+        mixedInstancesPolicy: {
+          launchTemplate,
+          launchTemplateOverrides: instanceTypes.map((type) => ({ instanceType: new ec2.InstanceType(type) })),
+          instancesDistribution: {
+            onDemandAllocationStrategy: autoscaling.OnDemandAllocationStrategy.PRIORITIZED,
+            onDemandBaseCapacity: 0,
+            onDemandPercentageAboveBaseCapacity: 100,
+          },
+        },
       }),
       minCapacity: 0,
       maxCapacity: maxHosts,
@@ -187,7 +214,11 @@ export class OrderGatewayStack extends cdk.Stack {
       networkMode: ecs.NetworkMode.HOST,
       taskRole: props.taskRole,
       executionRole: props.executionRole,
-      volumes: [{ name: 'state', host: { sourcePath: STATE_DIRECTORY } }],
+      volumes: [
+        { name: 'state', host: { sourcePath: STATE_DIRECTORY } },
+        // The host's clock state, which the gateway reports beside its minutes.
+        { name: 'clock', host: { sourcePath: CLOCK_STATUS_DIR } },
+      ],
     });
     const container = task.addContainer('Gateway', {
       containerName: 'gateway',
@@ -220,6 +251,9 @@ export class OrderGatewayStack extends cdk.Stack {
       // The planned stop cancels every session's orders and says goodbye before anything closes.
       stopTimeout: cdk.Duration.seconds(120),
     });
-    container.addMountPoints({ sourceVolume: 'state', containerPath: STATE_DIRECTORY, readOnly: false });
+    container.addMountPoints(
+      { sourceVolume: 'state', containerPath: STATE_DIRECTORY, readOnly: false },
+      { sourceVolume: 'clock', containerPath: CLOCK_STATUS_DIR, readOnly: true },
+    );
   }
 }

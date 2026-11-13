@@ -50,6 +50,37 @@ describe('the order gateway stack', () => {
     }
   });
 
+  it('launches live hosts into the precision-time group, c7a first and c7i when c7a can\'t launch', () => {
+    const templates = Object.values(template.findResources('AWS::EC2::LaunchTemplate')) as any[];
+    const byType = (type: string) => templates.find((t) => t.Properties.LaunchTemplateData.InstanceType === type);
+    expect(byType('c7a.large').Properties.LaunchTemplateData.Placement.GroupName).toEqual(
+      expect.objectContaining({ Ref: expect.stringMatching(/precisiontimeplacementgroup/i) }));
+    expect(byType('c7a.medium').Properties.LaunchTemplateData.Placement).toBeUndefined();
+    template.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', Match.objectLike({
+      MixedInstancesPolicy: Match.objectLike({
+        LaunchTemplate: Match.objectLike({
+          Overrides: [{ InstanceType: 'c7a.large' }, { InstanceType: 'c7i.large' }],
+        }),
+        InstancesDistribution: Match.objectLike({
+          OnDemandAllocationStrategy: 'prioritized',
+          OnDemandPercentageAboveBaseCapacity: 100,
+        }),
+      }),
+    }));
+  });
+
+  it('sets up and reports the clock on every host, and shows its state to the gateway read-only', () => {
+    for (const lt of Object.values(template.findResources('AWS::EC2::LaunchTemplate')) as any[]) {
+      expect(JSON.stringify(lt.Properties.LaunchTemplateData.UserData)).toContain('gnome-clock-setup.service');
+    }
+    for (const family of [live.baseFamily, paper.baseFamily]) {
+      const task = taskDefinition(family);
+      expect(task.Volumes).toContainEqual({ Name: 'clock', Host: { SourcePath: '/run/gnome' } });
+      expect(task.ContainerDefinitions[0].MountPoints).toContainEqual(
+        { SourceVolume: 'clock', ContainerPath: '/run/gnome', ReadOnly: true });
+    }
+  });
+
   it('gives the paper base task the same container, smaller, under the paper task role', () => {
     const liveTask = taskDefinition(live.baseFamily);
     const paperTask = taskDefinition(paper.baseFamily);

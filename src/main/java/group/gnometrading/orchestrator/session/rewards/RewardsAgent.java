@@ -199,6 +199,8 @@ public final class RewardsAgent implements GnomeAgent {
 
     @Override
     public void onStart() {
+        // Time before the session started isn't ours to score, not even as no data.
+        this.scorer.beginAt(this.clock.time() * NANOS_PER_MILLI);
         this.refreshSchedule.start();
         this.refreshSchedule.forceTrigger();
         this.postSchedule.start();

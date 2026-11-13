@@ -57,6 +57,36 @@ if [ "${STRATEGY_TYPE:-java}" = "python" ]; then
   exec "$VENV/bin/python" -m gnomepy.java.strategy.runner
 fi
 
+# A Java strategy run by commit: the commit's strategies/ compiled against this jar, which is the release the commit's
+# strategies/pom.xml pins (platform.orchestrator). A session given STRATEGY_CLASSES already (a local run of a local
+# build) uses those classes as they are.
+if [ -n "${STRATEGY_COMMIT:-}" ] && [ -z "${STRATEGY_CLASSES:-}" ]; then
+  STRATEGIES_DIR=/opt/gnome/gnome-strategies
+  gh_token
+  git clone --filter=blob:none --quiet \
+    "https://x-access-token:${GH_TOKEN}@github.com/gnome-trading-group/gnome-strategies.git" "$STRATEGIES_DIR"
+  git -C "$STRATEGIES_DIR" checkout --quiet "$STRATEGY_COMMIT"
+  git -C "$STRATEGIES_DIR" --no-pager log -1 --oneline
+  PINNED=$(sed -n 's#.*<platform.orchestrator>\([^<]*\)</platform.orchestrator>.*#\1#p' "$STRATEGIES_DIR/strategies/pom.xml" | head -n 1)
+  if [ -z "$PINNED" ]; then
+    echo "start-session: strategy commit ${STRATEGY_COMMIT} has no platform.orchestrator in strategies/pom.xml" >&2
+    exit 1
+  fi
+  if [ -n "${ORCHESTRATOR_VERSION:-}" ] && [ "$PINNED" != "$ORCHESTRATOR_VERSION" ]; then
+    echo "start-session: strategy commit ${STRATEGY_COMMIT} runs on gnome-orchestrator ${PINNED}; this session fetched ${ORCHESTRATOR_VERSION}" >&2
+    exit 1
+  fi
+  STRATEGY_CLASSES=/opt/gnome/strategy-classes
+  mkdir -p "$STRATEGY_CLASSES"
+  find "$STRATEGIES_DIR/strategies/src/main/java" -name '*.java' > "$STRATEGIES_DIR/sources.txt"
+  echo "start-session: compiling $(wc -l < "$STRATEGIES_DIR/sources.txt" | tr -d ' ') strategy sources at ${STRATEGY_COMMIT} against gnome-orchestrator ${PINNED}"
+  javac --release 17 -parameters -nowarn -cp "$APP_JAR" -d "$STRATEGY_CLASSES" "@$STRATEGIES_DIR/sources.txt"
+  if [ -d "$STRATEGIES_DIR/strategies/src/main/resources" ]; then
+    cp -R "$STRATEGIES_DIR/strategies/src/main/resources/." "$STRATEGY_CLASSES/"
+  fi
+  export STRATEGY_CLASSES
+fi
+
 unset GH_TOKEN
 # The jar's manifest gives it the module access it needs (java -jar applies it); the session's other JVM options live
 # in gnomepy, so the Java and Python launch paths cannot drift apart.

@@ -8,6 +8,7 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.orchestrator.gateway.accounts.LaneAdmissions;
 import group.gnometrading.orchestrator.gateway.simulated.SimulatedAccount;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.utils.CauseChain;
 import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
@@ -33,6 +34,7 @@ final class GatewayMinutes {
     private final String gatewayKey;
     private final String mode;
     private final Consumer<String> writer;
+    private final ClockReadings clock;
     private final Map<Integer, Account> accounts = new LinkedHashMap<>();
     private final ArrayDeque<ObjectNode> paperMinutes = new ArrayDeque<>();
 
@@ -46,12 +48,22 @@ final class GatewayMinutes {
         }
     }
 
-    /** @param writer stores the document; a failure is logged and the next minute writes again */
-    GatewayMinutes(final Logger logger, final String gatewayKey, final String mode, final Consumer<String> writer) {
+    /**
+     * @param writer stores the document; a failure is logged and the next minute writes again
+     * @param clock the host's clock, reported with each document: the venue answer times are its own, but what the
+     *     gateway stamps for sessions to compare with theirs is only as good as its bound
+     */
+    GatewayMinutes(
+            final Logger logger,
+            final String gatewayKey,
+            final String mode,
+            final Consumer<String> writer,
+            final ClockReadings clock) {
         this.logger = logger;
         this.gatewayKey = gatewayKey;
         this.mode = mode;
         this.writer = writer;
+        this.clock = clock;
     }
 
     /**
@@ -117,6 +129,12 @@ final class GatewayMinutes {
                 .put("gatewayKey", this.gatewayKey)
                 .put("mode", this.mode)
                 .put("writtenAt", writtenAtMillis);
+        this.clock.sample();
+        final ObjectNode clockNode =
+                root.putObject("clock").put("source", this.clock.source().name());
+        putOptional(clockNode, "errorBoundNanos", this.clock.errorBoundNanos());
+        clockNode.put("offsetNanos", this.clock.offsetNanos());
+        putOptional(clockNode, "ageMs", this.clock.ageMs());
         final ArrayNode accounts = root.putArray("accounts");
         for (final Map.Entry<Integer, Account> entry : this.accounts.entrySet()) {
             final ObjectNode account =
@@ -144,6 +162,14 @@ final class GatewayMinutes {
                     "Gateway %s: couldn't write its minutes: %s",
                     this.gatewayKey,
                     CauseChain.of(e));
+        }
+    }
+
+    private static void putOptional(final ObjectNode node, final String name, final long value) {
+        if (value == ClockReadings.UNAVAILABLE) {
+            node.putNull(name);
+        } else {
+            node.put(name, value);
         }
     }
 

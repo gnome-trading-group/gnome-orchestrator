@@ -301,6 +301,17 @@ class RewardsAgentTest {
     }
 
     @Test
+    void timeBeforeTheSessionStartedIsNotCountedAsNoData() throws Exception {
+        // The program's period began at T0; the session starts 3,000 s in and sees its first book 1,000 s later.
+        nowMs[0] = (T0 + 3000 * SECOND) / 1_000_000L;
+        agent.onStart();
+        book(T0 + 4000 * SECOND, false);
+        final RewardAccrual accrual = accrual();
+        assertEquals(1000 * SECOND, accrual.noDataNanos());
+        assertEquals(6000 * SECOND, accrual.countingNanos());
+    }
+
+    @Test
     void fallingAWholeRingBehindMarksAGapAndIsCountedInThePost() throws Exception {
         book(T0, false);
         sendOrder(1, Side.Bid, 51, 500);

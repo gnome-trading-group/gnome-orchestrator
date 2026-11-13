@@ -14,7 +14,7 @@
     "@aws-sdk/client-ecs": "^3.1165.0",
     "@aws-sdk/client-eventbridge": "^3.1166.0",
     "@aws-sdk/client-ssm": "^3.1165.0",
-    "@gnome-trading-group/gnome-shared-cdk": "^1.6.0",
+    "@gnome-trading-group/gnome-shared-cdk": "^1.7.0",
     "@types/jest": "^29.5.14",
     "@types/node": "22.7.9",
     "aws-cdk": "2.176.0",

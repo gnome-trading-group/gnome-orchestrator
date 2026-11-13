@@ -13,6 +13,7 @@ import group.gnometrading.oms.ledger.LedgerRing;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.orchestrator.session.journal.JournalSegmentSealer;
 import group.gnometrading.strings.GnomeString;
@@ -104,6 +105,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private final LedgerRing ledgerRing;
 
     private final HostReadings host;
+    private final ClockReadings hostClock;
     private final JournalSegmentSealer journal;
 
     private final ByteBuffer body;
@@ -129,6 +131,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final LedgerRing ledgerRing,
             final RiskEngine riskEngine,
             final HostReadings host,
+            final ClockReadings hostClock,
             final JournalSegmentSealer journal,
             final long sampleIntervalMs,
             final long postIntervalMs) {
@@ -163,6 +166,7 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         this.ledgerRing = ledgerRing;
         this.riskEngine = riskEngine;
         this.host = host;
+        this.hostClock = hostClock;
         this.journal = journal;
         this.body = ByteBuffer.allocate(bodyCapacity(sessionId, agents, gateways, orderGateways, priceSlots));
     }
@@ -310,6 +314,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         json.writeComma();
         writeHost();
         json.writeComma();
+        writeClock();
+        json.writeComma();
         writeJournal(now);
         json.writeObjectEnd();
     }
@@ -400,6 +406,31 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                     .writeObjectEnd();
         }
         json.writeArrayEnd();
+    }
+
+    /** How far this host's clock can be from UTC: what every timestamp it stamps, compared with another host's, carries. */
+    private void writeClock() {
+        hostClock.sample();
+        json.writeString("clock")
+                .writeColon()
+                .writeObjectStart()
+                .writeObjectEntry("source", hostClock.source().name())
+                .writeComma();
+        writeOptional("errorBoundNanos", hostClock.errorBoundNanos());
+        json.writeComma()
+                .writeObjectEntry("offsetNanos", hostClock.offsetNanos())
+                .writeComma();
+        writeOptional("ageMs", hostClock.ageMs());
+        json.writeObjectEnd();
+    }
+
+    private void writeOptional(final String name, final long value) {
+        json.writeString(name).writeColon();
+        if (value == ClockReadings.UNAVAILABLE) {
+            json.writeNull();
+        } else {
+            json.writeNumber(value);
+        }
     }
 
     private void writeListings(final long now) {

@@ -8,7 +8,7 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as triggers from 'aws-cdk-lib/triggers';
 import { Construct } from 'constructs';
-import { PLATFORM_SSM } from '@gnome-trading-group/gnome-shared-cdk';
+import { CLOCK_STATUS_FILE, HOST_CLOCK_FILES, PLATFORM_SSM } from '@gnome-trading-group/gnome-shared-cdk';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -142,6 +142,30 @@ export class AmiStack extends cdk.Stack {
       ].join('\n')],
     ]);
 
+    // The clock setup and status writer every platform host runs (gnome-shared-cdk), so a session's clock reads like
+    // a shard's or a gateway's. Its own component, for the same document cap.
+    const clock = this.component('clock', 'Disciplines the clock to the Nitro hardware clock and reports its state', [
+      ['InstallClock', [
+        'set -euxo pipefail',
+        ...HOST_CLOCK_FILES.map(file => installContent(file.content, file.path, file.mode)),
+        'systemctl daemon-reload',
+        'systemctl enable gnome-clock-setup.service gnome-clock-status.service',
+      ].join('\n')],
+    ], [
+      ['CheckClock', [
+        'set -euxo pipefail',
+        'systemctl is-enabled gnome-clock-setup.service',
+        'systemctl is-enabled gnome-clock-status.service',
+        ...HOST_CLOCK_FILES.filter(file => file.content.startsWith('#!')).map(file => `bash -n ${file.path}`),
+        // The build instance is in no placement group, so the setup must leave it on Amazon Time Sync and succeed.
+        '/usr/local/sbin/gnome-clock-setup',
+        'systemctl restart gnome-clock-status.service',
+        `for _ in $(seq 30); do test -s ${CLOCK_STATUS_FILE} && break; sleep 1; done`,
+        `cat ${CLOCK_STATUS_FILE}`,
+        `grep -qE '^source (NTP|UNSYNCED)$' ${CLOCK_STATUS_FILE}`,
+      ].join('\n')],
+    ]);
+
     const distribution = new imagebuilder.CfnDistributionConfiguration(this, 'Distribution', {
       name: 'gnome-orchestrator-ami',
       distributions: props.regions.map(region => ({
@@ -154,8 +178,10 @@ export class AmiStack extends cdk.Stack {
     });
 
     for (const variant of VARIANTS) {
-      const components = [{ componentArn: runtime.attrArn }, { componentArn: shipper.attrArn }];
-      const componentVersions = [runtime.version, shipper.version];
+      const components = [
+        { componentArn: runtime.attrArn }, { componentArn: shipper.attrArn }, { componentArn: clock.attrArn },
+      ];
+      const componentVersions = [runtime.version, shipper.version, clock.version];
       if (variant.vcpus) {
         const isolated = isolatedCpus(variant.vcpus);
         const tuning = this.component(`kernel-tuning-${variant.name}`, `Isolate CPUs ${isolated}`, [
@@ -298,8 +324,12 @@ function readAmiFile(relative: string): string {
 
 // Compressed so files fit in a component, whose document Image Builder caps at 16,000 characters.
 function installFile(source: string, destination: string, mode: string): string {
-  const content = gzipSync(readAmiFile(source), { level: 9 }).toString('base64');
-  return `echo '${content}' | base64 -d | gunzip > ${destination}\nchmod ${mode} ${destination}`;
+  return installContent(readAmiFile(source), destination, mode);
+}
+
+function installContent(content: string, destination: string, mode: string): string {
+  const compressed = gzipSync(content, { level: 9 }).toString('base64');
+  return `echo '${compressed}' | base64 -d | gunzip > ${destination}\nchmod ${mode} ${destination}`;
 }
 
 // Runs on the small build-size test instance, where most of the range does not exist: the kernel isolates only the

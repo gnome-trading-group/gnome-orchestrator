@@ -14,6 +14,7 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.orchestrator.marketdata.MarketData;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.orchestrator.session.journal.SessionJournal;
 import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
@@ -173,6 +174,7 @@ record SessionAgents(
                                 journal.directory() != null
                                         ? journal.directory().toFile()
                                         : new File("/")),
+                        ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
                         journal.sealer(),
                         HEARTBEAT_SAMPLE_INTERVAL_MS,
                         HEARTBEAT_POST_INTERVAL_MS),

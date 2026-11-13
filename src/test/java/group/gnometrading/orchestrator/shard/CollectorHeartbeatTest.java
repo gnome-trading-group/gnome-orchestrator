@@ -8,9 +8,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.SchedulingLatencyProbe;
 import io.aeron.Publication;
 import java.io.File;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -60,6 +62,7 @@ class CollectorHeartbeatTest {
             },
             kit.uploader,
             HostReadings.ofThisProcess(new File("/")),
+            new ClockReadings(Path.of("/nonexistent/clock.status"), () -> 0L),
             null,
             0);
 
@@ -94,6 +97,8 @@ class CollectorHeartbeatTest {
         assertEquals(12, process.get("probes").asLong());
         assertTrue(process.get("heap_used_mb").asLong() > 0);
         assertTrue(process.get("sched_latency").isNull());
+        assertEquals("UNKNOWN", process.get("clock").get("source").asText());
+        assertTrue(process.get("clock").get("error_bound_ns").isNull());
 
         JsonNode connection = lines.get(1);
         assertEquals("connection", connection.get("kind").asText());

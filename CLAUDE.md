@@ -268,7 +268,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   silently rather than losing its image; a fixed receive port can't serve two shards).
 - `runtime/` - what every process runs on: `AgentRuntimeInstaller` (latency profile / CPU pinning), `ProcessExit`,
   `GatewayErrorHandler`, `GatewayRunners` (order gateways), `GatewayHealth`, `HealthCheckServer`, `DaemonThreads`,
-  `AgentUtils`, `LatencyHistogram`, `SchedulingLatencyProbe`.
+  `AgentUtils`, `LatencyHistogram`, `SchedulingLatencyProbe`, `ClockReadings` (the host clock's source and error
+  bound from `/run/gnome/clock.status`, read in place without allocating; in the session heartbeat's `clock`, the
+  shard's process line and the gateway's minutes).
 - `credentials/` - venue keys as stored in Secrets Manager (`KalshiCredentials`, `PolymarketIntlCredentials`,
   `PolymarketUsCredentials`), read by sessions' order entry and shards' feeds.
 - `aws/` - DI modules: `PropertiesModule`, `AwsModule`, `RiskModule`, `SecurityMasterModule`, `SecretCache`.
@@ -322,7 +324,8 @@ security group, log group; the name is historical, renaming recreates the VPC) a
 (launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; no session role can read `gnome/accounts/*`;
 live ones can read `order-gateway#*` items in `service-endpoints`), `<Stage>-OrchestratorOrderGatewayStack-<region>`
 (where live order gateways run, with nothing about which: ECS cluster `order-gateways`, on-demand `c7a.large` hosts
-scaling from zero (capacity provider `order-gateway-hosts`), base task definition `order-gateway` (a Java 17 runtime and
+(`c7i.large` when no `c7a.large` launches) in the region's precision-time placement group, scaling from zero
+(capacity provider `order-gateway-hosts`), base task definition `order-gateway` (a Java 17 runtime and
 `cdk/lib/stacks/gateway-docker/gateway-start.sh`, which runs `java -jar <release> gateway` as its child: the jar's
 manifest carries the module access gnomepy's JVM args give sessions; it forwards SIGTERM to Java and, once `/health`
 has answered, kills Java (`kill -9`) when it hasn't answered for 15 s, so a frozen JVM is restarted in seconds rather
@@ -352,6 +355,22 @@ exchange code; run in the exchange's region, `sm.exchange.region`, where its gat
 per region after image tests pass. Roll back an AMI by repointing that parameter (images kept 14 days).
 Collectors pull the same jar (latest unless pinned) into the gnome-market-data collector image.
 
+**How a Java strategy reaches a session.** Production Java strategies live in gnome-strategies' `strategies/` and run
+by commit, not release.
+- With `STRATEGY_COMMIT` set, `start-session.sh` clones gnome-strategies at it and checks that the commit's
+  `strategies/pom.xml` pins (`<platform.orchestrator>`) the orchestrator this session fetched; a mismatch fails the
+  session before it starts.
+- It then compiles `strategies/src/main/java` with `javac --release 17 -parameters` against `app.jar` into
+  `STRATEGY_CLASSES` (`/opt/gnome/strategy-classes`; a few seconds; the AMI and the Docker image have JDK 17).
+- `SessionStrategy` loads `strategy.class` from there through a `URLClassLoader` whose parent is this jar's
+  (`StrategyFactory.create(loader, …)`), so the runtime, OMS and schemas stay the session's own.
+- Without `STRATEGY_COMMIT` the class comes from this jar.
+- A local session can set `STRATEGY_CLASSES` to a mounted directory of locally compiled classes, which skips the
+  clone.
+- Failures: `has no platform.orchestrator`, `runs on gnome-orchestrator X; this session fetched Y` (the commit pins a
+  different release), a `javac` error (the commit doesn't compile against this release), `STRATEGY_CLASSES … is not a
+  directory`.
+
 **Session lifecycle.** SUBMITTED -> STARTING (launcher) -> RUNNING (this process PATCHes after agents start; the
 first heartbeat also counts) -> STOPPING -> STOPPED or FAILED (set by the registry's session monitor when the
 instance goes away). On boot it runs `StartupRecovery` (inherits positions, and in live open venue orders, from
@@ -359,7 +378,14 @@ earlier sessions). A session already stopped before startup exits 0 without repo
 - Heartbeat: every 5 s to `/api/strategy-sessions/heartbeat` (agents' `stalledMs`/`exited`, per-listing
   `priceUnchangedMs` and `marketDataBadMs` (how long its book has been flagged bad data, the OMS refusing new orders;
   0 trusted), ledger, market data `reconnecting`/`resyncsLast5m`, each order gateway link's `linked`/`unlinkedMs`/
-  `workingOrders`, risk, host CPU/mem/disk, journal backlog). Stops once the registry says the session ended.
+  `workingOrders`, risk, host CPU/mem/disk, `clock` (source `PHC`/`NTP`/`UNSYNCED`/`UNKNOWN`, `errorBoundNanos`,
+  `offsetNanos`, `ageMs`), journal backlog). Stops once the registry says the session ended.
+- Clock: every host (the AMI's `clock` component; shard and gateway hosts' user data) runs gnome-shared-cdk's host
+  clock: `gnome-clock-setup` switches chrony to the Nitro hardware clock (PHC, ~20 µs) when the instance is in its
+  region's precision-time placement group (platform network, gnome-shared-infra), otherwise leaves it on Amazon Time
+  Sync (~0.1 ms; ~0.5 ms on t3); `gnome-clock-status` rewrites `/run/gnome/clock.status` every 10 s (containers mount
+  `/run/gnome` read-only). In the group: low-latency sessions (the launcher), live gateway hosts and on-demand shard
+  hosts.
 - Journal: segments under `/var/lib/gnome/journal/<sessionId>/`; `gnome-journal-shipper` uploads them to
   `gnome-journals-<stage>/<sessionId>/` and ships open segments after the strategy unit stops. Strategy metrics live
   only in the journal.
@@ -410,7 +436,7 @@ unset means no alerts; posted through `runtime/AlertsApi`):
 - Everything else about a session is raised by the registry's session monitor from heartbeat fields
   (gnome-registry `cdk/lambda/monitoring/rules/sessions.ts`): `AGENT_STALLED`, `AGENT_EXITED`, `RECONNECTING`,
   `BOOK_RESYNCS`, `MARKET_DATA_BAD`, `MARKET_DATA_BAD_HELD`, `LEDGER_FAILING`, `LEDGER_FENCED`, `RISK_STALE`, `RISK_UNGUARDED`, `POLICY_UNBUILDABLE`,
-  `LATCHES_DROPPED`, `HOST_CPU_HIGH`, `HOST_MEMORY_LOW`, `DISK_LOW`, `JOURNAL_BACKLOG`,
+  `LATCHES_DROPPED`, `HOST_CPU_HIGH`, `HOST_MEMORY_LOW`, `DISK_LOW`, `JOURNAL_BACKLOG`, `CLOCK_UNSYNCED`,
   `SILENT`, `ORDER_GATEWAY_UNLINKED` (live, a minute unlinked from a gateway with orders working there); lifecycle ones (`START_STUCK`, `STOP_STUCK`, `FAILED`) come from other monitor rules.
 - An order gateway raises what only it sees (`core/GatewayAlerts`, posted by `IngestGatewayAlerts` to the
   `ALERTS_API_URL` the reconciler puts in its revision), keyed `<TYPE>:<gateway key>[:<account or order>]`:
