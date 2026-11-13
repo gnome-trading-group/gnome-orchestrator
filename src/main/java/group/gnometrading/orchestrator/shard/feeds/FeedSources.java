@@ -70,7 +70,8 @@ public final class FeedSources {
                                                         .build(),
                                                 context.properties()),
                         // Its own budget: probes use the venue's REST limits, not its socket's.
-                        RateBudget.named(source.code() + ":probe", venue.feed().probesPerMinute())),
+                        RateBudget.named(source.code() + ":probe", venue.feed().probesPerMinute()),
+                        venue.feed().rollEvery()),
                 source.maxPerConnection(),
                 new WebSocketFeedOpener(
                         venue,

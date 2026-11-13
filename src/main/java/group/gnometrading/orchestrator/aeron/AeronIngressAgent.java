@@ -27,9 +27,9 @@ public final class AeronIngressAgent implements GnomeAgent {
         /**
          * Takes a whole message, or returns false, taking nothing, to be offered it again later.
          *
-         * @param reservedValue the frame's reserved value, one of {@link AeronReservedValues}
+         * @param header the frame's: its reserved value (one of {@link AeronReservedValues}), publication and position
          */
-        boolean accept(DirectBuffer buffer, int offset, int length, long reservedValue);
+        boolean accept(DirectBuffer buffer, int offset, int length, Header header);
     }
 
     private static final int FRAGMENT_LIMIT = 64;
@@ -132,7 +132,7 @@ public final class AeronIngressAgent implements GnomeAgent {
                 AeronIngressAgent.this.fragmented++;
                 return Action.CONTINUE;
             }
-            if (this.sink.accept(buffer, offset, length, header.reservedValue())) {
+            if (this.sink.accept(buffer, offset, length, header)) {
                 return Action.CONTINUE;
             }
             AeronIngressAgent.this.refused++;

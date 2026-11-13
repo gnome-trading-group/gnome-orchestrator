@@ -98,7 +98,7 @@ class AeronIngressAgentTest {
     @Test
     void eachMessageCarriesItsFramesReservedValue() throws Exception {
         final List<Long> reserved = new ArrayList<>();
-        this.agent.add(this.subscription, (buffer, offset, length, reservedValue) -> reserved.add(reservedValue));
+        this.agent.add(this.subscription, (buffer, offset, length, header) -> reserved.add(header.reservedValue()));
         await(this.publication::isConnected, "the session to join");
 
         publish(1);
@@ -182,7 +182,7 @@ class AeronIngressAgentTest {
 
     /** Each message into the ring as it came, its template id read from the SBE header. */
     private static AeronIngressAgent.Sink toRing(final SequencedRingBuffer<?> ring) {
-        return (buffer, offset, length, reservedValue) -> ring.tryPublishRaw(
+        return (buffer, offset, length, header) -> ring.tryPublishRaw(
                 buffer,
                 offset,
                 buffer.getShort(offset + MessageHeaderDecoder.templateIdEncodingOffset(), ByteOrder.LITTLE_ENDIAN)

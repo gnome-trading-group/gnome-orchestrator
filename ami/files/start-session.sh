@@ -21,8 +21,8 @@ gh_token() {
   fi
 }
 
-# The launcher always pins exact versions. Left unset (local Docker), the JAR baked into the image and the
-# gnomepy already installed are used instead.
+# The launcher pins the exact releases the session's commit names (gnomepy only for a python strategy). Left unset
+# (local Docker), the JAR baked into the image and the gnomepy already installed are used instead.
 if [ -n "${ORCHESTRATOR_VERSION:-}" ]; then
   echo "start-session: fetching gnome-orchestrator ${ORCHESTRATOR_VERSION}"
   gh_token
@@ -88,8 +88,12 @@ if [ -n "${STRATEGY_COMMIT:-}" ] && [ -z "${STRATEGY_CLASSES:-}" ]; then
 fi
 
 unset GH_TOKEN
-# The jar's manifest gives it the module access it needs (java -jar applies it); the session's other JVM options live
-# in gnomepy, so the Java and Python launch paths cannot drift apart.
-mapfile -t JVM_OPTIONS < <("$VENV/bin/python" -c 'from gnomepy.java._jvm import STRATEGY_JVM_OPTIONS; print("\n".join(STRATEGY_JVM_OPTIONS))')
+# The jar's manifest gives it the module access it needs (java -jar applies it); its session-jvm-options holds the
+# rest, which gnomepy's runner reads from the same jar, so the Java and Python launch paths cannot drift apart.
+if ! OPTIONS=$(unzip -p "$APP_JAR" session-jvm-options); then
+  echo "start-session: ${APP_JAR} has no session-jvm-options; pin a gnome-orchestrator release that ships it" >&2
+  exit 1
+fi
+mapfile -t JVM_OPTIONS < <(printf '%s\n' "$OPTIONS" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v -e '^#' -e '^$')
 echo "start-session: starting ${ORCHESTRATOR_ROLE:-session} ${STRATEGY_CLASS:-}"
 exec java "${JVM_OPTIONS[@]}" -jar "$APP_JAR" "${ORCHESTRATOR_ROLE:-session}"

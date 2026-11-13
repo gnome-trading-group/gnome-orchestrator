@@ -52,6 +52,10 @@ public final class StreamFeed implements GatewayHealth {
     int statusSessionId;
     long statusDropped = -1;
     boolean statusReconnecting;
+    // Where the last clean record ended in its publication: a status from before it can't say the stream is
+    // reconnecting.
+    int cleanSessionId;
+    long cleanPosition = -1;
     boolean dropsRose;
     long behindSinceNanos;
     boolean joined;
@@ -87,6 +91,11 @@ public final class StreamFeed implements GatewayHealth {
             bad = true;
             badSpells.lazySet(badSpells.get() + 1);
         }
+    }
+
+    /** Whether a clean record arrived from past {@code position} in publication {@code sessionId}. */
+    boolean cleanAfter(final int sessionId, final long position) {
+        return cleanPosition > position && cleanSessionId == sessionId;
     }
 
     long badSpells() {

@@ -28,6 +28,7 @@ import group.gnometrading.md.SourceKind;
 import group.gnometrading.md.Stream;
 import group.gnometrading.orchestrator.shard.feeds.Assignment;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -200,7 +201,8 @@ class ShardRuntimeTest {
                                     id -> new SubjectRef(id, Projection.IDENTITY),
                                     16,
                                     null,
-                                    RateBudget.UNLIMITED),
+                                    RateBudget.UNLIMITED,
+                                    Duration.ofHours(12)),
                             source.maxPerConnection(),
                             (name, table, listener) -> {
                                 if (failNextOpen) {

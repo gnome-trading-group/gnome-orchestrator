@@ -325,13 +325,74 @@ class ShardMarketDataTest {
     void aStreamTheShardReportsReconnectingIsMarkedBad() throws Exception {
         join();
         send(streamA, 1);
-        status(statusA, streamA, 0, 0, true);
+        status(statusA, streamA, streamA.position(), 0, true);
         pump(() -> seen.size() == 1 && feed.statusReconnecting, "a record and the report");
 
         after(ShardFeedAgent.CHECK_EVERY_NANOS);
 
         assertTrue(feed.isReconnecting());
         assertEquals(StreamFeed.BadReason.RECONNECTING, feed.badReason());
+    }
+
+    @Test
+    void oneReconnectCountsOneSpellThoughItsReportOutlivesTheFirstCleanRecord() throws Exception {
+        join();
+        send(streamA, 1);
+        pump(() -> seen.size() == 1, "the first record");
+        final long before = feed.badSpells();
+        status(statusA, streamA, streamA.position(), 0, true);
+        pump(() -> feed.statusReconnecting, "the reconnecting report");
+        after(ShardFeedAgent.CHECK_EVERY_NANOS);
+        assertTrue(feed.isReconnecting());
+
+        // Back on the venue: the shard trusts the book again before its next report, a second away.
+        send(streamA, 2);
+        pump(() -> last(0) == 2, "the first record after the reconnect");
+        for (int i = 0; i < 10; i++) {
+            after(ShardFeedAgent.CHECK_EVERY_NANOS);
+        }
+
+        assertFalse(feed.isReconnecting());
+        assertEquals(before + 1, feed.badSpells(), "one reconnect, one spell");
+    }
+
+    @Test
+    void aReportFromBeforeACleanRecordDoesNotMarkItBadAgain() throws Exception {
+        join();
+        send(streamA, 1);
+        pump(() -> seen.size() == 1, "the first record");
+        final long reportedAt = streamA.position();
+        send(streamA, 2);
+        pump(() -> last(0) == 2, "a record after the shard's report was made");
+        final long before = feed.badSpells();
+
+        status(statusA, streamA, reportedAt, 0, true);
+        pump(() -> feed.statusPosition == reportedAt, "the late report");
+        after(ShardFeedAgent.CHECK_EVERY_NANOS);
+
+        assertFalse(feed.isReconnecting());
+        assertEquals(before, feed.badSpells());
+    }
+
+    @Test
+    void aSecondReconnectAfterTheBookCameBackCountsAgain() throws Exception {
+        join();
+        send(streamA, 1);
+        pump(() -> seen.size() == 1, "the first record");
+        final long before = feed.badSpells();
+        status(statusA, streamA, streamA.position(), 0, true);
+        pump(() -> feed.statusReconnecting, "the first reconnect");
+        after(ShardFeedAgent.CHECK_EVERY_NANOS);
+        send(streamA, 2);
+        pump(() -> last(0) == 2, "the book back");
+        after(ShardFeedAgent.CHECK_EVERY_NANOS);
+
+        status(statusA, streamA, streamA.position(), 0, true);
+        pump(() -> feed.statusReconnecting, "the second reconnect");
+        after(ShardFeedAgent.CHECK_EVERY_NANOS);
+
+        assertTrue(feed.isReconnecting());
+        assertEquals(before + 2, feed.badSpells());
     }
 
     @Test

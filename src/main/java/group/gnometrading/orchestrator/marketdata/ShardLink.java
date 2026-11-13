@@ -70,7 +70,8 @@ final class ShardLink {
             final long dropped = streams.dropped();
             feed.dropsRose |= feed.statusDropped >= 0 && dropped > feed.statusDropped;
             feed.statusDropped = dropped;
-            feed.statusReconnecting = streams.reconnecting() != 0;
+            feed.statusReconnecting =
+                    streams.reconnecting() != 0 && !feed.cleanAfter(feed.statusSessionId, feed.statusPosition);
         }
     }
 }

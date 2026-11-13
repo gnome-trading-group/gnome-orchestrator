@@ -11,6 +11,7 @@ import group.gnometrading.sequencer.SequencedEvent;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import io.aeron.Image;
 import io.aeron.Subscription;
+import io.aeron.logbuffer.Header;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
@@ -177,8 +178,7 @@ public final class ShardFeedAgent implements AeronPathAgent {
         }
         ingress.add(
                 sink.subscription(),
-                (buffer, offset, length, reservedValue) ->
-                        onRecord(feed, sink, buffer, offset, length, reservedValue == AeronReservedValues.RESENT));
+                (buffer, offset, length, header) -> onRecord(feed, sink, buffer, offset, length, header));
         if (install.asPending()) {
             if (feed.pending != null) {
                 stopReading(feed.pending.subscription());
@@ -249,7 +249,8 @@ public final class ShardFeedAgent implements AeronPathAgent {
             final DirectBuffer buffer,
             final int offset,
             final int length,
-            final boolean resent) {
+            final Header header) {
+        final boolean resent = header.reservedValue() == AeronReservedValues.RESENT;
         if (!isStreamRecord(buffer, offset, length)) {
             feed.refuse();
             return true;
@@ -280,6 +281,14 @@ public final class ShardFeedAgent implements AeronPathAgent {
             feed.markBad(StreamFeed.BadReason.FLAGGED_BY_SHARD, feed.statusDropped);
         } else {
             feed.markGood();
+            // The shard only sends a clean record for a book it trusts, so one published after a status that said it
+            // was reconnecting outdates it; status comes once a second and would otherwise mark the stream bad again
+            // until the next. One published before that status, but read after it, outdates nothing.
+            feed.cleanSessionId = header.sessionId();
+            feed.cleanPosition = header.position();
+            if (feed.cleanAfter(feed.statusSessionId, feed.statusPosition)) {
+                feed.statusReconnecting = false;
+            }
         }
         return true;
     }
@@ -348,6 +357,7 @@ public final class ShardFeedAgent implements AeronPathAgent {
         feed.statusSessionId = 0;
         feed.statusDropped = -1;
         feed.statusReconnecting = false;
+        feed.cleanPosition = -1;
         feed.dropsRose = false;
         feed.behindSinceNanos = 0;
     }

@@ -305,8 +305,8 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   market data -> strategy -> OMS -> gateways -> ledger -> journal -> heartbeat.
 - Every process starts with `java -jar` and takes its module access from the jar's manifest (`Add-Opens`/`Add-Exports`
   in the shade plugin, kept equal to gnomepy's `DEFAULT_JVM_ARGS` minus jdk.compiler, which the Python runner passes to
-  JPype instead). Sessions' other JVM options live only in gnomepy (`STRATEGY_JVM_OPTIONS`), which `start-session.sh`
-  reads; the gateway's GC choice is in `gateway-start.sh`, a shard's in gnome-market-data's `shard-start.sh`. Add no
+  JPype instead). Sessions' other JVM options live only in `src/main/resources/session-jvm-options` (one per line, at
+  the jar root), which `start-session.sh` passes to `java -jar` and gnomepy's runner to JPype; the gateway's GC choice is in `gateway-start.sh`, a shard's in gnome-market-data's `shard-start.sh`. Add no
   other JVM flags to scripts, units or Dockerfiles here. A release without the manifest entries can't start this way.
 - Java 17 (parent pom, `openjdk-17` in the AMI, `eclipse-temurin-17` in Docker). Do not bump it.
 - One session per instance. `run-strategy.sh` refuses a second start; any exit of the unit shuts the instance down
@@ -347,9 +347,13 @@ exchange code; run in the exchange's region, `sm.exchange.region`, where its gat
 (registry `POST /venue-accounts/emergency-cancel`, async) or by `aws lambda invoke` (registry runbook
 `stop-or-kill.md`).
 
-**How a version reaches sessions.** The jar is not baked into the AMI. The launcher pins `ORCHESTRATOR_VERSION`
-(default: SSM `/gnome/orchestrator/latest-version`, written by StorageStack only for non-SNAPSHOT releases) and
-`start-session.sh` downloads that jar from GitHub Packages at boot. Property keys and defaults per release are in
+**How a version reaches sessions.** The jar is not baked into the AMI. A strategy session's commit pins it: the
+registry launcher reads `platform.orchestrator` from gnome-strategies' `strategies/pom.xml` at a java session's
+`strategy_commit`, or `orchestrator=` / `gnomepy=` from gnomepy-research's `platform.properties` at a python session's
+`research_commit`, sets `ORCHESTRATOR_VERSION` (and `GNOMEPY_VERSION` for python), and `start-session.sh`
+downloads that jar from GitHub Packages at boot. A release reaches sessions only through a commit that pins it. SSM
+`/gnome/orchestrator/latest-version` (written by StorageStack only for non-SNAPSHOT releases) is for gateways and
+collectors. Property keys and defaults per release are in
 `/gnome/orchestrator/properties/latest` and `/gnome/orchestrator/properties/<version>`. AMIs (`16core`, `32core`,
 `48core`, `standard`) rebuild only when `ami/` content changes; `AmiPublisher` writes `/gnome/orchestrator/ami/<variant>`
 per region after image tests pass. Roll back an AMI by repointing that parameter (images kept 14 days).

@@ -63,7 +63,6 @@ import group.gnometrading.sm.fee.FeeTimeline;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -192,9 +191,7 @@ public final class VenueAccounts {
                 apiHost,
                 uri("kalshi.user.ws.url"),
                 budget,
-                new GatewayConfig.Builder()
-                        .withMaxSilentInterval(Duration.ofSeconds(30))
-                        .build(),
+                new GatewayConfig.Builder().build(),
                 markets,
                 null,
                 null,
@@ -246,9 +243,7 @@ public final class VenueAccounts {
                 apiHost,
                 uri("polymarket.us.private.ws.url"),
                 budget,
-                new GatewayConfig.Builder()
-                        .withMaxSilentInterval(Duration.ofSeconds(30))
-                        .build(),
+                new GatewayConfig.Builder().build(),
                 markets,
                 null,
                 null,
@@ -323,10 +318,7 @@ public final class VenueAccounts {
                 clobHost,
                 uri("polymarket.intl.user.ws.url"),
                 budget,
-                new GatewayConfig.Builder()
-                        .withKeepAliveInterval(Duration.ofSeconds(10))
-                        .withMaxSilentInterval(Duration.ofSeconds(30))
-                        .build(),
+                new GatewayConfig.Builder().build(),
                 markets,
                 heartbeats,
                 heartbeatConnections,

@@ -1,0 +1,5 @@
+# JVM options every strategy session starts with, one per line. The jar is the one place both launch paths read them
+# from: start-session.sh passes them to `java -jar` for a java strategy, and gnomepy's runner to JPype for a python
+# one. Module access is in the manifest instead, which `java -jar` applies itself.
+-XX:+UseZGC
+-XX:ConcGCThreads=2
