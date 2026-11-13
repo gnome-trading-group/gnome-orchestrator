@@ -15,7 +15,10 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.ReaderPauseControl;
 import group.gnometrading.host.HostReadings;
+import group.gnometrading.latency.LatencyKey;
+import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.metrics.SampleBuffer;
 import group.gnometrading.oms.ledger.LedgerAgent;
 import group.gnometrading.oms.ledger.LedgerRing;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
@@ -29,6 +32,9 @@ import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import group.gnometrading.orchestrator.runtime.GatewayRunners;
 import group.gnometrading.orchestrator.session.journal.JournalSegmentSealer;
 import group.gnometrading.sequencer.JournalWriter;
+import group.gnometrading.sequencer.metrics.ColumnDef;
+import group.gnometrading.sequencer.metrics.ColumnarMetricRecorder;
+import group.gnometrading.sequencer.metrics.RecordBuffer;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -84,6 +90,12 @@ class SessionHeartbeatAgentTest {
         }
     }
 
+    private MinuteHistograms histograms;
+    private int omsKey;
+    private ColumnarMetricRecorder latencyRows;
+    private SampleBuffer samples;
+    private LatencyReport latency;
+
     @BeforeEach
     void setUp() {
         registry = mock(RegistryConnection.class);
@@ -113,6 +125,12 @@ class SessionHeartbeatAgentTest {
         riskEngine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), ListingDirectory.EMPTY);
         host = new HostReadings(tempDir.resolve("proc"), tempDir.toFile());
         hostClock = new ClockReadings(tempDir.resolve("clock.status"), () -> now[0]);
+        histograms = new MinuteHistograms(2);
+        omsKey = histograms.key(new LatencyKey(3, "oms.process", 4, "KALSHI", 0, "NEW", 1, "MARKET_DATA"));
+        histograms.key(new LatencyKey(3, "oms.process", 4, "KALSHI", 1, "CANCEL", 1, "MARKET_DATA"));
+        latencyRows = new ColumnarMetricRecorder(16);
+        samples = new SampleBuffer(256 * 1024, 1_024, 48 * 1024);
+        latency = new LatencyReport(List.of(histograms), List.of("latency.oms"), latencyRows, samples);
     }
 
     @AfterEach
@@ -218,6 +236,9 @@ class SessionHeartbeatAgentTest {
                 host,
                 hostClock,
                 null,
+                samples,
+                List.of(),
+                latency,
                 SAMPLE_MS,
                 POST_MS);
     }
@@ -376,6 +397,105 @@ class SessionHeartbeatAgentTest {
     }
 
     @Test
+    void aClosedMinutesLatencyIsSampledAndJournaledOnce() throws Exception {
+        final long minute = 1_700_000_040L * 1_000_000_000L;
+        histograms.record(omsKey, 1_500, minute + 5);
+        histograms.record(omsKey, 2_500, minute + 6);
+        histograms.roll(minute + MinuteHistograms.MINUTE_NANOS);
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
+        agent.onStart();
+
+        agent.doWork();
+        step(agent, POST_MS);
+
+        final JsonNode body = mapper.readTree(posted.get(posted.size() - 1));
+        assertFalse(body.has("latency"), "latency travels as a sample, not in the health");
+        final JsonNode sample = only(body.get("samples"), "latency.oms");
+        assertEquals(minute / 1_000_000, sample.get("tsMs").asLong());
+        final JsonNode keys = sample.get("data").get("keys");
+        assertEquals(1, keys.size(), "the empty CANCEL key is left out");
+        assertEquals("oms.process", keys.get(0).get("m").asText());
+        assertEquals("KALSHI", keys.get(0).get("ex").asText());
+        assertEquals(4, keys.get(0).get("exchangeId").asLong());
+        assertEquals("NEW", keys.get(0).get("act").asText());
+        assertEquals("MARKET_DATA", keys.get(0).get("kind").asText());
+        assertEquals(2, keys.get(0).get("n").asLong());
+        assertEquals(2_500, keys.get(0).get("max").asLong());
+
+        final RecordBuffer rows = latencyRows.getBuffers().get(0);
+        assertEquals(LatencyReport.STREAM, rows.getName());
+        assertEquals(1, rows.getCount(), "one row per key with data, written once however many samples see it");
+        assertEquals(minute, rows.getLongColumn(column(rows, "minute_start"))[0]);
+        assertEquals(3, rows.getIntColumn(column(rows, "metric"))[0]);
+        assertEquals(4, rows.getIntColumn(column(rows, "exchange_id"))[0]);
+        assertEquals(0, rows.getIntColumn(column(rows, "action"))[0]);
+        assertEquals(1, rows.getIntColumn(column(rows, "kind"))[0]);
+        assertEquals(2, rows.getLongColumn(column(rows, "count"))[0]);
+    }
+
+    @Test
+    void samplesAreSentUntilAPostCarryingThemIsAccepted() throws Exception {
+        samples.begin("runtime", 1).writeObjectEntry("v", 1);
+        samples.commit();
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
+        agent.onStart();
+        responses.add(503);
+
+        agent.doWork();
+        assertEquals(1, mapper.readTree(posted.get(0)).get("samples").size());
+        assertEquals(1, samples.pending(), "a refused post keeps its samples");
+
+        step(agent, POST_MS);
+        final JsonNode accepted = mapper.readTree(posted.get(1));
+        assertEquals(1, accepted.get("samples").size());
+        assertEquals(1, accepted.get("sampleBuffer").get("pending").asLong());
+        assertEquals(0, samples.pending(), "an accepted post's samples are gone");
+
+        step(agent, POST_MS);
+        assertEquals(0, mapper.readTree(posted.get(2)).get("samples").size());
+    }
+
+    @Test
+    void samplesFillOnlyWhatTheRegistrysLimitLeaves() throws Exception {
+        final String filler = "x".repeat(4_000);
+        for (int i = 0; i < 40; i++) {
+            samples.begin("runtime", i).writeObjectEntry("filler", filler);
+            samples.commit();
+        }
+        final SessionHeartbeatAgent agent = heartbeat(List.of(), List.of());
+        agent.onStart();
+
+        agent.doWork();
+
+        final String body = posted.get(0);
+        assertTrue(body.length() <= SessionHeartbeatAgent.MAX_BODY_BYTES, body.length() + " bytes");
+        final int carried = mapper.readTree(body).get("samples").size();
+        assertTrue(carried > 0 && carried < 40, carried + " samples");
+        assertEquals(40 - carried, samples.pending(), "the rest wait for the next post");
+    }
+
+    private static JsonNode only(final JsonNode samples, final String kind) {
+        JsonNode found = null;
+        for (JsonNode sample : samples) {
+            if (sample.get("kind").asText().equals(kind)) {
+                assertTrue(found == null, "two " + kind + " samples");
+                found = sample;
+            }
+        }
+        assertTrue(found != null, "no " + kind + " sample");
+        return found;
+    }
+
+    private static int column(final RecordBuffer rows, final String name) {
+        for (ColumnDef column : rows.getColumns()) {
+            if (column.name().equals(name)) {
+                return column.columnIndex();
+            }
+        }
+        throw new AssertionError("no column " + name);
+    }
+
+    @Test
     void samplingAllocatesNothing() throws Exception {
         final SessionHeartbeatAgent agent = new SessionHeartbeatAgent(
                 "s1",
@@ -393,6 +513,9 @@ class SessionHeartbeatAgentTest {
                 host,
                 hostClock,
                 null,
+                samples,
+                List.of(),
+                latency,
                 SAMPLE_MS,
                 Long.MAX_VALUE / 2);
         agent.onStart();
@@ -480,6 +603,9 @@ class SessionHeartbeatAgentTest {
                 readings,
                 hostClock,
                 journal,
+                samples,
+                List.of(),
+                latency,
                 SAMPLE_MS,
                 POST_MS);
     }

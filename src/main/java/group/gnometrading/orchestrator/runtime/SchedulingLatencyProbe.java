@@ -1,5 +1,6 @@
 package group.gnometrading.orchestrator.runtime;
 
+import group.gnometrading.latency.LatencyHistogram;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
@@ -84,10 +85,10 @@ public final class SchedulingLatencyProbe implements Runnable {
         Window summary = new Window(
                 windowNanos / 1e9,
                 lateness.count(),
-                lateness.percentileMicros(0.5),
-                lateness.percentileMicros(0.99),
-                lateness.percentileMicros(0.999),
-                lateness.maxMicros(),
+                lateness.percentile(0.5),
+                lateness.percentile(0.99),
+                lateness.percentile(0.999),
+                lateness.max(),
                 over1ms,
                 over5ms);
         lateness.reset();
@@ -97,6 +98,6 @@ public final class SchedulingLatencyProbe implements Runnable {
     }
 
     long percentileMicros(double quantile) {
-        return lateness.percentileMicros(quantile);
+        return lateness.percentile(quantile);
     }
 }

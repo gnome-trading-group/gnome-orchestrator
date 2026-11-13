@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import group.gnometrading.gateways.GatewayConnectFailedException;
+import group.gnometrading.gateways.SocketClosedException;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import java.io.IOException;
@@ -29,6 +30,22 @@ class GatewayErrorHandlerTest {
 
         assertEquals(1, reconnects);
         assertTrue(exits.isEmpty());
+    }
+
+    @Test
+    void droppedSocket_ReconnectsWithoutLoggingAnError() {
+        handler.onError(new SocketClosedException(new IOException("The venue closed the websocket")));
+
+        assertEquals(1, reconnects);
+        verify(logger).logf(eq(LogMessage.DEBUG), eq("Error occurred in %s: %s"), any(), any());
+        verify(logger, never()).logf(eq(LogMessage.UNKNOWN_ERROR), anyString(), any(), any());
+    }
+
+    @Test
+    void anyOtherError_IsLoggedAsAnError() {
+        handler.onError(new IllegalStateException("bad frame"));
+
+        verify(logger).logf(eq(LogMessage.UNKNOWN_ERROR), eq("Error occurred in %s: %s"), any(), any());
     }
 
     @Test

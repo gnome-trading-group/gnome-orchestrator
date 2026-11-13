@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.runtime;
 
 import group.gnometrading.gateways.GatewayConnectFailedException;
+import group.gnometrading.gateways.SocketClosedException;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.utils.CauseChain;
@@ -35,7 +36,10 @@ public final class GatewayErrorHandler implements ErrorHandler {
 
     @Override
     public void onError(final Throwable error) {
-        this.logger.logf(LogMessage.UNKNOWN_ERROR, "Error occurred in %s: %s", this.gatewayName, CauseChain.of(error));
+        // A dropped socket is routine and its reader has logged it as SOCKET_DISCONNECTED: reconnecting is the
+        // handling.
+        final LogMessage level = error instanceof SocketClosedException ? LogMessage.DEBUG : LogMessage.UNKNOWN_ERROR;
+        this.logger.logf(level, "Error occurred in %s: %s", this.gatewayName, CauseChain.of(error));
 
         // The gateway already retried for several connect cycles; another reconnect would only repeat them.
         if (error instanceof GatewayConnectFailedException) {

@@ -2,6 +2,7 @@ package group.gnometrading.orchestrator.shard;
 
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.schemas.StreamHeader;
 import group.gnometrading.sequencer.LappingPoller;
 import group.gnometrading.sequencer.SequencedEvent;
 import group.gnometrading.sequencer.SequencedEventHandler;
@@ -31,6 +32,8 @@ final class ShardStream {
     private final MarketDataCollector collector;
     private final SequencedEventHandler record;
     private final SequencedPoller poller;
+    // Null for a stream built without (tests that only collect or publish).
+    private final ShardLatency latency;
     // Read by the heartbeat; the agent alone writes them.
     private final AtomicLong records = new AtomicLong();
     private volatile Throwable failure;
@@ -51,6 +54,8 @@ final class ShardStream {
     private int lastLength;
     private long lastSentNanos;
     private long publishNanos;
+    // The publisher's wall clock for the pass in progress: each record's send stamp, read once a pass.
+    private long publishWallNanos;
     // Set by the runtime while a session leases the stream; the publisher reads it.
     private volatile StreamPublication publication;
     // Set with a new publication, so the publisher sends it the last record as soon as a session can take it.
@@ -58,13 +63,24 @@ final class ShardStream {
     // Read by the heartbeat; the publisher alone writes them.
     private final AtomicLong offered = new AtomicLong();
     private final AtomicLong held = new AtomicLong();
+    private final AtomicLong resent = new AtomicLong();
+    // The longest a record sent since the sampler last took it spent in the shard; the sampler resets it.
+    private final AtomicLong waitPeakNanos = new AtomicLong();
+
+    // The sampler's own: each total as it last read it, so it reports this stream's change.
+    long sampledOffered;
+    long sampledHeld;
+    long sampledLapped;
+    long sampledResent;
+    long sampledRecords;
+    long sampledFullWaits;
 
     ShardStream(
             final int streamId,
             final String name,
             final SequencedRingBuffer<Mbp10Schema> ring,
             final MarketDataCollector collector) {
-        this(streamId, name, ring, collector, new StreamRecordEventAdapter(collector), false);
+        this(streamId, name, ring, collector, new StreamRecordEventAdapter(collector), false, null);
     }
 
     ShardStream(
@@ -73,11 +89,12 @@ final class ShardStream {
             final SequencedRingBuffer<Mbp10Schema> ring,
             final MarketDataCollector collector,
             final SequencedEventHandler record) {
-        this(streamId, name, ring, collector, record, false);
+        this(streamId, name, ring, collector, record, false, null);
     }
 
     /**
      * @param publishing whether the publisher agent also reads the ring, without gating it
+     * @param latency where the collector and publisher record each record's delays; null records none
      */
     ShardStream(
             final int streamId,
@@ -85,12 +102,14 @@ final class ShardStream {
             final SequencedRingBuffer<Mbp10Schema> ring,
             final MarketDataCollector collector,
             final SequencedEventHandler record,
-            final boolean publishing) {
+            final boolean publishing,
+            final ShardLatency latency) {
         this.streamId = streamId;
         this.name = name;
         this.ring = ring;
         this.collector = collector;
         this.record = record;
+        this.latency = latency;
         // The one poller gates the ring: once the collector fails it keeps reading and drops the records, as a
         // poller that stopped would block the producer, the whole connection the stream shares.
         this.poller = ring.createPoller(this::onRecord);
@@ -108,6 +127,7 @@ final class ShardStream {
             }
             if (result > 0) {
                 fresh = false;
+                sent();
             }
         }
         lastRecord.putBytes(0, buffer, 0, length);
@@ -116,12 +136,22 @@ final class ShardStream {
         return true;
     }
 
+    private void sent() {
+        final long waited = publishWallNanos - publishPoller.timestampNanos();
+        if (waited > waitPeakNanos.get()) {
+            waitPeakNanos.lazySet(waited);
+        }
+        if (latency != null) {
+            latency.sent(publishPoller.timestampNanos(), publishWallNanos);
+        }
+    }
+
     /** The publication's answer; an end-of-term rotation answers the first offer with a retry, so it gets a few. */
     private long offer(
             final StreamPublication target, final UnsafeBuffer buffer, final int length, final boolean resend) {
         long result = Publication.ADMIN_ACTION;
         for (int attempt = 0; attempt < OFFER_ATTEMPTS && result == Publication.ADMIN_ACTION; attempt++) {
-            result = resend ? target.resend(buffer, 0, length) : target.offer(buffer, 0, length);
+            result = resend ? target.resend(buffer, 0, length) : target.offer(buffer, 0, length, publishWallNanos);
         }
         if (result > 0) {
             offered.lazySet(offered.get() + 1);
@@ -132,6 +162,9 @@ final class ShardStream {
     private void onRecord(final long sequence, final int templateId, final UnsafeBuffer buffer, final int length) {
         if (failure != null) {
             return;
+        }
+        if (latency != null) {
+            latency.received(StreamHeader.timestampEvent(buffer, 0), StreamHeader.timestampRecv(buffer, 0));
         }
         try {
             record.onSequencedEvent(sequence, templateId, buffer, length);
@@ -199,12 +232,15 @@ final class ShardStream {
     /**
      * On the publisher's thread: sends what arrived to the stream's publication, if it has one, and its last record
      * again once it has been quiet for {@link #RESEND_NANOS}. Returns the records read.
+     *
+     * @param wallNanos the wall clock for the pass, each record's send stamp
      */
-    int publish(final long nowNanos) throws Exception {
+    int publish(final long nowNanos, final long wallNanos) throws Exception {
         if (publishPoller == null) {
             return 0;
         }
         publishNanos = nowNanos;
+        publishWallNanos = wallNanos;
         final int work = publishPoller.poll();
         final StreamPublication current = publication;
         if (current != null && lastLength > 0 && (fresh || nowNanos - lastSentNanos >= RESEND_NANOS)) {
@@ -213,6 +249,7 @@ final class ShardStream {
             // that has it drops it, while one that just joined takes it as its book.
             if (offer(current, lastRecord, lastLength, true) > 0) {
                 fresh = false;
+                resent.lazySet(resent.get() + 1);
             }
             lastSentNanos = nowNanos;
         }
@@ -234,6 +271,16 @@ final class ShardStream {
 
     long offered() {
         return offered.get();
+    }
+
+    /** Re-sends of the last record that went out. */
+    long resent() {
+        return resent.get();
+    }
+
+    /** The longest a record sent since the last call spent in the shard, receipt to send; then 0. Sampler only. */
+    long takeWaitPeakNanos() {
+        return waitPeakNanos.getAndSet(0);
     }
 
     /** Records sessions never got: those the publisher was lapped past. */

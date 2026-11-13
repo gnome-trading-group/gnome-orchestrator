@@ -8,6 +8,7 @@ import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.metrics.SampleBuffer;
 import group.gnometrading.oms.ledger.LedgerAgent;
 import group.gnometrading.oms.ledger.LedgerRing;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
@@ -23,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.LongPredicate;
 import org.agrona.concurrent.EpochClock;
 
 /**
@@ -42,8 +44,13 @@ import org.agrona.concurrent.EpochClock;
  *   <li>whether risk can be trusted: stale (the registry unreachable), unguarded (a required policy missing), policies
  *       that couldn't be built, and halts the OMS couldn't record;
  *   <li>the host's CPU, memory and disk, and this process's memory;
- *   <li>how many journal segments are waiting for the shipper to upload them.
+ *   <li>how many journal segments are waiting for the shipper to upload them;
  * </ul>
+ *
+ * <p>It also carries the session's samples ({@link SampleBuffer}): readings over time that the registry stores apart
+ * from the health, each sent until a post carrying it is accepted. The heartbeat thread takes them: each sampler when
+ * it is due (the runtime, the agents' counters), and each recording thread's latency ({@link LatencyReport}) once a
+ * minute closes. Samples go last in the body, in whatever room the registry's limit leaves.
  *
  * <p>Reads only what the agents already publish for other threads, so it costs their threads nothing. Nothing here
  * may stop the process: a failed post is retried at the next interval, and once the registry says the session has
@@ -57,6 +64,11 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     // The sections that don't grow with the session (ledger, risk, host, journal and the top-level keys) are well
     // under this; the rest is counted per entry below.
     private static final int FIXED_SECTIONS_BYTES = 2 * 1024;
+    // The registry refuses a heartbeat past 64 KB; this leaves room for the request's own framing.
+    static final int MAX_BODY_BYTES = 60 * 1024;
+    // Room kept after the samples for the closing bracket and brace.
+    private static final int CLOSING_BYTES = 2;
+    private static final int MAX_SAMPLES_PER_POST = 300;
     private static final int AGENT_ENTRY_BYTES =
             "{\"name\":\"\",\"hotPath\":false,\"stalledMs\":,\"exited\":false},".length() + MAX_NUMBER_BYTES;
     private static final int LISTING_ENTRY_BYTES =
@@ -107,6 +119,12 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
     private final HostReadings host;
     private final ClockReadings hostClock;
     private final JournalSegmentSealer journal;
+    private final LatencyReport latency;
+    // Each takes its sample when due at the time given; true if it did.
+    private final LongPredicate[] samplers;
+    private final SampleBuffer samples;
+    // Samples the last body carried, acknowledged when the registry accepts it.
+    private int samplesInBody;
 
     private final ByteBuffer body;
     private final JsonEncoder json = new JsonEncoder();
@@ -133,6 +151,9 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final HostReadings host,
             final ClockReadings hostClock,
             final JournalSegmentSealer journal,
+            final SampleBuffer samples,
+            final List<LongPredicate> samplers,
+            final LatencyReport latency,
             final long sampleIntervalMs,
             final long postIntervalMs) {
         this.sessionId = sessionId;
@@ -168,6 +189,9 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         this.host = host;
         this.hostClock = hostClock;
         this.journal = journal;
+        this.latency = latency;
+        this.samplers = samplers.toArray(new LongPredicate[0]);
+        this.samples = samples;
         this.body = ByteBuffer.allocate(bodyCapacity(sessionId, agents, gateways, orderGateways, priceSlots));
     }
 
@@ -181,7 +205,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
             final List<GatewayHealth> gateways,
             final List<? extends OrderGatewayLinkStatus> orderGateways,
             final PriceSlotRegistry priceSlots) {
-        int capacity = FIXED_SECTIONS_BYTES + escapedBytes(sessionId);
+        // Samples fill what the registry's limit leaves after the health.
+        int capacity = FIXED_SECTIONS_BYTES + escapedBytes(sessionId) + MAX_BODY_BYTES;
         for (OrderGatewayLinkStatus link : orderGateways) {
             capacity += ORDER_GATEWAY_ENTRY_BYTES + escapedBytes(link.gatewayKey());
         }
@@ -270,12 +295,19 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                 unlinkedSinceMs[i] = now;
             }
         }
+        if (latency != null) {
+            latency.sample();
+        }
+        for (final LongPredicate sampler : samplers) {
+            sampler.test(now);
+        }
     }
 
     private void post(final long now) {
         encode(now);
         final int status = registry.tryPost(PATH, body.array(), body.position());
         if (status == HTTP_OK) {
+            samples.acknowledge(samplesInBody);
             if (failing) {
                 logger.logf(LogMessage.DEBUG, "Session heartbeat restored");
             }
@@ -317,6 +349,8 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
         writeClock();
         json.writeComma();
         writeJournal(now);
+        json.writeComma();
+        writeSamples();
         json.writeObjectEnd();
     }
 
@@ -357,6 +391,29 @@ public final class SessionHeartbeatAgent implements GnomeAgent {
                 .writeComma()
                 .writeObjectEntry("segmentBytes", journal.segmentBytes())
                 .writeObjectEnd();
+    }
+
+    // What the buffer holds and has lost goes in the health; the samples themselves, which the registry stores apart,
+    // last, as many as fit under its limit.
+    private void writeSamples() {
+        json.writeString("sampleBuffer")
+                .writeColon()
+                .writeObjectStart()
+                .writeObjectEntry("pending", samples.pending())
+                .writeComma()
+                .writeObjectEntry("dropped", samples.dropped())
+                .writeObjectEnd()
+                .writeComma()
+                .writeString("samples")
+                .writeColon()
+                .writeArrayStart();
+        final int limit = body.limit();
+        body.limit(Math.max(body.position(), Math.min(limit, MAX_BODY_BYTES - CLOSING_BYTES)));
+        // A sample larger than the room this health leaves would sit at the head and hold up every one behind it.
+        samples.dropLargerThan(body.remaining());
+        samplesInBody = samples.writeTo(body, MAX_SAMPLES_PER_POST);
+        body.limit(limit);
+        json.writeArrayEnd();
     }
 
     @Override

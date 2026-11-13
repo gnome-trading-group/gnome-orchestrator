@@ -15,7 +15,8 @@ class MarketDataCollectorAgentTest {
 
     private final StreamTestKit kit = new StreamTestKit();
     private final AtomicLong now = new AtomicLong(1_000);
-    private final MarketDataCollectorAgent agent = new MarketDataCollectorAgent(new NullLogger(), now::get, () -> 0L);
+    private final MarketDataCollectorAgent agent =
+            new MarketDataCollectorAgent(new NullLogger(), now::get, () -> 0L, null);
 
     @Test
     void drainsEveryStreamInOnePass() throws Exception {
@@ -66,7 +67,8 @@ class MarketDataCollectorAgentTest {
     @Test
     void aQuietStreamsMinuteIsHandedOverByTheWallClock() throws Exception {
         long[] wall = {kit.clock.millis() * 1_000_000L};
-        MarketDataCollectorAgent clocked = new MarketDataCollectorAgent(new NullLogger(), now::get, () -> wall[0]);
+        MarketDataCollectorAgent clocked =
+                new MarketDataCollectorAgent(new NullLogger(), now::get, () -> wall[0], null);
         ShardStream stream = kit.stream(1);
         clocked.add(stream);
         StreamTestKit.publish(stream, 1);

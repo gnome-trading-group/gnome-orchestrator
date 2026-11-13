@@ -242,6 +242,16 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
         return this.connection.state();
     }
 
+    /** Its threads' runners as they stand, for the gateway's thread samples: call once it has started. */
+    public List<GnomeAgentRunner> runners() {
+        final List<GnomeAgentRunner> all = new ArrayList<>(this.runners);
+        final GatewayRunners socket = this.socket;
+        if (socket != null) {
+            all.addAll(socket.runners());
+        }
+        return all;
+    }
+
     /** The event socket reader's passes so far; 0 before it starts. Any thread. */
     public long readerPasses() {
         final GatewayRunners socket = this.socket;

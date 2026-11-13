@@ -8,6 +8,7 @@ import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.gateways.venues.kalshi.KalshiAuthSigner;
+import group.gnometrading.latency.LatencyHistogram;
 import group.gnometrading.logging.ConsoleLogger;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
@@ -19,7 +20,6 @@ import group.gnometrading.orchestrator.gateway.accounts.GatewaySettings;
 import group.gnometrading.orchestrator.gateway.accounts.GatewayVenue;
 import group.gnometrading.orchestrator.gateway.accounts.VenueAccounts;
 import group.gnometrading.orchestrator.gateway.core.CrossKeys;
-import group.gnometrading.orchestrator.runtime.LatencyHistogram;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
@@ -698,8 +698,8 @@ public final class GatewayExitHarness {
                                 / (double) seconds,
                         (sentAfter[RequestClass.CATCH_UP.ordinal()] - sentBefore[RequestClass.CATCH_UP.ordinal()])
                                 / (double) seconds,
-                        cancelWaits.percentileMicros(0.99),
-                        cancelWaits.maxMicros(),
+                        cancelWaits.percentile(0.99),
+                        cancelWaits.max(),
                         100 * worst,
                         account.venueRefusals(),
                         refusals(load),

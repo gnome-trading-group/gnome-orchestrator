@@ -1,8 +1,8 @@
 package group.gnometrading.orchestrator.session.orders;
 
+import group.gnometrading.latency.LatencyHistogram;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
-import group.gnometrading.orchestrator.runtime.LatencyHistogram;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ExecType;
@@ -192,11 +192,11 @@ final class LoadSessions implements AutoCloseable {
     synchronized String describeHearing() {
         return String.format(
                 "acknowledged in p50 %d us, p99 %d us (%d); cancels confirmed in p50 %d us, p99 %d us (%d)",
-                this.ackWaits.percentileMicros(0.5),
-                this.ackWaits.percentileMicros(0.99),
+                this.ackWaits.percentile(0.5),
+                this.ackWaits.percentile(0.99),
                 this.ackWaits.count(),
-                this.cancelWaits.percentileMicros(0.5),
-                this.cancelWaits.percentileMicros(0.99),
+                this.cancelWaits.percentile(0.5),
+                this.cancelWaits.percentile(0.99),
                 this.cancelWaits.count());
     }
 

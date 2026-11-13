@@ -36,6 +36,7 @@ import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.gateway.GatewayState;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import java.lang.management.ManagementFactory;
@@ -45,7 +46,6 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.agrona.collections.LongHashSet;
-import org.agrona.concurrent.SystemEpochNanoClock;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -197,9 +197,10 @@ class GatewayAllocationTest {
                     ingressSubscription,
                     sessions,
                     status,
-                    new GatewayRejects(rejects, new SystemEpochNanoClock()),
+                    new GatewayRejects(rejects, SampledEpochNanoClock.INSTANCE),
                     new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16),
                     System::nanoTime,
+                    SampledEpochNanoClock.INSTANCE,
                     journal.ingress(),
                     cross,
                     kills);
@@ -209,7 +210,7 @@ class GatewayAllocationTest {
                     List.of(reports, rejects),
                     new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16),
                     System::nanoTime,
-                    new SystemEpochNanoClock(),
+                    SampledEpochNanoClock.INSTANCE,
                     journal.egress(),
                     cross);
 

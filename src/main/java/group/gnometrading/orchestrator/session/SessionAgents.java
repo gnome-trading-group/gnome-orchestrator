@@ -4,8 +4,11 @@ import group.gnometrading.RegistryConnection;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.host.HostReadings;
+import group.gnometrading.host.JvmReadings;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.metrics.CounterSampler;
+import group.gnometrading.metrics.SampleBuffer;
 import group.gnometrading.oms.OmsAgent;
 import group.gnometrading.oms.ledger.LedgerAgent;
 import group.gnometrading.oms.ledger.LedgerRing;
@@ -16,14 +19,21 @@ import group.gnometrading.oms.risk.RiskSyncAgent;
 import group.gnometrading.orchestrator.marketdata.MarketData;
 import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
+import group.gnometrading.orchestrator.runtime.RingSampler;
+import group.gnometrading.orchestrator.runtime.RuntimeSampler;
+import group.gnometrading.orchestrator.runtime.SchedulingLatencyProbe;
 import group.gnometrading.orchestrator.session.journal.SessionJournal;
+import group.gnometrading.orchestrator.session.lifecycle.LatencyReport;
 import group.gnometrading.orchestrator.session.lifecycle.OrderGatewayLinkStatus;
 import group.gnometrading.orchestrator.session.lifecycle.SessionHeartbeatAgent;
+import group.gnometrading.orchestrator.session.lifecycle.SessionStateSampler;
 import group.gnometrading.orchestrator.session.rewards.RewardsAgent;
+import group.gnometrading.sequencer.metrics.JournaledMetricRecorder;
 import group.gnometrading.strategies.StrategyAgent;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.IntFunction;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.SystemEpochClock;
@@ -50,6 +60,16 @@ record SessionAgents(
     private static final long HEARTBEAT_POST_INTERVAL_MS = 5_000;
     // The request line and headers sent ahead of the heartbeat's body (host, API key, content type and length).
     private static final int HEARTBEAT_REQUEST_HEADER_BYTES = 4 * 1024;
+    // About ten minutes of samples at a session's usual rates, held through a registry outage before the oldest go.
+    private static final int SAMPLE_BUFFER_BYTES = 256 * 1024;
+    private static final int MAX_PENDING_SAMPLES = 1_024;
+    // Well under what a heartbeat leaves beside even a large session's health, so every sample can be sent; kinds that
+    // grow with the session (positions, feeds, latency keys) are written in chunks that stay under it.
+    private static final int MAX_SAMPLE_BYTES = 24 * 1024;
+    private static final String ACTIVITY_KIND = "session.activity";
+    private static final String RINGS_KIND = "session.rings";
+    private static final long ACTIVITY_INTERVAL_MS = 60_000;
+    private static final long SCHEDULING_PROBE_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(1);
 
     /**
      * Starts order entry ahead of everything else: a live session's gateway client must be welcomed before startup
@@ -142,6 +162,7 @@ record SessionAgents(
             PriceSlotRegistry priceSlotRegistry,
             RiskEngine riskEngine,
             List<? extends OrderGatewayLinkStatus> orderGateways,
+            SessionSampleSources sources,
             IntFunction<RegistryConnection> registry,
             Logger logger,
             ErrorHandler errorHandler) {
@@ -156,6 +177,42 @@ record SessionAgents(
         }
         int bodyCapacity =
                 SessionHeartbeatAgent.bodyCapacity(sessionId, watched, gateways, orderGateways, priceSlotRegistry);
+        File disk = journal.directory() != null ? journal.directory().toFile() : new File("/");
+        SampleBuffer samples = new SampleBuffer(SAMPLE_BUFFER_BYTES, MAX_PENDING_SAMPLES, MAX_SAMPLE_BYTES);
+        // Its own readers, so its CPU and counter windows are its interval, not the heartbeat's.
+        RuntimeSampler runtime = new RuntimeSampler(
+                samples,
+                HostReadings.ofThisProcess(disk),
+                new JvmReadings(),
+                ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
+                SchedulingLatencyProbe.start(SCHEDULING_PROBE_INTERVAL_NANOS),
+                sources.aeronCounters(),
+                watched,
+                sources.runtimeIntervalMs());
+        CounterSampler activitySampler = new CounterSampler(
+                samples, ACTIVITY_KIND, sources.activityNames(), sources.activity(), ACTIVITY_INTERVAL_MS);
+        SessionStateSampler stateSampler = new SessionStateSampler(
+                samples,
+                sources.positions(),
+                priceBuffer,
+                priceSlotRegistry,
+                ledgerRing,
+                ledgerAgent,
+                orderGateways,
+                gateways,
+                journal.sealer(),
+                ACTIVITY_INTERVAL_MS);
+        RingSampler ringSampler = new RingSampler(
+                samples,
+                RINGS_KIND,
+                sources.buffers().ringNames(),
+                sources.buffers().rings(),
+                ACTIVITY_INTERVAL_MS);
+        LatencyReport latencyReport = new LatencyReport(
+                sources.latency().histograms(),
+                sources.latency().kinds(),
+                new JournaledMetricRecorder(sources.buffers().latency()),
+                samples);
         GnomeAgentRunner runner = new GnomeAgentRunner(
                 new SessionHeartbeatAgent(
                         sessionId,
@@ -170,12 +227,16 @@ record SessionAgents(
                         ledgerAgent,
                         ledgerRing,
                         riskEngine,
-                        HostReadings.ofThisProcess(
-                                journal.directory() != null
-                                        ? journal.directory().toFile()
-                                        : new File("/")),
+                        HostReadings.ofThisProcess(disk),
                         ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
                         journal.sealer(),
+                        samples,
+                        List.of(
+                                runtime::sampleIfDue,
+                                activitySampler::sampleIfDue,
+                                ringSampler::sampleIfDue,
+                                stateSampler::sampleIfDue),
+                        latencyReport,
                         HEARTBEAT_SAMPLE_INTERVAL_MS,
                         HEARTBEAT_POST_INTERVAL_MS),
                 errorHandler);

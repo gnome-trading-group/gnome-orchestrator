@@ -40,6 +40,9 @@ final class ShardStatusWriter implements Runnable {
 
         /** The heartbeat's latest process line, as JSON; null before the first. */
         String processLine();
+
+        /** The unexpected errors it has logged. */
+        ShardErrors.Reading errors();
     }
 
     private final Logger logger;
@@ -138,6 +141,8 @@ final class ShardStatusWriter implements Runnable {
         encodeStreams();
         json.writeComma();
         encodeTransitions();
+        json.writeComma();
+        encodeErrors();
         json.writeObjectEnd();
     }
 
@@ -209,6 +214,16 @@ final class ShardStatusWriter implements Runnable {
             json.writeNumber(transitionAt[i]).writeArrayEnd();
         }
         json.writeArrayEnd();
+    }
+
+    private void encodeErrors() {
+        final ShardErrors.Reading errors = shard.errors();
+        json.writeString("errors").writeColon().writeObjectStart();
+        json.writeObjectEntry("total", errors.total()).writeComma();
+        json.writeObjectEntry("last_hour", errors.lastHour()).writeComma();
+        stringOrNull("latest", errors.latest());
+        json.writeComma().writeObjectEntry("latest_at_ns", errors.latestAtNanos());
+        json.writeObjectEnd();
     }
 
     private void stringOrNull(final String name, final String value) {

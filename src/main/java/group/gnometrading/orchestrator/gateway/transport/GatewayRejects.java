@@ -2,6 +2,7 @@ package group.gnometrading.orchestrator.gateway.transport;
 
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.gateways.account.reader.AccountReport;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.OrderExecutionReport;
@@ -20,10 +21,22 @@ public final class GatewayRejects {
     private final ManyToOneRingBuffer<AccountReport> out;
     private final EpochNanoClock clock;
     private final OrderExecutionReport report = new OrderExecutionReport();
+    private static final RejectReason[] REASONS = RejectReason.values();
+    // Refusals by reason, counted on ingress's thread for the gateway's samples.
+    private final MetricCounters refusals = new MetricCounters(REASONS.length);
+    private final int[] byReason = new int[REASONS.length];
 
     public GatewayRejects(final ManyToOneRingBuffer<AccountReport> out, final EpochNanoClock clock) {
         this.out = out;
         this.clock = clock;
+        for (final RejectReason reason : REASONS) {
+            this.byReason[reason.ordinal()] = this.refusals.counter(reason.name());
+        }
+    }
+
+    /** What ingress refused, by reason: written on ingress's thread only. */
+    public MetricCounters refusals() {
+        return this.refusals;
     }
 
     /** Refuses a NEW. @return false if the ring is full, nothing written */
@@ -93,6 +106,7 @@ public final class GatewayRejects {
         slotReport.sessionSlot = slot;
         slotReport.report.buffer.putBytes(0, this.report.buffer, 0, this.report.totalMessageSize());
         this.out.commit(index);
+        this.refusals.increment(this.byReason[reason.ordinal()]);
         return true;
     }
 }

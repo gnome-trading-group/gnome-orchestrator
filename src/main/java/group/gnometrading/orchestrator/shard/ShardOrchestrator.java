@@ -6,9 +6,12 @@ import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.feed.Feeds;
 import group.gnometrading.gateways.feed.probe.BookProber;
 import group.gnometrading.host.HostReadings;
+import group.gnometrading.host.JvmReadings;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.metrics.CounterSampler;
+import group.gnometrading.metrics.SampleBuffer;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronPathIdle;
 import group.gnometrading.orchestrator.aeron.AeronPorts;
@@ -18,6 +21,7 @@ import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.AwsModule;
+import group.gnometrading.orchestrator.aws.RegistryEndpoint;
 import group.gnometrading.orchestrator.aws.SecretCache;
 import group.gnometrading.orchestrator.aws.SecurityMasterModule;
 import group.gnometrading.orchestrator.di.Named;
@@ -28,6 +32,10 @@ import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
 import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
+import group.gnometrading.orchestrator.runtime.LatencySampler;
+import group.gnometrading.orchestrator.runtime.RuntimeSampler;
+import group.gnometrading.orchestrator.runtime.SamplePoster;
+import group.gnometrading.orchestrator.runtime.SamplesApi;
 import group.gnometrading.orchestrator.runtime.SchedulingLatencyProbe;
 import group.gnometrading.orchestrator.shard.feeds.DynamoAssignment;
 import group.gnometrading.orchestrator.shard.feeds.FeedSources;
@@ -75,6 +83,14 @@ public class ShardOrchestrator extends Orchestrator {
     // 45 after.
     private static final long STOP_TIMEOUT_SECONDS = 60;
     private static final long TICK_MILLIS = 1_000;
+    // Samples: posted every 30 s (each post a billed request), aggregates once a minute, and a buffer for about ten
+    // minutes of a large shard's samples through a samples API outage.
+    private static final long SAMPLES_POST_MILLIS = 30_000;
+    private static final long SAMPLES_MINUTE_MILLIS = 60_000;
+    private static final long SAMPLES_STOP_MILLIS = 5_000;
+    private static final int SAMPLE_BUFFER_BYTES = 512 * 1024;
+    private static final int MAX_PENDING_SAMPLES = 1_024;
+    private static final int MAX_SAMPLE_BYTES = 48 * 1024;
 
     @Provides
     public final Clock provideClock() {
@@ -89,8 +105,14 @@ public class ShardOrchestrator extends Orchestrator {
 
     @Provides
     @Singleton
-    public final Logger provideLogger(EpochNanoClock epochClock) {
-        return new AsyncLogger(epochClock);
+    public final ShardErrors provideShardErrors(EpochNanoClock epochClock) {
+        return new ShardErrors(new AsyncLogger(epochClock), epochClock::nanoTime);
+    }
+
+    @Provides
+    @Singleton
+    public final Logger provideLogger(ShardErrors errors) {
+        return errors;
     }
 
     @Provides
@@ -165,7 +187,135 @@ public class ShardOrchestrator extends Orchestrator {
         final BookProber prober =
                 new BookProber(logger, getInstance(EpochNanoClock.class), BookProber.Settings.DEFAULT);
         final Feeds feeds = new Feeds(logger, prober);
-        final FeedSources sources = new FeedSources(
+        final FeedSources sources = feedSources(
+                logger,
+                properties,
+                securityMaster,
+                accounts,
+                wallClock,
+                feeds,
+                clock,
+                uploader,
+                pool,
+                shard,
+                rawBucket);
+
+        final ShardLatency latency = new ShardLatency();
+        final MarketDataCollectorAgent agent =
+                new MarketDataCollectorAgent(logger, System::nanoTime, ShardOrchestrator::wallNanos, latency);
+        final ShardStatusWriter.Identity identity = ShardIdentity.resolve(
+                MAPPER, shard, properties.getStringProperty("orchestrator.version"), wallClock.nanoTime());
+        if (identity.privateIp() == null) {
+            throw new IllegalStateException("No private IP for sessions to reach this shard on");
+        }
+        // Sessions read leased streams from here over Aeron, on the shard's private IP.
+        final AeronRuntime aeron = AeronRuntime.launch(
+                "shard",
+                AeronProfile.STANDARD,
+                AeronPathIdle.forShard(properties),
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
+        final AtomicReference<ShardRuntime> runtimeRef = new AtomicReference<>();
+        final StreamPublisherAgent publisher = publisher(aeron, identity, runtimeRef, wallClock, latency);
+        final StreamPublishing publishing = publishing(aeron, identity, publisher);
+        final ShardRuntime runtime = new ShardRuntime(
+                logger,
+                securityMaster,
+                new DynamoAssignment(
+                        getInstance(DynamoDbClient.class, "COLLECTION"),
+                        properties.getStringProperty("collection.shards.table"),
+                        shard),
+                feeds,
+                sources::ensure,
+                agent,
+                streamFactory(logger, clock, uploader, pool, outputBucket, latency),
+                accountOf(securityMaster, accounts),
+                accounts,
+                transitions,
+                wallClock,
+                publishing);
+        runtimeRef.set(runtime);
+
+        final GnomeAgentRunner agentRunner = new GnomeAgentRunner(agent, exitOnError(logger, "Collector"));
+        GnomeAgentRunner.startOnThread(agentRunner);
+        // Its poller gates every ring as the collector's does, so a publisher that stopped would stop collection: exit.
+        final GnomeAgentRunner publisherRunner = new GnomeAgentRunner(publisher, exitOnError(logger, "Publisher"));
+        GnomeAgentRunner.startOnThread(publisherRunner);
+        final GnomeAgentRunner proberRunner = new GnomeAgentRunner(
+                prober, error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Book probe failed: %s", CauseChain.of(error)));
+        GnomeAgentRunner.startOnThread(proberRunner);
+        final ScheduledExecutorService runtimeThread = DaemonThreads.scheduler("shard-runtime");
+        runtimeThread.scheduleWithFixedDelay(
+                () -> runtime.tick(System.nanoTime()), 0, TICK_MILLIS, TimeUnit.MILLISECONDS);
+
+        final CollectorHeartbeat heartbeat = heartbeat(logger, runtime, prober, uploader, latencyProbe);
+        final SamplePoster samples = samples(
+                logger,
+                properties,
+                identity.shard(),
+                aeron,
+                latencyProbe,
+                List.of(agentRunner, publisherRunner, proberRunner),
+                agent,
+                publisher,
+                latency,
+                heartbeatShard(runtime, prober),
+                uploader);
+        final ShardStatusWriter status = statusWriter(logger, s3, identity, wallClock, runtime, heartbeat, transitions);
+        final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "COLLECTION"));
+        final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
+        final AtomicReference<String> advertised = new AtomicReference<>("ACTIVE");
+        // The status repeats the heartbeat's process line, so it is written right after it, on the same thread.
+        final Runnable report = () -> {
+            heartbeat.run();
+            status.run();
+            advertise(logger, endpoints, identity, region, advertised.get(), wallClock);
+        };
+        final ScheduledExecutorService heartbeats = DaemonThreads.scheduler("collector-heartbeat");
+        heartbeats.scheduleAtFixedRate(
+                report, CollectorHeartbeat.INTERVAL_SECONDS, CollectorHeartbeat.INTERVAL_SECONDS, TimeUnit.SECONDS);
+
+        Runtime.getRuntime()
+                .addShutdownHook(new Thread(
+                        () -> {
+                            // First, so sessions stop joining a shard that is going; a replacement task overwrites it.
+                            advertised.set("STOPPING");
+                            advertise(logger, endpoints, identity, region, advertised.get(), wallClock);
+                            shutdown(logger, runtime, runtimeThread, proberRunner, agentRunner, uploader);
+                            close(logger, publisherRunner, "stream publisher");
+                            // Before the driver closes: the runtime sample reads its counters.
+                            if (samples != null) {
+                                samples.stop(SAMPLES_STOP_MILLIS);
+                            }
+                            aeron.close();
+                            // A last report, after any scheduled one finishes: the heartbeat's readings are for one
+                            // thread at a time.
+                            heartbeats.shutdown();
+                            try {
+                                if (heartbeats.awaitTermination(5, TimeUnit.SECONDS)) {
+                                    report.run();
+                                }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        },
+                        "shard-shutdown"));
+
+        serveHealth(agentRunner, runtime, uploader);
+    }
+
+    private FeedSources feedSources(
+            final Logger logger,
+            final Properties properties,
+            final SecurityMaster securityMaster,
+            final ShardAccounts accounts,
+            final EpochNanoClock wallClock,
+            final Feeds feeds,
+            final Clock clock,
+            final CycleUploader uploader,
+            final DirectBufferPool pool,
+            final String shard,
+            final String rawBucket) {
+        return new FeedSources(
                 feeds,
                 new FeedVenues.Context(
                         logger,
@@ -193,90 +343,10 @@ public class ShardOrchestrator extends Orchestrator {
                     };
                 },
                 WebSocketFeedOpener.Clients.TLS);
+    }
 
-        final MarketDataCollectorAgent agent =
-                new MarketDataCollectorAgent(logger, System::nanoTime, ShardOrchestrator::wallNanos);
-        final ShardStatusWriter.Identity identity = ShardIdentity.resolve(
-                MAPPER, shard, properties.getStringProperty("orchestrator.version"), wallClock.nanoTime());
-        if (identity.privateIp() == null) {
-            throw new IllegalStateException("No private IP for sessions to reach this shard on");
-        }
-        // Sessions read leased streams from here over Aeron, on the shard's private IP.
-        final AeronRuntime aeron = AeronRuntime.launch(
-                "shard",
-                AeronProfile.STANDARD,
-                AeronPathIdle.forShard(properties),
-                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
-        final AtomicReference<ShardRuntime> runtimeRef = new AtomicReference<>();
-        final StreamPublisherAgent publisher = publisher(aeron, identity, runtimeRef);
-        final StreamPublishing publishing = publishing(aeron, identity, publisher);
-        final ShardRuntime runtime = new ShardRuntime(
-                logger,
-                securityMaster,
-                new DynamoAssignment(
-                        getInstance(DynamoDbClient.class, "COLLECTION"),
-                        properties.getStringProperty("collection.shards.table"),
-                        shard),
-                feeds,
-                sources::ensure,
-                agent,
-                streamFactory(logger, clock, uploader, pool, outputBucket),
-                accountOf(securityMaster, accounts),
-                accounts,
-                transitions,
-                wallClock,
-                publishing);
-        runtimeRef.set(runtime);
-
-        final GnomeAgentRunner agentRunner = new GnomeAgentRunner(agent, exitOnError(logger, "Collector"));
-        GnomeAgentRunner.startOnThread(agentRunner);
-        // Its poller gates every ring as the collector's does, so a publisher that stopped would stop collection: exit.
-        final GnomeAgentRunner publisherRunner = new GnomeAgentRunner(publisher, exitOnError(logger, "Publisher"));
-        GnomeAgentRunner.startOnThread(publisherRunner);
-        final GnomeAgentRunner proberRunner = new GnomeAgentRunner(
-                prober, error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Book probe failed: %s", CauseChain.of(error)));
-        GnomeAgentRunner.startOnThread(proberRunner);
-        final ScheduledExecutorService runtimeThread = DaemonThreads.scheduler("shard-runtime");
-        runtimeThread.scheduleWithFixedDelay(
-                () -> runtime.tick(System.nanoTime()), 0, TICK_MILLIS, TimeUnit.MILLISECONDS);
-
-        final CollectorHeartbeat heartbeat = heartbeat(logger, runtime, prober, uploader, latencyProbe);
-        final ShardStatusWriter status = statusWriter(logger, s3, identity, wallClock, runtime, heartbeat, transitions);
-        final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "COLLECTION"));
-        final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
-        final AtomicReference<String> advertised = new AtomicReference<>("ACTIVE");
-        // The status repeats the heartbeat's process line, so it is written right after it, on the same thread.
-        final Runnable report = () -> {
-            heartbeat.run();
-            status.run();
-            advertise(logger, endpoints, identity, region, advertised.get(), wallClock);
-        };
-        final ScheduledExecutorService heartbeats = DaemonThreads.scheduler("collector-heartbeat");
-        heartbeats.scheduleAtFixedRate(
-                report, CollectorHeartbeat.INTERVAL_SECONDS, CollectorHeartbeat.INTERVAL_SECONDS, TimeUnit.SECONDS);
-
-        Runtime.getRuntime()
-                .addShutdownHook(new Thread(
-                        () -> {
-                            // First, so sessions stop joining a shard that is going; a replacement task overwrites it.
-                            advertised.set("STOPPING");
-                            advertise(logger, endpoints, identity, region, advertised.get(), wallClock);
-                            shutdown(logger, runtime, runtimeThread, proberRunner, agentRunner, uploader);
-                            close(logger, publisherRunner, "stream publisher");
-                            aeron.close();
-                            // A last report, after any scheduled one finishes: the heartbeat's readings are for one
-                            // thread at a time.
-                            heartbeats.shutdown();
-                            try {
-                                if (heartbeats.awaitTermination(5, TimeUnit.SECONDS)) {
-                                    report.run();
-                                }
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                            }
-                        },
-                        "shard-shutdown"));
-
+    private static void serveHealth(
+            final GnomeAgentRunner agentRunner, final ShardRuntime runtime, final CycleUploader uploader) {
         try {
             new HealthCheckServer(
                             8080,
@@ -300,32 +370,7 @@ public class ShardOrchestrator extends Orchestrator {
         return new CollectorHeartbeat(
                 logger,
                 MAPPER,
-                new CollectorHeartbeat.Shard() {
-                    @Override
-                    public List<ShardStream> streams() {
-                        return runtime.streams();
-                    }
-
-                    @Override
-                    public List<CollectorHeartbeat.Connection> connections() {
-                        return runtime.connections();
-                    }
-
-                    @Override
-                    public long generation() {
-                        return runtime.generation();
-                    }
-
-                    @Override
-                    public long probes() {
-                        return prober.probes();
-                    }
-
-                    @Override
-                    public long probeMismatches() {
-                        return prober.mismatches();
-                    }
-                },
+                heartbeatShard(runtime, prober),
                 uploader,
                 HostReadings.ofThisProcess(new File("/")),
                 ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
@@ -333,10 +378,97 @@ public class ShardOrchestrator extends Orchestrator {
                 System.nanoTime());
     }
 
+    private static CollectorHeartbeat.Shard heartbeatShard(final ShardRuntime runtime, final BookProber prober) {
+        return new CollectorHeartbeat.Shard() {
+            @Override
+            public List<ShardStream> streams() {
+                return runtime.streams();
+            }
+
+            @Override
+            public List<CollectorHeartbeat.Connection> connections() {
+                return runtime.connections();
+            }
+
+            @Override
+            public long generation() {
+                return runtime.generation();
+            }
+
+            @Override
+            public long probes() {
+                return prober.probes();
+            }
+
+            @Override
+            public long probeMismatches() {
+                return prober.mismatches();
+            }
+        };
+    }
+
+    /**
+     * Starts the shard's samples (subject {@code shard}, its id) on their own thread, posted to the samples API every
+     * {@link #SAMPLES_POST_MILLIS}: {@code runtime}, {@code shard.agents} (the collector's and publisher's loops),
+     * {@code shard.streams}, and each minute's {@code latency.shard.*}. Null, and nothing started, without an API key.
+     */
+    private SamplePoster samples(
+            final Logger logger,
+            final Properties properties,
+            final String shardId,
+            final AeronRuntime aeron,
+            final SchedulingLatencyProbe probe,
+            final List<GnomeAgentRunner> runners,
+            final MarketDataCollectorAgent collector,
+            final StreamPublisherAgent publisher,
+            final ShardLatency latency,
+            final CollectorHeartbeat.Shard shard,
+            final CycleUploader uploader) {
+        final SamplePoster.Sender sender = SamplesApi.sender(
+                properties.getStringProperty("samples.api.url"),
+                getInstance(RegistryEndpoint.class).apiKey());
+        if (sender == null) {
+            logger.logf(LogMessage.DEBUG, "No samples API key: shard %s posts no samples", shardId);
+            return null;
+        }
+        final SampleBuffer buffer = new SampleBuffer(SAMPLE_BUFFER_BYTES, MAX_PENDING_SAMPLES, MAX_SAMPLE_BYTES);
+        final RuntimeSampler runtime = new RuntimeSampler(
+                buffer,
+                HostReadings.ofThisProcess(new File("/")),
+                new JvmReadings(),
+                ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
+                probe,
+                aeron.aeron().countersReader(),
+                runners,
+                properties.getLongProperty("samples.runtime.interval.ms"));
+        final CounterSampler agents = new CounterSampler(
+                buffer,
+                "shard.agents",
+                List.of("collector", "publisher"),
+                List.of(collector.counters(), publisher.counters()),
+                SAMPLES_MINUTE_MILLIS);
+        final ShardSampler streams = new ShardSampler(
+                buffer, shard, uploader::queuedUploads, uploader::failedUploads, SAMPLES_MINUTE_MILLIS);
+        final LatencySampler latencies = new LatencySampler(buffer, latency.sets(), ShardLatency.kinds());
+        final SamplePoster poster = new SamplePoster(
+                logger,
+                "shard",
+                shardId,
+                buffer,
+                List.of(runtime::sampleIfDue, agents::sampleIfDue, streams::sampleIfDue, latencies::sampleIfDue),
+                sender,
+                System::currentTimeMillis,
+                SAMPLES_POST_MILLIS);
+        poster.start("shard-samples");
+        return poster;
+    }
+
     private static StreamPublisherAgent publisher(
             final AeronRuntime aeron,
             final ShardStatusWriter.Identity identity,
-            final AtomicReference<ShardRuntime> runtime) {
+            final AtomicReference<ShardRuntime> runtime,
+            final EpochNanoClock wallClock,
+            final ShardLatency latency) {
         return new StreamPublisherAgent(
                 StreamPublication.of(aeron.aeron()
                         .addPublication(
@@ -346,7 +478,8 @@ public class ShardOrchestrator extends Orchestrator {
                     return started == null ? -1 : started.generation();
                 },
                 System::nanoTime,
-                ShardOrchestrator::wallNanos);
+                wallClock::nanoTime,
+                latency);
     }
 
     private static StreamPublishing publishing(
@@ -375,7 +508,8 @@ public class ShardOrchestrator extends Orchestrator {
             final Clock clock,
             final CycleUploader uploader,
             final DirectBufferPool pool,
-            final String outputBucket) {
+            final String outputBucket,
+            final ShardLatency latency) {
         return (streamId, name) -> {
             final MarketDataCollector collector =
                     new MarketDataCollector(logger, clock, uploader, pool, streamId, RecordType.MBP_10, outputBucket);
@@ -390,7 +524,8 @@ public class ShardOrchestrator extends Orchestrator {
                             SequencedRingBuffer.Producers.TAKING_TURNS),
                     collector,
                     new StreamRecordEventAdapter(collector),
-                    true);
+                    true,
+                    latency);
         };
     }
 
@@ -428,6 +563,7 @@ public class ShardOrchestrator extends Orchestrator {
             final ShardRuntime runtime,
             final CollectorHeartbeat heartbeat,
             final StreamTransitions transitions) {
+        final ShardErrors errors = getInstance(ShardErrors.class);
         return new ShardStatusWriter(
                 logger,
                 s3,
@@ -452,6 +588,11 @@ public class ShardOrchestrator extends Orchestrator {
                     @Override
                     public String processLine() {
                         return heartbeat.processLine();
+                    }
+
+                    @Override
+                    public ShardErrors.Reading errors() {
+                        return errors.read();
                     }
                 },
                 transitions,

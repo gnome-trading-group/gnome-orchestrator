@@ -5,6 +5,9 @@ import group.gnometrading.collections.buffer.MessageConsumer;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.AccountState;
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.latency.MinuteHistograms;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.orchestrator.aeron.PendingMessages;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
@@ -45,6 +48,13 @@ public final class GatewayEgress implements AeronPathAgent {
 
     static final long HEARTBEAT_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
     private static final int REPORTS_PER_PASS = 256;
+    /** Its latency's metric code (never reused; see {@code ShardLatency}) and sample kind. */
+    public static final int REPORT_OUT = 211;
+
+    public static final String LATENCY_KIND = "latency.gateway.egress";
+    private static final int[] NO_EXCHANGES = {};
+    private static final String[] NO_NAMES = {};
+    private static final String[] NO_LABEL = {""};
 
     private final SessionTable sessions;
     private final GatewayStatus status;
@@ -63,6 +73,19 @@ public final class GatewayEgress implements AeronPathAgent {
     private final OrderStatusEncoder orderStatus = new OrderStatusEncoder();
     private final OrderStatusDecoder orderStatusDecoder = new OrderStatusDecoder();
     private final OrderStatuses statuses;
+    // Measured on its thread for the gateway's samples: reports taken and sent, sends the session's publication refused
+    // for want of room, and each report's time from its making (its timestampRecv: the reader's receipt of the venue's
+    // message, or the lane's or ingress's own report) to its send (gw.report_out).
+    private final MetricCounters counters = new MetricCounters(4);
+    private final int reportsTaken = this.counters.counter("reports");
+    private final int reportsSent = this.counters.counter("reportsSent");
+    private final int backPressured = this.counters.counter("backPressured");
+    private final int heartbeatsSent = this.counters.counter("heartbeats");
+    private final MinuteHistograms latency = new MinuteHistograms(LatencyGrid.size(0, 1, 1));
+    private final LatencyGrid reportOut =
+            new LatencyGrid(this.latency, REPORT_OUT, "gw.report_out", NO_EXCHANGES, NO_NAMES, NO_LABEL, NO_LABEL);
+    private final OrderExecutionReportDecoder sentReport = new OrderExecutionReportDecoder();
+    private long wallNow;
     private long nextHeartbeatNanos;
     private long heartbeatSeq;
     private int handled;
@@ -106,6 +129,8 @@ public final class GatewayEgress implements AeronPathAgent {
     @Override
     public int doWork() {
         this.handled = 0;
+        this.wallNow = this.wallClock.nanoTime();
+        this.latency.roll(this.wallNow);
         this.cross.flush();
         this.fromControl.read(this.controlHandler, Integer.MAX_VALUE);
         // A ring that gave a full pass's worth may hold more, which a session's last message must not go ahead of.
@@ -161,6 +186,7 @@ public final class GatewayEgress implements AeronPathAgent {
 
     private void onReport(final AccountReport report) {
         this.handled++;
+        this.counters.increment(this.reportsTaken);
         // Before routing: an order whose session is gone still rests until its end comes, and blocks until then.
         tellCross(report);
         final GatewaySession session = this.sessions.bySlot(report.sessionSlot);
@@ -299,6 +325,7 @@ public final class GatewayEgress implements AeronPathAgent {
         if (beat && session.state == GatewaySession.ACTIVE) {
             final int length = encodeHeartbeat(session);
             if (reply.offer(this.heartbeatBuffer, 0, length) >= 0) {
+                this.counters.increment(this.heartbeatsSent);
                 sent++;
             }
         }
@@ -333,13 +360,42 @@ public final class GatewayEgress implements AeronPathAgent {
             }
             this.reserved.value = next;
             if (reply.offer(replay.buffer(), replay.offset(next), replay.length(next), this.reserved) < 0) {
+                this.counters.increment(this.backPressured);
                 return sent;
             }
+            reportSent(replay.buffer(), replay.offset(next));
             session.sentSeq = next;
             session.totals.sent(next, replay.counter(next));
             sent++;
         }
         return sent;
+    }
+
+    private void reportSent(final DirectBuffer buffer, final int offset) {
+        if (SbeMessage.schemaId(buffer, offset) != OrderExecutionReportDecoder.SCHEMA_ID
+                || SbeMessage.templateId(buffer, offset) != OrderExecutionReportDecoder.TEMPLATE_ID) {
+            return;
+        }
+        this.counters.increment(this.reportsSent);
+        this.sentReport.wrap(
+                buffer,
+                offset + SbeMessage.HEADER_LENGTH,
+                OrderExecutionReportDecoder.BLOCK_LENGTH,
+                OrderExecutionReportDecoder.SCHEMA_VERSION);
+        final long made = this.sentReport.timestampRecv();
+        if (made > 0 && made != OrderExecutionReportDecoder.timestampRecvNullValue()) {
+            this.reportOut.record(0, 0, 0, this.wallNow - made, this.wallNow);
+        }
+    }
+
+    /** What it took and sent: written on its thread only. */
+    public MetricCounters counters() {
+        return this.counters;
+    }
+
+    /** Its latency histograms, kind {@link #LATENCY_KIND}: written on its thread only. */
+    public MinuteHistograms latency() {
+        return this.latency;
     }
 
     private int encodeHeartbeat(final GatewaySession session) {

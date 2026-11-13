@@ -2,6 +2,8 @@ package group.gnometrading.orchestrator.session.orders;
 
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.orchestrator.aeron.HostAddress;
 import group.gnometrading.orchestrator.aeron.PendingMessages;
@@ -20,6 +22,7 @@ import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.SbeMessage;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.TriggerKind;
 import group.gnometrading.schemas.gateway.CancelEndedEncoder;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatDecoder;
 import group.gnometrading.schemas.gateway.GatewayMessageLimits;
@@ -73,6 +76,11 @@ import org.agrona.concurrent.UnsafeBuffer;
  *       quiet for a second, refuses the session, or says goodbye; asked for a new hello, it says one.
  * </ul>
  *
+ * <p>Given latency grids ({@link #measureLatency}), it records, on the wall clock: {@code session.tick_to_order}, from
+ * the arrival of the event behind each order, cancel and amend to its hand-off to the link (offered, or queued behind
+ * what waits), by exchange, action ({@link #LATENCY_ACTIONS}) and trigger kind; and {@code order_to_ack} and
+ * {@code cancel_to_ack}, from that hand-off to the order's first report and to the report answering the cancel.
+ *
  * <p>Allocates nothing on the order path; turning an order status into reports may, when the numbers are too large for
  * a long.
  */
@@ -89,6 +97,13 @@ public final class GatewayClient implements AeronPathAgent {
     private static final int FRAGMENT_LIMIT = 64;
     private static final long SIZE_SCALE = 1_000_000L;
     private static final int MAX_MESSAGE = 1024;
+
+    /** The action labels {@code session.tick_to_order} is recorded under, by index. */
+    public static final String[] LATENCY_ACTIONS = {"NEW", "CANCEL", "MODIFY"};
+
+    private static final int NEW = 0;
+    private static final int CANCEL = 1;
+    private static final int MODIFY = 2;
 
     /** Who the session is, as its hello says. */
     /**
@@ -152,6 +167,22 @@ public final class GatewayClient implements AeronPathAgent {
     private int helloCount;
     private int helloExchange;
     private long now;
+    // Set before the client starts, or never; all three share one MinuteHistograms this thread writes.
+    private LatencyGrid tickToOrder;
+    private LatencyGrid orderToAck;
+    private LatencyGrid cancelToAck;
+    // What the client did, counted on its thread for the session's samples.
+    private final MetricCounters activity = new MetricCounters(10);
+    private final int newOrdersSent = activity.counter("newOrders");
+    private final int cancelsSent = activity.counter("cancels");
+    private final int modifiesSent = activity.counter("modifies");
+    private final int newOrdersRefused = activity.counter("newOrdersRefused");
+    private final int cancelsHeld = activity.counter("cancelsHeld");
+    private final int cancelsRefused = activity.counter("cancelsRefused");
+    private final int modifiesRefused = activity.counter("modifiesRefused");
+    private final int reportsIn = activity.counter("reports");
+    private final int reportsRetried = activity.counter("reportsRetried");
+    private final int pendingPeak = activity.peak("pendingPeak");
 
     /** @param omsOrders the OMS's outbound ring; the client must be its only reader that writes {@code toOms} */
     public GatewayClient(
@@ -177,9 +208,25 @@ public final class GatewayClient implements AeronPathAgent {
         this.wallClock = wallClock;
     }
 
+    /** What the client has sent, held, refused and passed on, counted on its thread for another to read. */
+    public MetricCounters activity() {
+        return activity;
+    }
+
+    /** Records the order path's latencies into these grids; before the client starts. */
+    public void measureLatency(
+            final LatencyGrid tickToOrder, final LatencyGrid orderToAck, final LatencyGrid cancelToAck) {
+        this.tickToOrder = tickToOrder;
+        this.orderToAck = orderToAck;
+        this.cancelToAck = cancelToAck;
+    }
+
     @Override
     public int doWork() throws Exception {
         this.now = this.nanoClock.getAsLong();
+        if (this.tickToOrder != null) {
+            this.tickToOrder.histograms().roll(this.wallClock.nanoTime());
+        }
         int work = 0;
         for (int i = 0; i < this.links.length; i++) {
             final GatewayLink link = this.links[i];
@@ -380,6 +427,7 @@ public final class GatewayClient implements AeronPathAgent {
         final int strategyId = this.order.getClientOidStrategyId();
         final GatewayLink link = this.byExchange.get(decoder.exchangeId());
         if (link == null || link.state != GatewayLink.READY) {
+            activity.increment(newOrdersRefused);
             reject(counter, strategyId, decoder.exchangeId(), decoder.securityId(), RejectReason.GATEWAY_UNAVAILABLE);
             return;
         }
@@ -391,14 +439,31 @@ public final class GatewayClient implements AeronPathAgent {
                 decoder.side(),
                 decoder.price(),
                 decoder.size())) {
+            activity.increment(newOrdersRefused);
             reject(counter, strategyId, decoder.exchangeId(), decoder.securityId(), RejectReason.GATEWAY_REJECTED);
             return;
         }
         if (!send(link, buffer, length)) {
             final GatewayOrders.Entry entry = this.orders.get(counter);
             this.orders.release(entry);
+            activity.increment(newOrdersRefused);
             reject(counter, strategyId, decoder.exchangeId(), decoder.securityId(), RejectReason.GATEWAY_UNAVAILABLE);
+            return;
         }
+        activity.increment(newOrdersSent);
+        if (this.tickToOrder != null) {
+            final long sentAt = handedOff(decoder.exchangeId(), NEW, decoder.triggerKind(), decoder.triggerTimestamp());
+            this.orders.get(counter).sentAt = sentAt;
+        }
+    }
+
+    /** Records the hand-off's tick-to-order; @return when it was handed off */
+    private long handedOff(final int exchangeId, final int action, final TriggerKind kind, final long triggerAt) {
+        final long sentAt = this.wallClock.nanoTime();
+        if (triggerAt != 0) {
+            this.tickToOrder.record(exchangeId, action, kind.value(), sentAt - triggerAt, sentAt);
+        }
+        return sentAt;
     }
 
     private void onCancel(final UnsafeBuffer buffer, final int length) {
@@ -413,12 +478,23 @@ public final class GatewayClient implements AeronPathAgent {
         // Held until the link is ready again, so a cancel the session sent is never lost to an outage.
         if (link == null
                 || !(link.state == GatewayLink.READY ? send(link, buffer, length) : hold(link, buffer, length))) {
+            activity.increment(cancelsRefused);
             cancelReject(
                     counter,
                     this.cancel.getClientOidStrategyId(),
                     decoder.exchangeId(),
                     decoder.securityId(),
                     RejectReason.GATEWAY_UNAVAILABLE);
+            return;
+        }
+        activity.increment(link.state == GatewayLink.READY ? cancelsSent : cancelsHeld);
+        if (this.tickToOrder != null) {
+            final long sentAt =
+                    handedOff(decoder.exchangeId(), CANCEL, decoder.triggerKind(), decoder.triggerTimestamp());
+            final GatewayOrders.Entry entry = this.orders.get(counter);
+            if (entry != null) {
+                entry.cancelSentAt = sentAt;
+            }
         }
     }
 
@@ -426,12 +502,18 @@ public final class GatewayClient implements AeronPathAgent {
         final ModifyOrderDecoder decoder = this.modify.decoder;
         final GatewayLink link = this.byExchange.get(decoder.exchangeId());
         if (link == null || link.state != GatewayLink.READY || !send(link, buffer, length)) {
+            activity.increment(modifiesRefused);
             cancelReject(
                     this.modify.getClientOidCounter(),
                     this.modify.getClientOidStrategyId(),
                     decoder.exchangeId(),
                     decoder.securityId(),
                     RejectReason.GATEWAY_UNAVAILABLE);
+            return;
+        }
+        activity.increment(modifiesSent);
+        if (this.tickToOrder != null) {
+            handedOff(decoder.exchangeId(), MODIFY, decoder.triggerKind(), decoder.triggerTimestamp());
         }
     }
 
@@ -444,8 +526,10 @@ public final class GatewayClient implements AeronPathAgent {
         return hold(link, buffer, length);
     }
 
-    private static boolean hold(final GatewayLink link, final DirectBuffer buffer, final int length) {
-        return link.pending.offer(buffer, 0, length);
+    private boolean hold(final GatewayLink link, final DirectBuffer buffer, final int length) {
+        final boolean held = link.pending.offer(buffer, 0, length);
+        activity.max(pendingPeak, link.pending.size());
+        return held;
     }
 
     /** Sends what waited for the link, in order, while the publication takes it. */
@@ -720,12 +804,41 @@ public final class GatewayClient implements AeronPathAgent {
             return ControlledFragmentHandler.Action.CONTINUE;
         }
         if (!this.toOms.tryPublishRaw(buffer, offset, OrderExecutionReportDecoder.TEMPLATE_ID, length)) {
+            activity.increment(reportsRetried);
             return ControlledFragmentHandler.Action.ABORT;
         }
+        activity.increment(reportsIn);
         link.lastReportSeq = Math.max(link.lastReportSeq, sequence);
         this.inbound.buffer.putBytes(0, buffer, offset, length);
+        if (this.orderToAck != null) {
+            answered(this.orders.get(this.inbound.getClientOidCounter()), this.inbound.decoder);
+        }
         this.orders.reported(this.inbound.getClientOidCounter(), this.inbound.decoder);
         return ControlledFragmentHandler.Action.CONTINUE;
+    }
+
+    private void answered(final GatewayOrders.Entry entry, final OrderExecutionReportDecoder report) {
+        if (entry == null || (entry.sentAt == 0 && entry.cancelSentAt == 0)) {
+            return;
+        }
+        final long at = this.wallClock.nanoTime();
+        if (entry.sentAt != 0) {
+            this.orderToAck.record(entry.exchangeId, 0, 0, at - entry.sentAt, at);
+            entry.sentAt = 0;
+        }
+        if (entry.cancelSentAt != 0 && answersCancel(report.execType())) {
+            this.cancelToAck.record(entry.exchangeId, 0, 0, at - entry.cancelSentAt, at);
+            entry.cancelSentAt = 0;
+        }
+    }
+
+    /** The cancel's own answer, or the order's end, which answers it too. */
+    private static boolean answersCancel(final ExecType execType) {
+        return execType == ExecType.CANCEL
+                || execType == ExecType.CANCEL_REJECT
+                || execType == ExecType.FILL
+                || execType == ExecType.EXPIRE
+                || execType == ExecType.REJECT;
     }
 
     private void onGatewayMessage(

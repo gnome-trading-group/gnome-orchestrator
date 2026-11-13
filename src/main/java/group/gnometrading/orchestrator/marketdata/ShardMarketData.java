@@ -3,6 +3,7 @@ package group.gnometrading.orchestrator.marketdata;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.metrics.SampleBuffer;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
@@ -23,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.agrona.ErrorHandler;
 import org.agrona.collections.Int2ObjectHashMap;
+import org.agrona.concurrent.EpochNanoClock;
 
 /**
  * Market data read from collector shards over Aeron, for one session or, {@link #shared shared}, for several. The
@@ -151,8 +153,37 @@ public final class ShardMarketData implements MarketData {
             final String localIp,
             final SequencedRingBuffer<?> ring,
             final LongSupplier nanoTime) {
+        return shared(logger, aeron, localIp, ring, nanoTime, null, null);
+    }
+
+    /** As {@link #shared(Logger, AeronRuntime, String, SequencedRingBuffer, LongSupplier)}, measuring into {@code metrics}. */
+    public static ShardMarketData shared(
+            final Logger logger,
+            final AeronRuntime aeron,
+            final String localIp,
+            final SequencedRingBuffer<?> ring,
+            final LongSupplier nanoTime,
+            final FeedMetrics metrics,
+            final EpochNanoClock wallClock) {
         return new ShardMarketData(
-                logger, aeron, localIp, null, List.of(), new ShardFeedAgent(ring, List.of(), nanoTime), 0, nanoTime);
+                logger,
+                aeron,
+                localIp,
+                null,
+                List.of(),
+                new ShardFeedAgent(ring, List.of(), nanoTime, metrics, wallClock),
+                0,
+                nanoTime);
+    }
+
+    /** Its feed thread's runner, once started; for a sampler of the process's threads. */
+    public GnomeAgentRunner runner() {
+        return runner;
+    }
+
+    /** A sampler of what its feed thread measured ({@link FeedMetrics}), on the caller's {@code samples}. */
+    public FeedSampler sampler(final SampleBuffer samples, final long intervalMs) {
+        return new FeedSampler(samples, agent, intervalMs);
     }
 
     /**

@@ -3,6 +3,7 @@ package group.gnometrading.orchestrator.shard;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.gateways.feed.SubjectState;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.schemas.MessageHeaderEncoder;
 import group.gnometrading.schemas.ShardStatusEncoder;
@@ -43,6 +44,13 @@ final class StreamPublisherAgent implements AeronPathAgent {
     private record Leave(ShardStream stream, long atNanos) {}
 
     private final StreamPublication status;
+    private final ShardLatency latency;
+    private final MetricCounters counters = new MetricCounters(4);
+    private final int passes = counters.counter("passes");
+    private final int passGapPeakNanos = counters.peak("passGapPeakNanos");
+    private final int streamsRead = counters.gauge("streams");
+    private final int publications = counters.gauge("publications");
+    private long lastPassNanos;
     private final LongSupplier generation;
     private final LongSupplier nanoTime;
     private final LongSupplier wallNanos;
@@ -59,14 +67,18 @@ final class StreamPublisherAgent implements AeronPathAgent {
      * @param status the shard's status publication
      * @param generation the assignment generation the runtime last applied
      * @param nanoTime a monotonic clock, for pacing
-     * @param wallNanos epoch nanoseconds, stamped on the status
+     * @param wallNanos epoch nanoseconds, read once a pass: stamped on the status and on each record sent, and the end
+     *     of each record's time in the shard
+     * @param latency where each record's time in the shard goes; null records none
      */
     StreamPublisherAgent(
             final StreamPublication status,
             final LongSupplier generation,
             final LongSupplier nanoTime,
-            final LongSupplier wallNanos) {
+            final LongSupplier wallNanos,
+            final ShardLatency latency) {
         this.status = status;
+        this.latency = latency;
         this.generation = generation;
         this.nanoTime = nanoTime;
         this.wallNanos = wallNanos;
@@ -92,13 +104,15 @@ final class StreamPublisherAgent implements AeronPathAgent {
             }
         }
         final long now = nanoTime.getAsLong();
+        final long wall = wallNanos.getAsLong();
+        countPass(now, wall);
         int work = 0;
         for (int i = 0; i < streams.size(); i++) {
-            work += streams.get(i).publish(now);
+            work += streams.get(i).publish(now, wall);
         }
         for (int i = leaving.size() - 1; i >= 0; i--) {
             final Leave leave = leaving.get(i);
-            final int drained = leave.stream().publish(now);
+            final int drained = leave.stream().publish(now, wall);
             work += drained;
             if (drained == 0 && now >= leave.atNanos()) {
                 leaving.remove(i);
@@ -106,15 +120,25 @@ final class StreamPublisherAgent implements AeronPathAgent {
         }
         if (now >= nextStatusNanos) {
             nextStatusNanos = now + STATUS_EVERY_NANOS;
-            sendStatus();
+            sendStatus(wall);
             work++;
         }
         return work;
     }
 
+    private void countPass(final long now, final long wall) {
+        counters.increment(passes);
+        if (lastPassNanos != 0) {
+            counters.max(passGapPeakNanos, now - lastPassNanos);
+        }
+        lastPassNanos = now;
+        if (latency != null) {
+            latency.rollPublisher(wall);
+        }
+    }
+
     /** Every published stream's state and position, in as many messages as it takes; one naming none says alive. */
-    private void sendStatus() {
-        final long sentNanos = wallNanos.getAsLong();
+    private void sendStatus(final long sentNanos) {
         final long applied = generation.getAsLong();
         int count = 0;
         for (int i = 0; i < streams.size(); i++) {
@@ -125,6 +149,8 @@ final class StreamPublisherAgent implements AeronPathAgent {
                 published[count++] = i;
             }
         }
+        counters.set(streamsRead, streams.size());
+        counters.set(publications, count);
         int from = 0;
         do {
             final int batch = Math.min(MAX_STREAMS_PER_STATUS, count - from);
@@ -162,6 +188,11 @@ final class StreamPublisherAgent implements AeronPathAgent {
     private static short stateOf(final ShardStream stream) {
         final Subject subject = stream.subject();
         return subject == null ? NO_STATE : (short) subject.state().ordinal();
+    }
+
+    /** Its loop's passes and the longest gap between two, and what it reads: written on its thread only. */
+    MetricCounters counters() {
+        return counters;
     }
 
     @Override

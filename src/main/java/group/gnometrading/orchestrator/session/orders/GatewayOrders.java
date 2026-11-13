@@ -35,6 +35,9 @@ final class GatewayOrders {
         long fees;
         final byte[] exchangeOrderId = new byte[OrderExecutionReportEncoder.exchangeOrderIdLength()];
         int exchangeOrderIdLength;
+        // When the order, and its latest cancel, were handed to the link (epoch nanos); 0 once answered, or unmeasured.
+        long sentAt;
+        long cancelSentAt;
 
         void reset() {
             this.counter = 0;
@@ -49,6 +52,8 @@ final class GatewayOrders {
             this.notional = 0;
             this.fees = 0;
             this.exchangeOrderIdLength = 0;
+            this.sentAt = 0;
+            this.cancelSentAt = 0;
         }
 
         boolean terminal() {

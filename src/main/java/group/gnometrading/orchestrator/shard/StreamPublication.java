@@ -10,6 +10,14 @@ interface StreamPublication extends AutoCloseable {
     /** As {@link Publication#offer(DirectBuffer, int, int)}: the new position, or a negative reason it wasn't sent. */
     long offer(DirectBuffer buffer, int offset, int length);
 
+    /**
+     * As {@link #offer}, its frame stamped with when it was sent ({@link AeronReservedValues#sentNanos}), so a reader can
+     * tell the network's share of a record's delay from the shard's.
+     */
+    default long offer(DirectBuffer buffer, int offset, int length, long sentNanos) {
+        return offer(buffer, offset, length);
+    }
+
     /** As {@link #offer}, marked {@link AeronReservedValues#RESENT}: a record sessions may already have. */
     long resend(DirectBuffer buffer, int offset, int length);
 
@@ -23,10 +31,17 @@ interface StreamPublication extends AutoCloseable {
     void close();
 
     static StreamPublication of(final Publication publication) {
+        final AeronReservedValues.SentStamp stamp = new AeronReservedValues.SentStamp();
         return new StreamPublication() {
             @Override
             public long offer(final DirectBuffer buffer, final int offset, final int length) {
                 return publication.offer(buffer, offset, length);
+            }
+
+            @Override
+            public long offer(final DirectBuffer buffer, final int offset, final int length, final long sentNanos) {
+                stamp.set(sentNanos);
+                return publication.offer(buffer, offset, length, stamp);
             }
 
             @Override

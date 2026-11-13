@@ -9,6 +9,7 @@ import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import io.aeron.Subscription;
 import java.lang.management.ManagementFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,12 +36,14 @@ class StreamPublisherAllocationTest {
                 AeronRuntime session =
                         AeronRuntime.launch("pub-alloc-session", AeronProfile.STANDARD, Throwable::printStackTrace)) {
             final String channel = AeronChannels.shardPublication("localhost");
+            final ShardLatency latency = new ShardLatency();
             final StreamPublisherAgent agent = new StreamPublisherAgent(
                     StreamPublication.of(shard.aeron().addPublication(channel, AeronStreamIds.SHARD_STATUS)),
                     () -> 1,
                     System::nanoTime,
-                    System::currentTimeMillis);
-            final ShardStream stream = kit.publishingStream(10);
+                    SampledEpochNanoClock.INSTANCE::nanoTime,
+                    latency);
+            final ShardStream stream = kit.publishingStream(10, latency);
             stream.publication(StreamPublication.of(shard.aeron().addPublication(channel, 10)));
             agent.add(stream);
             // Two hosts on one machine would hand out the same receive port, so the session names one here.

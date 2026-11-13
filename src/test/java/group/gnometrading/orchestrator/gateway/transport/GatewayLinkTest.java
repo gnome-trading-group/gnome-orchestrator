@@ -40,6 +40,7 @@ import group.gnometrading.schemas.gateway.SessionHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloEncoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeDecoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeEncoder;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.logbuffer.FragmentHandler;
@@ -99,6 +100,7 @@ class GatewayLinkTest {
             new GatewayRejects(this.rejectRing, new SystemEpochNanoClock()),
             this.toControl,
             System::nanoTime,
+            SampledEpochNanoClock.INSTANCE,
             JournalRecorder.NONE,
             this.cross,
             Kills.none());
@@ -191,6 +193,26 @@ class GatewayLinkTest {
         assertEquals(2, reports.get(1).reservedValue());
         assertEquals(ExecType.FILL, execType(reports.get(1)));
         assertEquals(2, session.replay.newest());
+    }
+
+    @Test
+    void whatPassesThroughIsCountedAndAnOrdersCommandIsStampedForTheLanesWait() throws Exception {
+        linkedSession();
+        final long before = System.nanoTime();
+        sendOrder(1, LEASED);
+        final LaneCommand command = awaitCommands(1).get(0);
+        assertTrue(command.enqueuedNanos >= before, "stamped on the lanes' clock as ingress put it on the ring");
+        sendOrder(2, NOT_LEASED);
+        awaitReports(1);
+        report(this.accountReports, SLOT, 1, ExecType.NEW);
+        awaitReports(1);
+
+        assertEquals(1, this.ingress.counters().get(0), "one order passed to the lane");
+        assertEquals(
+                1,
+                this.ingress.refusals().get(RejectReason.LISTING_NOT_LEASED.ordinal()),
+                "one refused, by its reason");
+        await(() -> this.egress.counters().get(1) == 2, "both reports counted as sent");
     }
 
     @Test

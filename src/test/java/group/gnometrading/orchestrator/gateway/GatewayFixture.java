@@ -57,6 +57,7 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.fee.FeeTimeline;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -280,6 +281,7 @@ public final class GatewayFixture implements AutoCloseable {
                 new GatewayRejects(rejects, new SystemEpochNanoClock()),
                 toControl,
                 System::nanoTime,
+                SampledEpochNanoClock.INSTANCE,
                 this.journal == null ? JournalRecorder.NONE : this.journal.ingress(),
                 this.cross,
                 this.kills);

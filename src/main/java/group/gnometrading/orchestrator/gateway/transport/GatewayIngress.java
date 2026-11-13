@@ -5,6 +5,9 @@ import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.account.reader.PublishedMap;
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.latency.MinuteHistograms;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.orchestrator.aeron.AeronPathAgent;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.orchestrator.gateway.core.GatewaySession;
@@ -30,6 +33,7 @@ import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.logbuffer.Header;
 import java.util.function.LongSupplier;
 import org.agrona.DirectBuffer;
+import org.agrona.concurrent.EpochNanoClock;
 
 /**
  * Reads every session's messages off the gateway's ingress subscription. Core orders carry no session, so the sender is
@@ -47,6 +51,17 @@ import org.agrona.DirectBuffer;
 public final class GatewayIngress implements AeronPathAgent {
 
     private static final int FRAGMENT_LIMIT = 64;
+    /** Its latency's metric code (never reused; see {@code ShardLatency}) and sample kind. */
+    public static final int TRANSIT = 210;
+
+    public static final String LATENCY_KIND = "latency.gateway.ingress";
+    private static final String[] ACTIONS = {"NEW", "CANCEL", "MODIFY"};
+    private static final int NEW = 0;
+    private static final int CANCEL = 1;
+    private static final int MODIFY = 2;
+    private static final int[] NO_EXCHANGES = {};
+    private static final String[] NO_NAMES = {};
+    private static final String[] NO_LABEL = {""};
 
     private final Subscription subscription;
     private final SessionTable sessions;
@@ -62,6 +77,19 @@ public final class GatewayIngress implements AeronPathAgent {
     private final ModifyOrder modify = new ModifyOrder();
     private final SessionHeartbeatDecoder heartbeat = new SessionHeartbeatDecoder();
     private final ControlledFragmentHandler handler = this::onFragment;
+    private final EpochNanoClock wallClock;
+    // Measured on its thread for the gateway's samples: what it passed to the lanes, and each order's time from the
+    // session's OMS stamping it (timestampSend, the session host's clock) to here (gw.transit).
+    private final MetricCounters counters = new MetricCounters(5);
+    private final int news = this.counters.counter("orders");
+    private final int cancels = this.counters.counter("cancels");
+    private final int amends = this.counters.counter("amends");
+    private final int heartbeats = this.counters.counter("heartbeats");
+    private final int unreadable = this.counters.counter("unreadable");
+    private final MinuteHistograms latency = new MinuteHistograms(LatencyGrid.size(0, ACTIONS.length, 1));
+    private final LatencyGrid transit =
+            new LatencyGrid(this.latency, TRANSIT, "gw.transit", NO_EXCHANGES, NO_NAMES, ACTIONS, NO_LABEL);
+    private long wallNow;
 
     // Written only here; volatile so the gateway's minute report reads them.
     private volatile long unlinked;
@@ -75,9 +103,11 @@ public final class GatewayIngress implements AeronPathAgent {
             final GatewayRejects rejects,
             final ManyToOneRingBuffer<GatewayMessage> toControl,
             final LongSupplier nanoClock,
+            final EpochNanoClock wallClock,
             final JournalRecorder journal,
             final CrossIndex cross,
             final Kills kills) {
+        this.wallClock = wallClock;
         this.subscription = subscription;
         this.sessions = sessions;
         this.status = status;
@@ -91,6 +121,8 @@ public final class GatewayIngress implements AeronPathAgent {
 
     @Override
     public int doWork() {
+        this.wallNow = this.wallClock.nanoTime();
+        this.latency.roll(this.wallNow);
         this.cross.drain();
         return this.subscription.controlledPoll(this.handler, FRAGMENT_LIMIT);
     }
@@ -103,6 +135,21 @@ public final class GatewayIngress implements AeronPathAgent {
     @Override
     public String roleName() {
         return "gateway-ingress";
+    }
+
+    /** What it passed on, by kind: written on its thread only. */
+    public MetricCounters counters() {
+        return this.counters;
+    }
+
+    /** Its latency histograms, kind {@link #LATENCY_KIND}: written on its thread only. */
+    public MinuteHistograms latency() {
+        return this.latency;
+    }
+
+    /** What it refused, by reason: written on its thread only. */
+    public MetricCounters refusals() {
+        return this.rejects.refusals();
     }
 
     /** Orders from an image no session is linked to, dropped. */
@@ -255,9 +302,18 @@ public final class GatewayIngress implements AeronPathAgent {
         command.timeInForce = decoder.timeInForce();
         command.orderType = decoder.orderType();
         command.postOnly = decoder.flags().postOnly();
+        command.enqueuedNanos = this.nanoClock.getAsLong();
         this.cross.add(session.slot, counter, listingKey, side, price);
         lane.commit(index);
+        passedOn(this.news, NEW, decoder.timestampSend());
         return true;
+    }
+
+    private void passedOn(final int counter, final int action, final long sentNanos) {
+        this.counters.increment(counter);
+        if (sentNanos > 0) {
+            this.transit.record(0, action, 0, this.wallNow - sentNanos, this.wallNow);
+        }
     }
 
     /** Why a NEW can't go to the lane, or null if it can. */
@@ -313,7 +369,9 @@ public final class GatewayIngress implements AeronPathAgent {
         command.clientOidStrategyId = strategyId;
         command.exchangeId = decoder.exchangeId();
         command.securityId = decoder.securityId();
+        command.enqueuedNanos = this.nanoClock.getAsLong();
         lane.commit(index);
+        passedOn(this.cancels, CANCEL, decoder.timestampSend());
         return true;
     }
 
@@ -353,8 +411,10 @@ public final class GatewayIngress implements AeronPathAgent {
         command.price = price;
         command.size = decoder.size();
         command.postOnly = decoder.flags().postOnly();
+        command.enqueuedNanos = this.nanoClock.getAsLong();
         this.cross.amend(session.slot, counter, price);
         lane.commit(index);
+        passedOn(this.amends, MODIFY, decoder.timestampSend());
         return true;
     }
 
@@ -371,6 +431,7 @@ public final class GatewayIngress implements AeronPathAgent {
         if (this.heartbeat.sessionSeq() != session.slot) {
             return;
         }
+        this.counters.increment(this.heartbeats);
         session.echoedHeartbeatSeq = this.heartbeat.lastGatewayHeartbeatSeq();
         session.lastHeardNanos = this.nanoClock.getAsLong();
     }
@@ -379,6 +440,9 @@ public final class GatewayIngress implements AeronPathAgent {
             final int kind, final int image, final DirectBuffer buffer, final int offset, final int length) {
         if (length > GatewayMessage.MAX_LENGTH) {
             return toControl(GatewayMessage.UNREADABLE, image, buffer, offset, 0);
+        }
+        if (kind == GatewayMessage.UNREADABLE) {
+            this.counters.increment(this.unreadable);
         }
         final int index = this.toControl.tryClaim();
         if (index < 0) {

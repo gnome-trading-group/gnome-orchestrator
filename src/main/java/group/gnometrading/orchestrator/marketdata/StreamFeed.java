@@ -73,6 +73,12 @@ public final class StreamFeed implements GatewayHealth {
     private volatile long badDropped;
     private final AtomicLong badSpells = new AtomicLong();
     private final AtomicLong refused = new AtomicLong();
+    // Written by the feed agent alone, read by the heartbeat's thread.
+    private final AtomicLong records = new AtomicLong();
+    private final AtomicLong bytes = new AtomicLong();
+    private final AtomicLong resentRepeats = new AtomicLong();
+    // The most bytes it trailed its shard's publication since the sampler last took it.
+    private final AtomicLong behindPeakBytes = new AtomicLong();
 
     public StreamFeed(final int streamId, final String name) {
         this.streamId = streamId;
@@ -120,6 +126,49 @@ public final class StreamFeed implements GatewayHealth {
     }
 
     long refused() {
+        return refused.get();
+    }
+
+    /** A record passed on to the ring. */
+    void passedOn(final int length) {
+        records.lazySet(records.get() + 1);
+        bytes.lazySet(bytes.get() + length);
+    }
+
+    /** Feed agent: it trails its shard's publication by {@code bytes}. */
+    void behind(final long bytes) {
+        if (bytes > behindPeakBytes.get()) {
+            behindPeakBytes.lazySet(bytes);
+        }
+    }
+
+    /** The most bytes it trailed its shard's publication since the last call, then 0. The sampler only. */
+    long takeBehindPeakBytes() {
+        return behindPeakBytes.getAndSet(0);
+    }
+
+    /** A shard's re-send of the last record, dropped. */
+    void droppedRepeat() {
+        resentRepeats.lazySet(resentRepeats.get() + 1);
+    }
+
+    @Override
+    public long records() {
+        return records.get();
+    }
+
+    @Override
+    public long bytes() {
+        return bytes.get();
+    }
+
+    @Override
+    public long resentRepeats() {
+        return resentRepeats.get();
+    }
+
+    @Override
+    public long refusedRecords() {
         return refused.get();
     }
 

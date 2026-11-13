@@ -2,17 +2,21 @@ package group.gnometrading.orchestrator.gateway.accounts;
 
 import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.ratelimit.RequestClass;
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.latency.LatencyHistogram;
+import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
-import group.gnometrading.orchestrator.runtime.LatencyHistogram;
 import group.gnometrading.schemas.gateway.AdmissionAction;
 import group.gnometrading.schemas.gateway.AdmissionRecordEncoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.agrona.collections.Hashing;
 import org.agrona.collections.Long2LongHashMap;
+import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 
 /**
@@ -25,6 +29,30 @@ import org.agrona.concurrent.UnsafeBuffer;
 public final class LaneAdmissions implements AccountLane.Admissions {
 
     public static final long MINUTE_NANOS = TimeUnit.MINUTES.toNanos(1);
+
+    /** Its latency's metric codes (never reused; see {@code ShardLatency}). */
+    public static final int QUEUE = 205;
+
+    public static final int BUDGET_WAIT = 206;
+    public static final int SIGN_SEND = 207;
+    public static final int VENUE_ANSWER = 208;
+    private static final String[] CLASSES = classNames();
+    private static final int[] NO_EXCHANGES = {};
+    private static final String[] NO_NAMES = {};
+    private static final String[] NO_LABEL = {""};
+
+    private static String[] classNames() {
+        final RequestClass[] classes = RequestClass.values();
+        final String[] names = new String[classes.length];
+        for (int i = 0; i < classes.length; i++) {
+            names[i] = classes[i].name();
+        }
+        return names;
+    }
+
+    private LatencyGrid grid(final int code, final String metric) {
+        return new LatencyGrid(this.latency, code, metric, NO_EXCHANGES, NO_NAMES, CLASSES, NO_LABEL);
+    }
     // Room for every session an account takes (AccountLane.MAX_SESSIONS, 1,024) without the map ever growing on the
     // lane's thread.
     private static final int SESSION_CAPACITY = 4096;
@@ -58,6 +86,15 @@ public final class LaneAdmissions implements AccountLane.Admissions {
     private final int accountId;
     private final JournalRecorder journal;
     private final LongSupplier nanoClock;
+    private final EpochNanoClock wallClock;
+    // A request's time at each step on the lane's side, by request class: on the lane's ring (gw.queue, from ingress
+    // putting it there), waiting for the budget (gw.budget_wait), encoding, signing and writing it (gw.sign_send), and
+    // the venue's answer (venue.answer, whole answers only). Nanoseconds; minutes on the wall clock.
+    private final MinuteHistograms latency = new MinuteHistograms(4 * LatencyGrid.size(0, CLASSES.length, 1));
+    private final LatencyGrid queueLatency = grid(QUEUE, "gw.queue");
+    private final LatencyGrid budgetLatency = grid(BUDGET_WAIT, "gw.budget_wait");
+    private final LatencyGrid signSendLatency = grid(SIGN_SEND, "gw.sign_send");
+    private final LatencyGrid answerLatency = grid(VENUE_ANSWER, "venue.answer");
     private final UnsafeBuffer buffer =
             new UnsafeBuffer(new byte[MessageHeaderEncoder.ENCODED_LENGTH + AdmissionRecordEncoder.BLOCK_LENGTH]);
     private final AdmissionRecordEncoder encoder = new AdmissionRecordEncoder();
@@ -103,10 +140,43 @@ public final class LaneAdmissions implements AccountLane.Admissions {
     private volatile long lastMinuteEndedNanos;
 
     public LaneAdmissions(final int accountId, final JournalRecorder journal, final LongSupplier nanoClock) {
+        this(accountId, journal, nanoClock, SampledEpochNanoClock.INSTANCE);
+    }
+
+    /** @param wallClock the minutes its latency histograms close on, read once per request told */
+    public LaneAdmissions(
+            final int accountId,
+            final JournalRecorder journal,
+            final LongSupplier nanoClock,
+            final EpochNanoClock wallClock) {
         this.accountId = accountId;
         this.journal = journal;
         this.nanoClock = nanoClock;
+        this.wallClock = wallClock;
         this.minuteEndsNanos = nanoClock.getAsLong() + MINUTE_NANOS;
+    }
+
+    @Override
+    public void taken(final RequestClass type, final long waitedNanos) {
+        record(this.queueLatency, type, waitedNanos);
+    }
+
+    @Override
+    public void sent(final RequestClass type, final long writeNanos) {
+        record(this.signSendLatency, type, writeNanos);
+    }
+
+    private void record(final LatencyGrid grid, final RequestClass type, final long nanos) {
+        grid.record(0, type.ordinal(), 0, nanos, this.wallClock.nanoTime());
+    }
+
+    /** The lane's latency histograms, by request class: written on the lane's thread only. */
+    public MinuteHistograms latency() {
+        return this.latency;
+    }
+
+    public int accountId() {
+        return this.accountId;
     }
 
     @Override
@@ -143,6 +213,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
             this.unanswered++;
             return;
         }
+        record(this.answerLatency, type, roundTripNanos);
         final long micros = TimeUnit.NANOSECONDS.toMicros(roundTripNanos);
         if (type == RequestClass.CANCEL) {
             this.cancelAnswers.record(micros);
@@ -173,6 +244,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
     private void count(final RequestClass type, final AdmissionAction action, final long queuedNanos) {
         switch (action) {
             case SENT -> {
+                record(this.budgetLatency, type, queuedNanos);
                 final long micros = TimeUnit.NANOSECONDS.toMicros(queuedNanos);
                 if (type == RequestClass.CANCEL) {
                     this.cancelWaits.record(micros);
@@ -189,19 +261,19 @@ public final class LaneAdmissions implements AccountLane.Admissions {
 
     private void endMinute(final long now) {
         this.lastCancels = this.cancelWaits.count();
-        this.lastCancelP99Micros = this.cancelWaits.percentileMicros(0.99);
-        this.lastCancelMaxMicros = this.cancelWaits.maxMicros();
+        this.lastCancelP99Micros = this.cancelWaits.percentile(0.99);
+        this.lastCancelMaxMicros = this.cancelWaits.max();
         this.lastOrders = this.orderWaits.count();
-        this.lastOrderP99Micros = this.orderWaits.percentileMicros(0.99);
-        this.lastOrderMaxMicros = this.orderWaits.maxMicros();
+        this.lastOrderP99Micros = this.orderWaits.percentile(0.99);
+        this.lastOrderMaxMicros = this.orderWaits.max();
         this.lastHeld = this.held;
         this.lastExpired = this.expired;
         this.lastExpiredWithoutConnection = this.expiredWithoutConnection;
         this.lastDropped = this.dropped;
-        this.lastOrderAnswerP50Micros = this.orderAnswers.percentileMicros(0.5);
-        this.lastOrderAnswerP99Micros = this.orderAnswers.percentileMicros(0.99);
-        this.lastCancelAnswerP50Micros = this.cancelAnswers.percentileMicros(0.5);
-        this.lastCancelAnswerP99Micros = this.cancelAnswers.percentileMicros(0.99);
+        this.lastOrderAnswerP50Micros = this.orderAnswers.percentile(0.5);
+        this.lastOrderAnswerP99Micros = this.orderAnswers.percentile(0.99);
+        this.lastCancelAnswerP50Micros = this.cancelAnswers.percentile(0.5);
+        this.lastCancelAnswerP99Micros = this.cancelAnswers.percentile(0.99);
         this.lastUnanswered = this.unanswered;
         this.lastConnectionsBusy = this.connectionsBusy;
         this.orderAnswers.reset();
@@ -259,6 +331,80 @@ public final class LaneAdmissions implements AccountLane.Admissions {
                 this.lastUnanswered,
                 this.lastConnectionsBusy,
                 sent);
+    }
+
+    // The last full minute's numbers as published, for LanesSampler: read without taking them, allocating nothing.
+    long lastMinuteEndedNanos() {
+        return this.lastMinuteEndedNanos;
+    }
+
+    long lastCancels() {
+        return this.lastCancels;
+    }
+
+    long lastCancelP99Micros() {
+        return this.lastCancelP99Micros;
+    }
+
+    long lastCancelMaxMicros() {
+        return this.lastCancelMaxMicros;
+    }
+
+    long lastOrders() {
+        return this.lastOrders;
+    }
+
+    long lastOrderP99Micros() {
+        return this.lastOrderP99Micros;
+    }
+
+    long lastOrderMaxMicros() {
+        return this.lastOrderMaxMicros;
+    }
+
+    long lastHeld() {
+        return this.lastHeld;
+    }
+
+    long lastExpired() {
+        return this.lastExpired;
+    }
+
+    long lastExpiredWithoutConnection() {
+        return this.lastExpiredWithoutConnection;
+    }
+
+    long lastDropped() {
+        return this.lastDropped;
+    }
+
+    long lastOrderAnswerP50Micros() {
+        return this.lastOrderAnswerP50Micros;
+    }
+
+    long lastOrderAnswerP99Micros() {
+        return this.lastOrderAnswerP99Micros;
+    }
+
+    long lastCancelAnswerP50Micros() {
+        return this.lastCancelAnswerP50Micros;
+    }
+
+    long lastCancelAnswerP99Micros() {
+        return this.lastCancelAnswerP99Micros;
+    }
+
+    long lastUnansweredCount() {
+        return this.lastUnanswered;
+    }
+
+    long lastConnectionsBusy() {
+        return this.lastConnectionsBusy;
+    }
+
+    /** Each session's sends in the last full minute; valid within the minute after it, as the lane then clears it. */
+    Long2LongHashMap lastSentBySlotMap() {
+        return this.lastSentBySlot;
     }
 
     /** Requests the venue never answered in the last full minute; 0 once that minute ended over two minutes ago. */

@@ -18,11 +18,12 @@ class ShardStatusWriterTest {
 
     private final StreamTestKit kit = new StreamTestKit();
     private final MarketDataCollectorAgent agent =
-            new MarketDataCollectorAgent(new NullLogger(), System::nanoTime, () -> 0L);
+            new MarketDataCollectorAgent(new NullLogger(), System::nanoTime, () -> 0L, null);
     private final StreamTransitions transitions = new StreamTransitions();
     private List<ShardStream> streams = List.of();
     private List<CollectorHeartbeat.Connection> connections = List.of();
     private String processLine;
+    private ShardErrors.Reading errors = new ShardErrors.Reading(0, 0, null, 0);
 
     private final ShardStatusWriter writer = new ShardStatusWriter(
             new NullLogger(),
@@ -49,6 +50,11 @@ class ShardStatusWriterTest {
                 public String processLine() {
                     return processLine;
                 }
+
+                @Override
+                public ShardErrors.Reading errors() {
+                    return errors;
+                }
             },
             transitions,
             () -> 99);
@@ -73,6 +79,19 @@ class ShardStatusWriterTest {
         assertEquals(7, status.get("applied_generation").asLong());
         assertEquals("process", status.get("process").get("kind").asText());
         assertEquals("collection/shards/use1-r-1/status/task-9.json", ShardStatusWriter.keyFor("use1-r-1", "task-9"));
+    }
+
+    @Test
+    void reportsItsUnexpectedErrors() throws Exception {
+        assertTrue(status().get("errors").get("latest").isNull(), "none yet");
+
+        errors = new ShardErrors.Reading(12, 3, "Shard tick failed: \"x\"", 77);
+        JsonNode reported = status().get("errors");
+
+        assertEquals(12, reported.get("total").asLong());
+        assertEquals(3, reported.get("last_hour").asInt());
+        assertEquals("Shard tick failed: \"x\"", reported.get("latest").asText());
+        assertEquals(77, reported.get("latest_at_ns").asLong());
     }
 
     @Test

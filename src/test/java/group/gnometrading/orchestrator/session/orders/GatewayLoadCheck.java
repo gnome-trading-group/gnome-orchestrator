@@ -5,11 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.ratelimit.RequestClass;
+import group.gnometrading.latency.LatencyHistogram;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.gateway.GatewayFixture;
 import group.gnometrading.orchestrator.gateway.SyntheticVenue;
-import group.gnometrading.orchestrator.runtime.LatencyHistogram;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.gateway.AdmissionAction;
 import java.nio.file.Path;
@@ -168,8 +168,8 @@ class GatewayLoadCheck {
                     orderRate,
                     requestRate,
                     venue.refusals(),
-                    cancelWaits.percentileMicros(0.99),
-                    cancelWaits.maxMicros(),
+                    cancelWaits.percentile(0.99),
+                    cancelWaits.max(),
                     cancelWaits.count(),
                     100 * worst,
                     venue.missed().size(),
@@ -184,7 +184,7 @@ class GatewayLoadCheck {
                     ? 5_000
                     : (long) (1_000_000 / (model.perSecond() * SHARE)) + 5_000;
             assertTrue(
-                    cancelWaits.percentileMicros(0.99) < cancelBoundMicros,
+                    cancelWaits.percentile(0.99) < cancelBoundMicros,
                     "cancels waited under " + cancelBoundMicros + " us at p99");
             assertTrue(!venue.missed().isEmpty(), "the socket's outage missed events for catch-up to find");
             assertEquals(venue.fillsPushed(), fills(load), "every fill reached its session once");

@@ -4,13 +4,13 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
-import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.md.StreamDirectory;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.http.HTTPClientBuilder;
 import group.gnometrading.networking.http.RetryableHTTPClient;
@@ -44,6 +44,7 @@ import group.gnometrading.orchestrator.session.lifecycle.SessionFatalHandler;
 import group.gnometrading.orchestrator.session.lifecycle.SessionReports;
 import group.gnometrading.orchestrator.session.lifecycle.SessionStatusReporter;
 import group.gnometrading.orchestrator.session.marketdata.SessionMarketData;
+import group.gnometrading.orchestrator.session.orders.GatewayClient;
 import group.gnometrading.orchestrator.session.orders.SessionOrders;
 import group.gnometrading.orchestrator.session.recovery.SessionNotRunnableException;
 import group.gnometrading.orchestrator.session.recovery.StartupRecovery;
@@ -67,6 +68,7 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.status.CountersReader;
 
 /**
  * A live or paper trading session: its market data from shards, the OMS, the strategy and each listing's order entry,
@@ -177,6 +179,7 @@ public class SessionOrchestrator extends Orchestrator {
         List<Listing> listings = resolveListings(properties, securityMaster);
         int[] dataStreams = SessionMarketData.dataStreams(properties);
         StreamDirectory streams = SessionMarketData.streams(securityMaster, listings, dataStreams);
+        SessionLatency latency = SessionLatency.over(listings);
         ListingDirectory listingDirectory = RiskModule.directory(listings);
         RiskEngine riskEngine = RiskModule.riskEngine(properties, listingDirectory);
         AgentRuntimeInstaller.install(properties, logger);
@@ -224,7 +227,8 @@ public class SessionOrchestrator extends Orchestrator {
         Map<Integer, VenueOrderQuery> venueQueries = new HashMap<>();
         this.orders = new SessionOrders(
                 logger, properties, nanoClock, () -> getInstance(RegistryConnection.class), this.aeron);
-        GnomeAgent client = orders.wire(listings, buffers.orders(), buffers.omsExecReports(), venueQueries);
+        GatewayClient client = orders.wire(listings, buffers.orders(), buffers.omsExecReports(), venueQueries);
+        latency.measure(client);
         // Before recovery: a live session asks the venue through its gateways, which must have welcomed it first.
         GnomeAgentRunner orderEntry = SessionAgents.startOrderEntry(client, errorHandler);
         this.orderEntry = orderEntry;
@@ -238,6 +242,7 @@ public class SessionOrchestrator extends Orchestrator {
                 buffers.strategyExecReports(),
                 priceWriter,
                 nanoClock);
+        latency.measure(omsAgent);
         StrategyAgent strategy = SessionStrategy.create(
                 properties,
                 strategyId,
@@ -247,6 +252,7 @@ public class SessionOrchestrator extends Orchestrator {
                 positionView,
                 securityMaster);
         strategy.configureStreams(streams);
+        latency.measure(strategy);
         strategy.configureExit(listings, sessionExit(logger, properties, strategyId, listings));
         // The journal is already draining this buffer, so declaring streams here can't wait on a full ring.
         strategy.configureMetrics(new JournaledMetricRecorder(buffers.metrics()));
@@ -302,6 +308,8 @@ public class SessionOrchestrator extends Orchestrator {
                     priceSlotRegistry,
                     riskEngine,
                     this.orders == null ? List.of() : this.orders.gatewayLinks(),
+                    sampleSources(
+                            properties, latency, positionTracker, buffers, strategy, omsAgent, client, ledgerAgent),
                     bodyBytes -> registryWriterConnection(registryWriterClient().withWriteBufferSize(bodyBytes)),
                     logger,
                     errorHandler);
@@ -312,6 +320,37 @@ public class SessionOrchestrator extends Orchestrator {
     }
 
     // Both lines are the only evidence an operator stop shut down cleanly rather than being cut off at the timeout.
+    private SessionSampleSources sampleSources(
+            Properties properties,
+            SessionLatency latency,
+            DefaultPositionTracker positionTracker,
+            SessionBuffers buffers,
+            StrategyAgent strategy,
+            OmsAgent omsAgent,
+            GatewayClient client,
+            LedgerAgent ledgerAgent) {
+        final List<String> names = new ArrayList<>(List.of("strategy", "oms", "orders"));
+        final List<MetricCounters> counters =
+                new ArrayList<>(List.of(strategy.activity(), omsAgent.activity(), client.activity()));
+        if (ledgerAgent != null) {
+            names.add("ledger");
+            counters.add(ledgerAgent.activity());
+        }
+        return new SessionSampleSources(
+                latency,
+                positionTracker.createPositionView(properties.getIntProperty("strategy.id")),
+                buffers,
+                names,
+                counters,
+                aeronCounters(),
+                properties.getLongProperty("samples.runtime.interval.ms"));
+    }
+
+    /** The session's media driver's counters, for the runtime sample; null without Aeron. */
+    private CountersReader aeronCounters() {
+        return this.aeron == null ? null : this.aeron.aeron().countersReader();
+    }
+
     /** The session's Aeron runtime, shared by its market data and its order-gateway link, and its market data on it. */
     private ShardMarketData startAeron(
             Logger logger,

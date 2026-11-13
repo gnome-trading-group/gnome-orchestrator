@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.account.SessionAccounts;
-import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
@@ -86,7 +85,7 @@ public final class SessionOrders {
      *
      * @return the client, to run on its own thread
      */
-    public GnomeAgent wire(
+    public GatewayClient wire(
             List<Listing> listings,
             SequencedRingBuffer<Intent> orderOutboundBuffer,
             SequencedRingBuffer<OrderExecutionReport> omsExecReportBuffer,

@@ -10,9 +10,11 @@ import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.gateways.ratelimit.AccountBudget;
 import group.gnometrading.gateways.ratelimit.VenueRateLimits;
+import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.md.Stream;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
 import group.gnometrading.orchestrator.gateway.core.CrossKey;
 import group.gnometrading.sequencer.SequencedRingBuffer;
@@ -179,6 +181,23 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
 
     public ManyToOneRingBuffer<AccountReport> reports() {
         return this.reports;
+    }
+
+    /** The lane's loop counts, for the gateway's samples. */
+    public MetricCounters laneCounters() {
+        return this.lane.counters();
+    }
+
+    /** The lane's latency histograms, sample kind {@link #LATENCY_KIND}. */
+    public MinuteHistograms laneLatency() {
+        return this.lane.latency();
+    }
+
+    public static final String LATENCY_KIND = SimulatedLane.LATENCY_KIND;
+
+    /** The lane's runner once started, for the gateway's thread samples; null before. */
+    public GnomeAgentRunner runner() {
+        return this.runner;
     }
 
     /** Passes the lane has made, for the watchdog: still counting means it isn't stuck. */

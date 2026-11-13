@@ -61,6 +61,7 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.fee.FeeTimeline;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import java.nio.file.Path;
@@ -224,6 +225,7 @@ class GatewayControlTest {
                 new GatewayRejects(this.rejectRing, new SystemEpochNanoClock()),
                 this.toControl,
                 System::nanoTime,
+                SampledEpochNanoClock.INSTANCE,
                 JournalRecorder.NONE,
                 this.cross,
                 Kills.none());

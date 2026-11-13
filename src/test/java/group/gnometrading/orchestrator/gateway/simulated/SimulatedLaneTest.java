@@ -10,6 +10,8 @@ import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.ratelimit.AccountBudget;
 import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.gateways.ratelimit.VenueRateLimits;
+import group.gnometrading.latency.MinuteHistograms;
+import group.gnometrading.latency.MinuteSummary;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.OrderStatus;
@@ -53,7 +55,7 @@ class SimulatedLaneTest {
     private final AtomicLong nanos = new AtomicLong(TimeUnit.SECONDS.toNanos(1_000));
     private final AtomicLong wallNanos = new AtomicLong(TimeUnit.SECONDS.toNanos(1_700_000_000));
     private final SequencedRingBuffer<Mbp10Schema> marketData =
-            new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence(), 1024);
+            new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence(), 1024, this.wallNanos::get);
     private final ManyToOneRingBuffer<LaneCommand> commands =
             new ManyToOneRingBuffer<>(LaneCommand[]::new, LaneCommand::new, 64);
     private final ManyToOneRingBuffer<AccountReport> reports =
@@ -154,6 +156,10 @@ class SimulatedLaneTest {
     /** A book record the venue's feed received at {@code recvNanos} (wall clock). */
     private void bookReceivedAt(
             final long recvNanos, final long bid, final long bidSize, final long ask, final long askSize) {
+        publish(bookRecord(bid, bidSize, ask, askSize), false, recvNanos);
+    }
+
+    private static Mbp10Schema bookRecord(final long bid, final long bidSize, final long ask, final long askSize) {
         final Mbp10Schema record = new Mbp10Schema();
         record.encoder.action(Action.Add);
         record.encoder.side(group.gnometrading.schemas.book.Side.None);
@@ -161,7 +167,7 @@ class SimulatedLaneTest {
         record.encoder.size(Mbp10Decoder.sizeNullValue());
         record.encoder.bidPrice0(bid).bidSize0(bidSize).askPrice0(ask).askSize0(askSize);
         emptyBelowTop(record);
-        publish(record, false, recvNanos);
+        return record;
     }
 
     private void trade(
@@ -195,12 +201,17 @@ class SimulatedLaneTest {
     }
 
     private void publish(final Mbp10Schema record, final boolean bad, final long recvNanos) {
+        enqueue(record, bad, recvNanos);
+        pass();
+    }
+
+    /** Into the reader's ring, stamped with the wall clock now, without the lane taking it yet. */
+    private void enqueue(final Mbp10Schema record, final boolean bad, final long recvNanos) {
         final int header = SbeMessage.HEADER_LENGTH;
         record.buffer.putInt(header + StreamHeader.STREAM_ID_OFFSET, STREAM);
         record.buffer.putLong(header + StreamHeader.TIMESTAMP_RECV_OFFSET, recvNanos);
         record.buffer.putByte(header + StreamHeader.FLAGS_OFFSET, (byte) (bad ? 1 << StreamHeader.BAD_DATA_BIT : 0));
         this.marketData.publishRaw(record.buffer, Mbp10Decoder.TEMPLATE_ID, record.totalMessageSize());
-        pass();
     }
 
     private List<Heard> of(final long slot, final ExecType type) {
@@ -235,6 +246,28 @@ class SimulatedLaneTest {
 
         bookReceivedAt(this.wallNanos.get() - TimeUnit.MILLISECONDS.toNanos(3), 100 * P, 12 * S, 102 * P, 10 * S);
         assertEquals(TimeUnit.MILLISECONDS.toNanos(3), this.lane.takeLagMaxNanos(), "a new record's age counts");
+    }
+
+    @Test
+    void eachRecordsWaitAfterTheReaderAndItsWholeLagGoIntoTheMinutesHistograms() {
+        join(A, "session-a", null);
+        bookReceivedAt(this.wallNanos.get() - TimeUnit.MILLISECONDS.toNanos(10), 100 * P, 10 * S, 102 * P, 10 * S);
+        final long received = this.wallNanos.get() - TimeUnit.MILLISECONDS.toNanos(3);
+        enqueue(bookRecord(100 * P, 12 * S, 102 * P, 10 * S), false, received);
+        this.wallNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(2));
+        pass();
+
+        final MinuteHistograms latency = this.lane.latency();
+        latency.roll(this.wallNanos.get() + MinuteHistograms.MINUTE_NANOS);
+        final MinuteSummary minute = new MinuteSummary(latency.capacity());
+        assertTrue(latency.summarize(minute));
+        assertEquals("paper.queue", latency.label(0).metric());
+        assertEquals(2, minute.count(0), "every record's wait after the reader");
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(2), minute.max(0));
+        assertEquals("paper.lag", latency.label(2).metric());
+        assertEquals(1, minute.count(2), "only the record new to its stream");
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(5), minute.max(2), "from the venue's receipt");
+        assertEquals(2, this.lane.counters().get(2), "records counted");
     }
 
     @Test

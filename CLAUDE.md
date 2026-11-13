@@ -110,7 +110,7 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   publication has no room for (one venue message can carry hundreds of fills, past the 128 KB window) waits in the
   ring, with the stream's later records, for the next pass; one the ring laps first is dropped and counted, and
   sessions see the count),
-  `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler), `ShardIdentity`, `ShardAccounts`,
+  `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler), `ShardErrors` (the shard's logger, counting `UNKNOWN_ERROR`s for the status), `ShardIdentity`, `ShardAccounts`,
   `CollectorHealth`.
 - `shard/feeds/` - `FeedVenues` (per `md.source.adapter`: the venue's `FEED` from gnome-gateways `venues/`, and its
   protocol built with the credentials this process loads, and its REST probe), `FeedSources` (adds a registry source,
@@ -156,7 +156,20 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     orders (lane `CANCEL_SESSION`) and asks it to hello again, evicts a session that sends something unreadable
     (refused 5 min), keeps the state (STARTING/READY/DEGRADED) and writes `order-gateway#<key>` to `service-endpoints`
     every 15 s and at once on a change of state (sessions link only to one it calls READY or DEGRADED). Once a minute
-    `GatewayMinutes` writes its last hour beside it, as JSON in `order-gateway#<key>#minutes` (10-minute TTL; none for
+    `GatewayMinutes` writes its last hour beside it (alongside samples, subject `gateway`, its key: `GatewaySamples`,
+    posted every 30 s; `runtime` for every thread, and for a paper gateway each minute `gateway.agents` (lane and
+    shard reader loops), `gateway.rings` (reader to lane), `feed.shards` (`marketdata/FeedSampler`: per shard read,
+    records and peak network / in-shard times and status gaps; the streams furthest behind) and `latency.feed`
+    (`feed.network`, arrival minus the shard's send stamp; `feed.shard_wait`) / `latency.paper` (`paper.queue`,
+    reader to books; `paper.lag`, venue receipt to books, as the minute line's lag); and for every gateway, the order
+    path: each minute `gateway.transport` (ingress orders/cancels/amends/heartbeats/unreadable, refusals by
+    `RejectReason`, egress reports taken and sent, back-pressured sends) and `gateway.drops` (`DropsSampler`, the drops
+    log line's numbers and the self-trade check's), `gateway.lanes` per account as its lane minute closes
+    (`accounts/LanesSampler`, the minute document's numbers, read without taking them), and latency:
+    `latency.gateway.ingress` (`gw.transit`, ingress minus the session OMS's `timestampSend`, by action),
+    `latency.gateway.egress` (`gw.report_out`, a report's send minus its `timestampRecv`) and `latency.lane.<accountId>`
+    (`LaneAdmissions`, by request class: `gw.queue` on the lane's ring from ingress's `LaneCommand.enqueuedNanos`,
+    `gw.budget_wait`, `gw.sign_send`, `venue.answer`); a paper lane's `gw.queue` is in `latency.paper`), as JSON in `order-gateway#<key>#minutes` (10-minute TTL; none for
     a local run): per account each minute's sends, budget waits, holds and refusals, the venue's answer times, 429s and
     unanswered requests (`LaneAdmissions.minute`), and the last minute's sends per session slot (counted on the lane in
     presized maps, so nothing allocates there); for a paper gateway, its simulated venue's minutes. The registry's
@@ -269,7 +282,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   silently rather than losing its image; a fixed receive port can't serve two shards).
 - `runtime/` - what every process runs on: `AgentRuntimeInstaller` (latency profile / CPU pinning), `ProcessExit`,
   `GatewayErrorHandler`, `GatewayRunners` (order gateways), `GatewayHealth`, `HealthCheckServer`, `DaemonThreads`,
-  `AgentUtils`, `LatencyHistogram`, `SchedulingLatencyProbe`, `ClockReadings` (the host clock's source and error
+  `AgentUtils`, `SchedulingLatencyProbe`, `RuntimeSampler`, `RingSampler`, `LatencySampler` (a process's
+  `MinuteHistograms` as `latency.*` samples, no journal), `SamplePoster` + `SamplesApi` (gateways' and shards' samples,
+  below), `ClockReadings` (the host clock's source and error
   bound from `/run/gnome/clock.status`, read in place without allocating; in the session heartbeat's `clock`, the
   shard's process line and the gateway's minutes).
 - `credentials/` - venue keys as stored in Secrets Manager (`KalshiCredentials`, `PolymarketIntlCredentials`,
@@ -393,7 +408,21 @@ earlier sessions). A session already stopped before startup exits 0 without repo
   `priceUnchangedMs` and `marketDataBadMs` (how long its book has been flagged bad data, the OMS refusing new orders;
   0 trusted), ledger, market data `reconnecting`/`resyncsLast5m`, each order gateway link's `linked`/`unlinkedMs`/
   `workingOrders`, risk, host CPU/mem/disk, `clock` (source `PHC`/`NTP`/`UNSYNCED`/`UNKNOWN`, `errorBoundNanos`,
-  `offsetNanos`, `ageMs`), journal backlog). Stops once the registry says the session ended.
+  `offsetNanos`, `ageMs`), journal backlog, `sampleBuffer` {pending, dropped}). Stops once the registry says the session
+  ended.
+- Samples: the heartbeat also carries the session's `samples` (`[{kind, tsMs, data}]`, a 256 KB `SampleBuffer` from
+  gnome-core, kept until a post carrying them is accepted; the oldest dropped and counted when full; last in the body,
+  capped at 60 KB in all). The registry stores them apart from the health (gnome-registry `ops.sample`, 7 days;
+  gnomepy `load_session_samples`). Taken on the heartbeat thread, never an agent's:
+  `runtime` every `samples.runtime.interval.ms` (`runtime/RuntimeSampler`: host, JVM GC, clock, each agent's loop
+  passes and CPU, a 1 ms scheduling probe, the Aeron driver's system counters); once a minute `session.activity`
+  (gnome-core `CounterSampler` over the strategy's, OMS's, order entry's and ledger agent's `MetricCounters`: counts as
+  changes, gauges, peaks), `session.rings` (`runtime/RingSampler`: each ring's published events, backlog and worst
+  backlog, full-ring waits), `session.positions`, `session.ledger`, `session.gateways`, `session.marketdata` (per
+  stream: records, bytes, resyncs, re-sends dropped) and `session.journal` (`SessionStateSampler`), and
+  `latency.strategy|oms|orders` as each thread's minute closes (`LatencyReport`, which also journals `_latency`).
+  Agents only bump counters they own (release stores, no allocation); everything else happens on the heartbeat
+  thread.
 - Clock: every host (the AMI's `clock` component; shard and gateway hosts' user data) runs gnome-shared-cdk's host
   clock: `gnome-clock-setup` switches chrony to the Nitro hardware clock (PHC, ~20 µs) when the instance is in its
   region's precision-time placement group (platform network, gnome-shared-infra), otherwise leaves it on Amazon Time
@@ -421,10 +450,21 @@ earlier sessions). A session already stopped before startup exits 0 without repo
   - Every 15 s, after the heartbeat, the shard overwrites its status at
     `s3://<STATUS_BUCKET>/collection/shards/<shard>/status/<task>.json` (gnome-market-data-metadata-<stage>): task
     id, private IP, version, applied generation, the heartbeat's process line, connections, every stream's state and
-    timestamps, and the latest 256 state changes.
+    timestamps, the latest 256 state changes, and `errors`: what it logged as `UNKNOWN_ERROR` (`total`, `last_hour`,
+    `latest` line and `latest_at_ns`). Anything a shard handles by itself (a venue closing a socket, a resync) is
+    logged otherwise, so these are the unexpected ones; the reconciler raises `SHARD_ERRORS` on them.
   - `/health` on :8080 fails when the agent stops cycling for 30 s or an upload hangs 5 min, and ECS replaces the
     task. A failing market is quarantined and retried, a failing connection keeps retrying; neither stops the process.
   - Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`.
+  - Samples (subject `shard`, its id; `SamplePoster` on thread `shard-samples`, posted every 30 s to
+    `samples.api.url` with the registry key; none without a key): `runtime`, and each minute `shard.agents` (collector
+    and publisher passes, worst gap between passes), `shard.streams` (`ShardSampler`: states, connections, and summed
+    over streams since the last sample offered/held/lapped/re-sent, records, ring-full waits (a venue reader held
+    back), worst collector backlog, the 10 streams that waited longest and the 10 held most), and
+    `latency.shard.collector` (`shard.venue_to_recv`, receipt minus the venue's event time) /
+    `latency.shard.publisher` (`shard.wait`, send minus receipt: the time a record spent in the shard, held records
+    included) (`ShardLatency`). Each record sent carries the publisher's pass wall clock in its Aeron frame's reserved
+    value (`AeronReservedValues.sentNanos`; `RESENT` re-sends carry none), so readers can split network from shard.
   - No registry heartbeat: `HEARTBEAT` log lines every 15 s (process, connection, and a stream only when its state
     changed; a `publish` line when a stream held or dropped records for sessions since the last: `held` counts offers
     a full publication refused and retried (a burst, nothing lost), `lapped` the records lost because the ring went

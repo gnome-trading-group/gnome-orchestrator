@@ -3,6 +3,7 @@ package group.gnometrading.orchestrator.marketdata;
 import group.gnometrading.schemas.MessageHeaderDecoder;
 import group.gnometrading.schemas.ShardStatusDecoder;
 import io.aeron.Subscription;
+import java.util.concurrent.atomic.AtomicLong;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.Int2ObjectHashMap;
 
@@ -19,6 +20,12 @@ final class ShardLink {
     final long tag;
     final Subscription status;
     volatile boolean retired;
+
+    // Written by the ingress thread, when its process measures (FeedMetrics); the sampler takes the peaks.
+    private final AtomicLong records = new AtomicLong();
+    private final AtomicLong networkPeakNanos = new AtomicLong();
+    private final AtomicLong shardWaitPeakNanos = new AtomicLong();
+    private final AtomicLong statusGapPeakNanos = new AtomicLong();
 
     // Ingress thread only.
     long lastStatusNanos;
@@ -55,6 +62,9 @@ final class ShardLink {
         }
         statusDecoder.wrap(
                 buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version());
+        if (statusSeen) {
+            peak(statusGapPeakNanos, now - lastStatusNanos);
+        }
         lastStatusNanos = now;
         statusSeen = true;
         final ShardStatusDecoder.StreamsDecoder streams = statusDecoder.streams();
@@ -74,4 +84,45 @@ final class ShardLink {
                     streams.reconnecting() != 0 && !feed.cleanAfter(feed.statusSessionId, feed.statusPosition);
         }
     }
+
+    void received() {
+        records.lazySet(records.get() + 1);
+    }
+
+    void network(final long nanos) {
+        peak(networkPeakNanos, nanos);
+    }
+
+    void shardWait(final long nanos) {
+        peak(shardWaitPeakNanos, nanos);
+    }
+
+    private static void peak(final AtomicLong peak, final long value) {
+        if (value > peak.get()) {
+            peak.lazySet(value);
+        }
+    }
+
+    /** Records read from this shard since it was linked. Any thread. */
+    long records() {
+        return records.get();
+    }
+
+    /** The longest network time since the last call, then 0. The sampler only. */
+    long takeNetworkPeakNanos() {
+        return networkPeakNanos.getAndSet(0);
+    }
+
+    /** The longest in-shard time since the last call, then 0. The sampler only. */
+    long takeShardWaitPeakNanos() {
+        return shardWaitPeakNanos.getAndSet(0);
+    }
+
+    /** The longest gap between two of its statuses since the last call, then 0: a shard too busy to send them. */
+    long takeStatusGapPeakNanos() {
+        return statusGapPeakNanos.getAndSet(0);
+    }
+
+    // The sampler's own: the record count it last read.
+    long sampledRecords;
 }

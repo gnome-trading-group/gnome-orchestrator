@@ -58,9 +58,20 @@ final class StreamTestKit {
 
     /** A stream the publisher agent also reads, as a shard builds them. */
     ShardStream publishingStream(final int streamId) {
+        return publishingStream(streamId, null);
+    }
+
+    /** As {@link #publishingStream(int)}, recording its delays into {@code latency}. */
+    ShardStream publishingStream(final int streamId, final ShardLatency latency) {
         final MarketDataCollector collector = collector(streamId);
         return new ShardStream(
-                streamId, "stream " + streamId, ring(), collector, new StreamRecordEventAdapter(collector), true);
+                streamId,
+                "stream " + streamId,
+                ring(),
+                collector,
+                new StreamRecordEventAdapter(collector),
+                true,
+                latency);
     }
 
     private static SequencedRingBuffer<Mbp10Schema> ring() {

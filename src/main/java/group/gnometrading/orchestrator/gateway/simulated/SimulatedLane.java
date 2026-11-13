@@ -10,6 +10,9 @@ import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.ratelimit.RequestClass;
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.latency.MinuteHistograms;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.Mbp10Schema;
@@ -85,6 +88,39 @@ final class SimulatedLane implements GnomeAgent {
     private volatile long refusedNotReady;
     private volatile long lagMaxNanos;
 
+    // Measured on the lane's thread for a sampler on another: a record's wait between the shard reader and the books
+    // (paper.queue: from the reader's ring stamp), and its whole lag from the venue's receipt (paper.lag, records new
+    // to their stream only, as lagMaxNanos), in nanoseconds on this host's wall clock.
+    private final MinuteHistograms latency = new MinuteHistograms(3 * LatencyGrid.size(0, 1, 1));
+    private final LatencyGrid queueLatency =
+            new LatencyGrid(latency, QUEUE, "paper.queue", NO_EXCHANGES, NO_NAMES, NO_LABEL, NO_LABEL);
+    // A session's order, cancel or amend on the lane's ring, from ingress putting it there: as a live lane's gw.queue.
+    private final LatencyGrid commandLatency =
+            new LatencyGrid(latency, COMMAND_QUEUE, "gw.queue", NO_EXCHANGES, NO_NAMES, NO_LABEL, NO_LABEL);
+    private final LatencyGrid lagLatency =
+            new LatencyGrid(latency, LAG, "paper.lag", NO_EXCHANGES, NO_NAMES, NO_LABEL, NO_LABEL);
+    private final MetricCounters counters = new MetricCounters(8);
+    private final int passCount = counters.counter("passes");
+    private final int passGapPeakNanos = counters.peak("passGapPeakNanos");
+    private final int records = counters.counter("records");
+    private final int recordsPerPassPeak = counters.peak("recordsPerPassPeak");
+    private final int busyBooksPeak = counters.peak("busyBooksPeak");
+    private final int commandsTakenCount = counters.counter("commands");
+    private final int reportsSent = counters.counter("reports");
+    private final int sessionCount = counters.gauge("sessions");
+    private long lastPassNanos;
+
+    /** Metric codes of its latency (never reused: sessions' are below 100, shards' 100s, the feed's 201-202). */
+    static final int QUEUE = 203;
+
+    static final int LAG = 204;
+    // The live lanes' gw.queue code: the same measure.
+    static final int COMMAND_QUEUE = 205;
+    static final String LATENCY_KIND = "latency.paper";
+    private static final int[] NO_EXCHANGES = {};
+    private static final String[] NO_NAMES = {};
+    private static final String[] NO_LABEL = {""};
+
     SimulatedLane(
             final ManyToOneRingBuffer<LaneCommand> commands,
             final ManyToOneRingBuffer<AccountReport> reports,
@@ -138,7 +174,8 @@ final class SimulatedLane implements GnomeAgent {
             this.admission.expireDue();
             work += admit();
         }
-        work += this.marketData.poll(RECORDS_PER_PASS);
+        final int polled = this.marketData.poll(RECORDS_PER_PASS);
+        work += polled;
         // Backwards, so the book a rest moves into this slot has already been worked this pass.
         for (int i = this.busy.size() - 1; i >= 0; i--) {
             final SimulatedBook book = this.busy.get(i);
@@ -148,7 +185,32 @@ final class SimulatedLane implements GnomeAgent {
             }
         }
         this.passes = this.passes + 1;
+        count(polled);
         return work;
+    }
+
+    private void count(final int polled) {
+        this.counters.increment(this.passCount);
+        if (this.lastPassNanos != 0) {
+            this.counters.max(this.passGapPeakNanos, this.now - this.lastPassNanos);
+        }
+        this.lastPassNanos = this.now;
+        this.counters.add(this.records, polled);
+        this.counters.max(this.recordsPerPassPeak, polled);
+        this.counters.max(this.busyBooksPeak, this.busy.size());
+        this.counters.add(this.commandsTakenCount, this.commandsTaken);
+        this.counters.set(this.sessionCount, this.sessions.size());
+        this.latency.roll(this.wallNow);
+    }
+
+    /** What its loop did: written on its thread only. */
+    MetricCounters counters() {
+        return this.counters;
+    }
+
+    /** Its latency histograms, kind {@link #LATENCY_KIND}: written on its thread only. */
+    MinuteHistograms latency() {
+        return this.latency;
     }
 
     int workingOrders() {
@@ -232,6 +294,9 @@ final class SimulatedLane implements GnomeAgent {
 
     private void onCommand(final LaneCommand command) {
         this.commandsTaken++;
+        if (command.enqueuedNanos != 0) {
+            this.commandLatency.record(0, 0, 0, this.now - command.enqueuedNanos, this.wallNow);
+        }
         switch (command.kind) {
             case LaneCommand.SESSION -> {
                 this.admission.configure(command.sessionSlot, command.weight, command.maxQueueNanos);
@@ -436,13 +501,17 @@ final class SimulatedLane implements GnomeAgent {
         if (onStream == null) {
             return;
         }
+        this.queueLatency.record(0, 0, 0, this.wallNow - this.marketData.timestampNanos(), this.wallNow);
         final long recv = this.record.getRecvTimestamp();
         final long newest = this.lastRecvByStream.get(this.record.streamId());
         if (newest == NO_RECORD || recv > newest) {
             this.lastRecvByStream.put(this.record.streamId(), recv);
             final long lag = this.wallNow - recv;
-            if (newest != NO_RECORD && lag > this.lagMaxNanos) {
-                this.lagMaxNanos = lag;
+            if (newest != NO_RECORD) {
+                this.lagLatency.record(0, 0, 0, lag, this.wallNow);
+                if (lag > this.lagMaxNanos) {
+                    this.lagMaxNanos = lag;
+                }
             }
         }
         for (int i = 0; i < onStream.size(); i++) {
@@ -476,6 +545,7 @@ final class SimulatedLane implements GnomeAgent {
         }
         SimulatedBook.copy(this.reports.indexAt(index), slot, report);
         this.reports.commit(index);
+        this.counters.increment(this.reportsSent);
         final OrderStatus status = report.decoder.orderStatus();
         if (status == OrderStatus.FILLED
                 || status == OrderStatus.CANCELED && report.decoder.execType() != ExecType.CANCEL_REJECT

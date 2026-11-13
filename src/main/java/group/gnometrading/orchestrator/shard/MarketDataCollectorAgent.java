@@ -3,6 +3,7 @@ package group.gnometrading.orchestrator.shard;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.utils.CauseChain;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,6 +35,12 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
     private final Logger logger;
     private final LongSupplier nanoTime;
     private final LongSupplier wallNanos;
+    private final ShardLatency latency;
+    private final MetricCounters counters = new MetricCounters(3);
+    private final int passes = counters.counter("passes");
+    private final int passGapPeakNanos = counters.peak("passGapPeakNanos");
+    private final int streamsRead = counters.gauge("streams");
+    private long lastPassNanos;
     private long nextExpireNanos;
     private final ConcurrentLinkedQueue<Object> commands = new ConcurrentLinkedQueue<>();
     private final List<ShardStream> streams = new ArrayList<>();
@@ -42,11 +49,17 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
     /**
      * @param nanoTime a monotonic clock, for timing
      * @param wallNanos epoch nanoseconds, for which minutes have ended
+     * @param latency whose collector minutes it closes when no record does; null for none
      */
-    MarketDataCollectorAgent(final Logger logger, final LongSupplier nanoTime, final LongSupplier wallNanos) {
+    MarketDataCollectorAgent(
+            final Logger logger,
+            final LongSupplier nanoTime,
+            final LongSupplier wallNanos,
+            final ShardLatency latency) {
         this.logger = logger;
         this.nanoTime = nanoTime;
         this.wallNanos = wallNanos;
+        this.latency = latency;
     }
 
     /** From any thread: starts draining the stream. */
@@ -71,6 +84,11 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
             }
         }
         final long now = nanoTime.getAsLong();
+        counters.increment(passes);
+        if (lastPassNanos != 0) {
+            counters.max(passGapPeakNanos, now - lastPassNanos);
+        }
+        lastPassNanos = now;
         int work = 0;
         for (int i = 0; i < streams.size(); i++) {
             work += streams.get(i).poll(now);
@@ -97,6 +115,10 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
         }
         nextExpireNanos = now + EXPIRE_EVERY_NANOS;
         final long wall = wallNanos.getAsLong();
+        counters.set(streamsRead, streams.size());
+        if (latency != null) {
+            latency.rollCollector(wall);
+        }
         for (int i = 0; i < streams.size(); i++) {
             streams.get(i).expire(wall);
         }
@@ -108,6 +130,11 @@ public final class MarketDataCollectorAgent implements GnomeAgent {
         } catch (Throwable error) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to flush %s: %s", stream.name(), CauseChain.of(error));
         }
+    }
+
+    /** Its loop's passes and the longest gap between two: written on its thread only. */
+    MetricCounters counters() {
+        return counters;
     }
 
     @Override

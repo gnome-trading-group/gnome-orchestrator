@@ -124,7 +124,7 @@ class ShardRuntimeTest {
     // The runtime's clock starts at 0 in these tests; the agent's must agree, or a failure looks hours old and its
     // connection due a roll.
     private final MarketDataCollectorAgent agent =
-            new MarketDataCollectorAgent(new NullLogger(), () -> 1_000, () -> 0L);
+            new MarketDataCollectorAgent(new NullLogger(), () -> 1_000, () -> 0L, null);
     private boolean failNextCollector;
     // The next connection the feeds open throws, as when its credentials can't be loaded.
     private boolean failNextOpen;

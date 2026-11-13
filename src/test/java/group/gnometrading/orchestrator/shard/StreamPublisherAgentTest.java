@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.MessageHeaderDecoder;
 import group.gnometrading.schemas.ShardStatusDecoder;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import io.aeron.Publication;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,6 +22,7 @@ class StreamPublisherAgentTest {
     private static final class Recording implements StreamPublication {
         final List<byte[]> offers = new ArrayList<>();
         final List<Boolean> resent = new ArrayList<>();
+        final List<Long> stamps = new ArrayList<>();
         long result = 1;
         long position = 4_096;
         // Answers these first, then {@link #result}: an end-of-term rotation, say.
@@ -28,6 +30,12 @@ class StreamPublisherAgentTest {
 
         @Override
         public long offer(final DirectBuffer buffer, final int offset, final int length) {
+            return record(buffer, offset, length, false);
+        }
+
+        @Override
+        public long offer(final DirectBuffer buffer, final int offset, final int length, final long sentNanos) {
+            stamps.add(sentNanos);
             return record(buffer, offset, length, false);
         }
 
@@ -61,7 +69,7 @@ class StreamPublisherAgentTest {
     private final StreamTestKit kit = new StreamTestKit();
     private final Recording status = new Recording();
     private long now = 10 * SECOND;
-    private final StreamPublisherAgent agent = new StreamPublisherAgent(status, () -> 7, () -> now, () -> 99);
+    private final StreamPublisherAgent agent = new StreamPublisherAgent(status, () -> 7, () -> now, () -> 99, null);
 
     private ShardStream publishedStream(final int streamId) {
         final ShardStream stream = kit.publishingStream(streamId);
@@ -120,6 +128,28 @@ class StreamPublisherAgentTest {
                         .map(StreamPublisherAgentTest::sequenceOf)
                         .toList());
         assertEquals(2, stream.offered());
+    }
+
+    @Test
+    void eachRecordSentCarriesThePassesWallClockAndCountsItsTimeInTheShard() throws Exception {
+        final long delay = 5_000_000;
+        final long[] wall = {0};
+        final ShardLatency latency = new ShardLatency();
+        final StreamPublisherAgent timed = new StreamPublisherAgent(status, () -> 7, () -> now, () -> wall[0], latency);
+        final ShardStream stream = kit.publishingStream(10, latency);
+        timed.add(stream);
+        final Recording publication = new Recording();
+        stream.publication(publication);
+
+        book(stream, 1);
+        wall[0] = SampledEpochNanoClock.INSTANCE.nanoTime() + delay;
+        timed.doWork();
+
+        assertEquals(List.of(wall[0]), publication.stamps, "stamped with the pass's wall clock");
+        final long waited = stream.takeWaitPeakNanos();
+        assertTrue(waited >= delay && waited < delay + 1_000_000_000L, "its time in the shard: " + waited);
+        assertEquals(0, stream.takeWaitPeakNanos(), "a peak is taken once");
+        assertEquals(1, timed.counters().get(0), "one pass counted");
     }
 
     @Test

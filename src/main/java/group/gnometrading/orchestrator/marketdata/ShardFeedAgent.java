@@ -14,11 +14,13 @@ import io.aeron.Subscription;
 import io.aeron.logbuffer.Header;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.Int2ObjectHashMap;
+import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
 import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -93,14 +95,39 @@ public final class ShardFeedAgent implements AeronPathAgent {
     // What waits for the ingress agent to stop polling before the control thread may close it.
     private final List<Object> afterRemoval = new ArrayList<>();
     private final UnsafeBuffer flagged = new UnsafeBuffer(new byte[SequencedEvent.MAX_MESSAGE_SIZE]);
+    private final FeedMetrics metrics;
+    private final EpochNanoClock wallClock;
+    // The shards it reads, for a sampler on another thread; replaced (never changed) as shards come and go.
+    private volatile ShardLink[] watched = new ShardLink[0];
+    // Likewise the streams it reads, kept only when it measures.
+    private volatile StreamFeed[] reading = new StreamFeed[0];
     private long now;
+    private long wallNow;
     private long nextCheckNanos;
 
     public ShardFeedAgent(
             final SequencedRingBuffer<?> ring, final List<StreamFeed> feeds, final LongSupplier nanoTime) {
+        this(ring, feeds, nanoTime, null, null);
+    }
+
+    /**
+     * @param metrics what it measures, with {@code wallClock} read once a pass for each record's arrival; null for
+     *     none, and no wall clock read
+     */
+    public ShardFeedAgent(
+            final SequencedRingBuffer<?> ring,
+            final List<StreamFeed> feeds,
+            final LongSupplier nanoTime,
+            final FeedMetrics metrics,
+            final EpochNanoClock wallClock) {
         this.ring = ring;
         this.feeds = new ArrayList<>(feeds);
         this.nanoTime = nanoTime;
+        this.metrics = metrics;
+        this.wallClock = wallClock;
+        if (metrics != null) {
+            this.reading = feeds.toArray(new StreamFeed[0]);
+        }
         for (final StreamFeed feed : feeds) {
             feed.active = true;
             byStream.put(feed.streamId, feed);
@@ -122,6 +149,10 @@ public final class ShardFeedAgent implements AeronPathAgent {
     @Override
     public int doWork() {
         now = nanoTime.getAsLong();
+        if (metrics != null) {
+            wallNow = wallClock.nanoTime();
+            metrics.pass(now, wallNow);
+        }
         int work = applyCommands();
         work += ingress.doWork();
         // The agent has now stopped polling what was removed last pass, so it may be closed.
@@ -152,6 +183,7 @@ public final class ShardFeedAgent implements AeronPathAgent {
                 cancelPending(cancel.feed());
             } else if (command instanceof Watch watch) {
                 final ShardLink link = watch.link();
+                watched = withLink(watched, link);
                 ingress.add(link.status, (buffer, offset, length, reservedValue) -> {
                     link.onStatus(buffer, offset, length, byStream, now);
                     return true;
@@ -205,6 +237,9 @@ public final class ShardFeedAgent implements AeronPathAgent {
         feed.active = true;
         feeds.add(feed);
         byStream.put(feed.streamId, feed);
+        if (metrics != null) {
+            reading = feeds.toArray(new StreamFeed[0]);
+        }
     }
 
     private void removeFeed(final StreamFeed feed) {
@@ -213,6 +248,9 @@ public final class ShardFeedAgent implements AeronPathAgent {
         }
         feed.active = false;
         feeds.remove(feed);
+        if (metrics != null) {
+            reading = feeds.toArray(new StreamFeed[0]);
+        }
         if (byStream.get(feed.streamId) == feed) {
             byStream.remove(feed.streamId);
         }
@@ -266,19 +304,23 @@ public final class ShardFeedAgent implements AeronPathAgent {
         feed.lastArrivalNanos = now;
         feed.joined = true;
         if (isResentRepeat(feed, resent, buffer, offset, length)) {
+            feed.droppedRepeat();
             return true;
         }
         final int templateId = buffer.getShort(offset + TEMPLATE_ID_OFFSET, ByteOrder.LITTLE_ENDIAN) & 0xFFFF;
         if (!ring.tryPublishRaw(buffer, offset, templateId, length)) {
+            ringRefused();
             return false;
         }
+        feed.passedOn(length);
+        measure(sink.link(), header, buffer, offset);
         feed.last.putBytes(0, buffer, offset, length);
         feed.lastLength = length;
         feed.lastTemplateId = templateId;
         feed.lastEvent = StreamHeader.timestampEvent(buffer, offset);
         feed.lastSequence = StreamHeader.sequence(buffer, offset);
         if (flaggedBad(buffer, offset)) {
-            feed.markBad(StreamFeed.BadReason.FLAGGED_BY_SHARD, feed.statusDropped);
+            flaggedByShard(feed);
         } else {
             feed.markGood();
             // The shard only sends a clean record for a book it trusts, so one published after a status that said it
@@ -291,6 +333,25 @@ public final class ShardFeedAgent implements AeronPathAgent {
             }
         }
         return true;
+    }
+
+    private void ringRefused() {
+        if (metrics != null) {
+            metrics.ringRefused();
+        }
+    }
+
+    private void measure(final ShardLink link, final Header header, final DirectBuffer buffer, final int offset) {
+        if (metrics != null) {
+            metrics.record(link, header.reservedValue(), StreamHeader.timestampRecv(buffer, offset), wallNow);
+        }
+    }
+
+    private void flaggedByShard(final StreamFeed feed) {
+        if (metrics != null && !feed.bad()) {
+            metrics.badSpell(StreamFeed.BadReason.FLAGGED_BY_SHARD);
+        }
+        feed.markBad(StreamFeed.BadReason.FLAGGED_BY_SHARD, feed.statusDropped);
     }
 
     private static boolean isStreamRecord(final DirectBuffer buffer, final int offset, final int length) {
@@ -412,6 +473,11 @@ public final class ShardFeedAgent implements AeronPathAgent {
             feed.behindSinceNanos = 0;
             return false;
         }
+        if (image != null && metrics != null) {
+            final long behind = feed.statusPosition - image.position();
+            feed.behind(behind);
+            metrics.behind(behind);
+        }
         if (feed.behindSinceNanos == 0) {
             feed.behindSinceNanos = now;
             return false;
@@ -425,6 +491,9 @@ public final class ShardFeedAgent implements AeronPathAgent {
             return;
         }
         feed.resubscribing = true;
+        if (metrics != null) {
+            metrics.resubscribed();
+        }
         final StreamFeed.FeedSink stalled = feed.current;
         feed.current = null;
         ingress.remove(stalled.subscription());
@@ -434,6 +503,9 @@ public final class ShardFeedAgent implements AeronPathAgent {
 
     /** Its last record again, flagged bad data; nothing to repeat before the first one arrives. */
     private int markBad(final StreamFeed feed, final StreamFeed.BadReason reason) {
+        if (metrics != null) {
+            metrics.badSpell(reason);
+        }
         if (feed.lastLength == 0) {
             feed.markBad(reason, feed.statusDropped);
             return 0;
@@ -464,8 +536,37 @@ public final class ShardFeedAgent implements AeronPathAgent {
             }
         }
         link.retired = true;
+        watched = withoutLink(watched, link);
         ingress.remove(link.status);
         afterRemoval.add(new Retire(link));
+    }
+
+    private static ShardLink[] withLink(final ShardLink[] links, final ShardLink link) {
+        final ShardLink[] next = Arrays.copyOf(links, links.length + 1);
+        next[links.length] = link;
+        return next;
+    }
+
+    private static ShardLink[] withoutLink(final ShardLink[] links, final ShardLink link) {
+        final ShardLink[] next =
+                new ShardLink[links.length - (Arrays.asList(links).contains(link) ? 1 : 0)];
+        int at = 0;
+        for (final ShardLink each : links) {
+            if (each != link) {
+                next[at++] = each;
+            }
+        }
+        return next;
+    }
+
+    /** The streams it reads now, when it measures (otherwise none); any thread. */
+    StreamFeed[] reading() {
+        return reading;
+    }
+
+    /** The shards it reads now; any thread. */
+    ShardLink[] watched() {
+        return watched;
     }
 
     private void handOver(final Object message) {

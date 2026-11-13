@@ -45,6 +45,7 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.fee.FeeTimeline;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -236,6 +237,7 @@ public final class PaperGatewayFixture implements AutoCloseable {
                 new GatewayRejects(rejects, new SystemEpochNanoClock()),
                 toControl,
                 System::nanoTime,
+                SampledEpochNanoClock.INSTANCE,
                 JournalRecorder.NONE,
                 cross,
                 kills);

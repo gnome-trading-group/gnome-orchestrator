@@ -27,7 +27,7 @@ class CollectorHeartbeatTest {
 
     private final StreamTestKit kit = new StreamTestKit();
     private final MarketDataCollectorAgent agent =
-            new MarketDataCollectorAgent(new NullLogger(), System::nanoTime, () -> 0L);
+            new MarketDataCollectorAgent(new NullLogger(), System::nanoTime, () -> 0L, null);
     private List<ShardStream> streams = List.of();
     private List<CollectorHeartbeat.Connection> connections = List.of();
 
@@ -172,8 +172,8 @@ class CollectorHeartbeatTest {
         });
         StreamTestKit.publish(stream, 1);
         stream.poll(0);
-        stream.publish(0);
-        stream.publish(0);
+        stream.publish(0, 0);
+        stream.publish(0, 0);
         List<JsonNode> lines = parse(heartbeat.lines(30 * SECOND, wall));
 
         assertEquals(2, lines.size(), "the process, and the hold");
@@ -197,7 +197,7 @@ class CollectorHeartbeatTest {
             StreamTestKit.publish(stream, 1);
             stream.poll(0);
         }
-        stream.publish(0);
+        stream.publish(0, 0);
         List<JsonNode> lines = parse(heartbeat.lines(30 * SECOND, wall));
 
         assertEquals(2, lines.size(), "the process, and the drop; the stream's state didn't change");

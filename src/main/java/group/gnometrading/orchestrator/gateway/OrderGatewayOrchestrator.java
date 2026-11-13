@@ -55,6 +55,7 @@ import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
+import group.gnometrading.orchestrator.marketdata.FeedMetrics;
 import group.gnometrading.orchestrator.marketdata.MarketDataLeases;
 import group.gnometrading.orchestrator.marketdata.ShardMarketData;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
@@ -64,6 +65,8 @@ import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
+import group.gnometrading.orchestrator.runtime.SamplePoster;
+import group.gnometrading.orchestrator.runtime.SamplesApi;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.sequencer.GlobalSequence;
@@ -220,6 +223,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 new GatewayRejects(rejects, wallClock),
                 toControl,
                 System::nanoTime,
+                wallClock,
                 journal == null ? JournalRecorder.NONE : journal.ingress(),
                 cross,
                 kills);
@@ -269,17 +273,10 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                     account.name(),
                     account.account().label());
         }
-        final GnomeAgentRunner journalRunner = journal == null
-                ? null
-                : start(
-                        journal,
-                        error -> logger.logf(
-                                LogMessage.UNKNOWN_ERROR, "Gateway journal failed: %s", CauseChain.of(error)));
+        final GnomeAgentRunner journalRunner = startJournal(logger, journal);
         final GnomeAgentRunner egressRunner = start(egress, fatal(logger, exit, "egress"));
         final GnomeAgentRunner ingressRunner = start(ingress, fatal(logger, exit, "ingress"));
-        final GnomeAgentRunner controlRunner = start(
-                control,
-                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway control failed: %s", CauseChain.of(error)));
+        final GnomeAgentRunner controlRunner = startControl(logger, control);
         logger.logf(LogMessage.DEBUG, "Gateway %s: taking sessions on %s:%d", settings.key(), ip, port);
         reportAdmissions(logger, alerts, accounts, admissions, sessions, minutes);
         pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class));
@@ -290,28 +287,63 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final Thread watchdog = watchdog(
                         logger, properties, exit, ingressRunner, egressRunner, control, accounts, simulated)
                 .start();
+        final SamplePoster samples = samples(
+                settings,
+                aeron,
+                paper,
+                new GatewaySamples.Live(accounts, admissions, ingress, egress, sessions, cross),
+                journalRunner,
+                egressRunner,
+                ingressRunner,
+                controlRunner);
 
         Runtime.getRuntime()
                 .addShutdownHook(new Thread(
                         () -> {
                             // Threads are about to stop on purpose.
                             watchdog.interrupt();
-                            stop(logger, control, controlRunner, ingressRunner, egressRunner, accounts, paper, aeron);
+                            stop(
+                                    logger,
+                                    control,
+                                    controlRunner,
+                                    ingressRunner,
+                                    egressRunner,
+                                    accounts,
+                                    paper,
+                                    samples,
+                                    aeron);
                             restart.logs().forEach(OwnershipLog::close);
-                            if (journalRunner != null) {
-                                close(logger, journalRunner);
-                                try {
-                                    journal.close();
-                                } catch (Exception e) {
-                                    logger.logf(
-                                            LogMessage.UNKNOWN_ERROR,
-                                            "Failed to close the journal: %s",
-                                            CauseChain.of(e));
-                                }
-                            }
+                            closeJournal(logger, journalRunner, journal);
                         },
                         "gateway-shutdown"));
         serveHealth(accounts, simulated);
+    }
+
+    /** Starts the gateway's samples ({@link GatewaySamples}) once its threads run; null without an API key. */
+    private SamplePoster samples(
+            final GatewaySettings settings,
+            final AeronRuntime aeron,
+            final PaperVenue paper,
+            final GatewaySamples.Live live,
+            final GnomeAgentRunner... runners) {
+        final Properties properties = getInstance(Properties.class);
+        final List<GnomeAgentRunner> threads = new ArrayList<>(Arrays.asList(runners));
+        for (final GatewayAccount account : live.accounts()) {
+            threads.addAll(account.runners());
+        }
+        return GatewaySamples.start(
+                getInstance(Logger.class),
+                settings.key(),
+                SamplesApi.sender(
+                        properties.getStringProperty("samples.api.url"),
+                        getInstance(RegistryEndpoint.class).apiKey()),
+                properties.getLongProperty("samples.runtime.interval.ms"),
+                aeron,
+                threads,
+                live,
+                paper == null
+                        ? null
+                        : new GatewaySamples.Paper(paper.account(), paper.marketData(), paper.feed(), paper.ring()));
     }
 
     /** A paper gateway's sessions wait out simulated venue latency far longer than a park, so it idles as they do. */
@@ -362,7 +394,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     }
 
     /** A paper gateway's venue: the account every paper session trades on, and the shard reader feeding its books. */
-    private record PaperVenue(SimulatedAccount account, ShardMarketData marketData) {}
+    private record PaperVenue(
+            SimulatedAccount account, ShardMarketData marketData, FeedMetrics feed, SequencedRingBuffer<?> ring) {}
 
     /**
      * The simulated venue a paper gateway runs: its exchange's, from the security master, with that venue's limits
@@ -382,7 +415,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         }
         final SequencedRingBuffer<?> ring =
                 new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence(), PAPER_MARKET_DATA_RING);
-        final ShardMarketData marketData = ShardMarketData.shared(logger, aeron, ip, ring, System::nanoTime);
+        final FeedMetrics feed = new FeedMetrics();
+        final ShardMarketData marketData = ShardMarketData.shared(
+                logger, aeron, ip, ring, System::nanoTime, feed, getInstance(EpochNanoClock.class));
         final SimulatedAccount.Streams streams = paperStreams(properties, marketData);
         final SimulatedAccount account = new SimulatedAccount(
                 logger,
@@ -403,7 +438,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 streams,
                 System::nanoTime,
                 getInstance(EpochNanoClock.class));
-        return new PaperVenue(account, marketData);
+        return new PaperVenue(account, marketData, feed, ring);
     }
 
     /** Each session's streams through its own lease, as the session reads them itself; a local shard for a local run. */
@@ -498,7 +533,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         for (int i = 0; i < accounts.size(); i++) {
             final GatewayAccount account = accounts.get(i);
             final JournalRecorder recorder = journal == null ? JournalRecorder.NONE : journal.lane(i);
-            final LaneAdmissions lane = new LaneAdmissions(account.accountId(), recorder, System::nanoTime);
+            final LaneAdmissions lane =
+                    new LaneAdmissions(account.accountId(), recorder, System::nanoTime, SampledEpochNanoClock.INSTANCE);
             account.lane().admissions(lane);
             admissions.add(lane);
         }
@@ -985,6 +1021,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final GnomeAgentRunner egressRunner,
             final List<GatewayAccount> accounts,
             final PaperVenue paper,
+            final SamplePoster samples,
             final AeronRuntime aeron) {
         close(logger, controlRunner);
         try {
@@ -1009,8 +1046,40 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to stop the simulated venue: %s", CauseChain.of(e));
             }
         }
+        // Last before the driver closes, which the runtime sample reads: the planned stop's minutes are posted too.
+        if (samples != null) {
+            samples.stop(GatewaySamples.STOP_MILLIS);
+        }
         aeron.close();
         logger.logf(LogMessage.DEBUG, "Gateway stopped");
+    }
+
+    private static GnomeAgentRunner startControl(final Logger logger, final GatewayControl control) {
+        return start(
+                control,
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway control failed: %s", CauseChain.of(error)));
+    }
+
+    private static GnomeAgentRunner startJournal(final Logger logger, final GatewayJournal journal) {
+        if (journal == null) {
+            return null;
+        }
+        return start(
+                journal,
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Gateway journal failed: %s", CauseChain.of(error)));
+    }
+
+    private static void closeJournal(
+            final Logger logger, final GnomeAgentRunner journalRunner, final GatewayJournal journal) {
+        if (journalRunner == null) {
+            return;
+        }
+        close(logger, journalRunner);
+        try {
+            journal.close();
+        } catch (Exception e) {
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to close the journal: %s", CauseChain.of(e));
+        }
     }
 
     private static GnomeAgentRunner start(final GnomeAgent agent, final ErrorHandler errors) {
