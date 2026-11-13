@@ -160,7 +160,9 @@ export class AmiStack extends cdk.Stack {
         // The build instance is in no placement group, so the setup must leave it on Amazon Time Sync and succeed.
         '/usr/local/sbin/gnome-clock-setup',
         'systemctl restart gnome-clock-status.service',
-        `for _ in $(seq 30); do test -s ${CLOCK_STATUS_FILE} && break; sleep 1; done`,
+        // The writer rewrites the file in place, and the one it ran since boot is already there, so one read can land
+        // mid-rewrite: retry it, as a session's reader does.
+        `for _ in $(seq 30); do grep -qE '^source (NTP|UNSYNCED)$' ${CLOCK_STATUS_FILE} && break; sleep 1; done`,
         `cat ${CLOCK_STATUS_FILE}`,
         `grep -qE '^source (NTP|UNSYNCED)$' ${CLOCK_STATUS_FILE}`,
       ].join('\n')],
