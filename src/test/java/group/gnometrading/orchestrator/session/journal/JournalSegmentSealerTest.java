@@ -27,7 +27,7 @@ class JournalSegmentSealerTest {
     /** Writes one record and rolls it into a segment for the sealer, a minute after the last. */
     private void segment(JournalWriter writer) {
         clock.advance(60_000);
-        writer.append(0, ++sequence, 1, new UnsafeBuffer(new byte[0]), 0);
+        writer.append(0, ++sequence, 0, 1, new UnsafeBuffer(new byte[0]), 0);
         writer.roll();
     }
 

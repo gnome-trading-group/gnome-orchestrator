@@ -87,13 +87,13 @@ public final class GatewayJournal implements GnomeAgent, AutoCloseable {
         final List<SequencedRingBuffer<OrderExecutionReport>> laneRings = new ArrayList<>();
         // Made before any ring is written, so nothing is missed.
         final List<LappingPoller> pollers = new ArrayList<>();
-        pollers.add(this.ingress.createLappingPoller(this.writer.source(INGRESS)));
-        pollers.add(this.egress.createLappingPoller(this.writer.source(EGRESS)));
+        pollers.add(this.writer.journalLapping(this.ingress, INGRESS));
+        pollers.add(this.writer.journalLapping(this.egress, EGRESS));
         for (int i = 0; i < lanes; i++) {
             final SequencedRingBuffer<OrderExecutionReport> ring =
                     new SequencedRingBuffer<>(OrderExecutionReport::new, sequence, ringSize);
             laneRings.add(ring);
-            pollers.add(ring.createLappingPoller(this.writer.source(LANE_FIRST + i)));
+            pollers.add(this.writer.journalLapping(ring, LANE_FIRST + i));
         }
         this.lanes = List.copyOf(laneRings);
         this.pollers = List.copyOf(pollers);

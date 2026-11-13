@@ -10,6 +10,7 @@ import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import org.agrona.concurrent.EpochNanoClock;
 
 /**
  * Every ring buffer the session's agents talk over, all on one session sequence: one total order over everything the
@@ -32,23 +33,26 @@ record SessionBuffers(
         SequencedRingBuffer<Intent> orders,
         SequencedRingBuffer<OrderExecutionReport> omsExecReports) {
 
-    static SessionBuffers create() {
+    static SessionBuffers create(EpochNanoClock clock) {
         GlobalSequence sequence = new GlobalSequence();
         Map<SequencedRingBuffer<?>, JournalSource> sources = new IdentityHashMap<>();
-        SequencedRingBuffer<?> marketData = new SequencedRingBuffer<>(Mbp10Schema::new, sequence);
+        SequencedRingBuffer<?> marketData =
+                new SequencedRingBuffer<>(Mbp10Schema::new, sequence, SequencedRingBuffer.DEFAULT_SIZE, clock);
         sources.put(marketData, JournalSource.STRATEGY_MARKET_DATA);
-        SequencedRingBuffer<Intent> intents = new SequencedRingBuffer<>(Intent::new, sequence);
+        SequencedRingBuffer<Intent> intents =
+                new SequencedRingBuffer<>(Intent::new, sequence, SequencedRingBuffer.DEFAULT_SIZE, clock);
         sources.put(intents, JournalSource.STRATEGY_INTENT);
-        SequencedRingBuffer<OrderExecutionReport> strategyExecReports =
-                new SequencedRingBuffer<>(OrderExecutionReport::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE);
+        SequencedRingBuffer<OrderExecutionReport> strategyExecReports = new SequencedRingBuffer<>(
+                OrderExecutionReport::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE, clock);
         sources.put(strategyExecReports, JournalSource.STRATEGY_EXEC_REPORT);
-        SequencedRingBuffer<MetricRow> metrics = new SequencedRingBuffer<>(MetricRow::new, sequence);
+        SequencedRingBuffer<MetricRow> metrics =
+                new SequencedRingBuffer<>(MetricRow::new, sequence, SequencedRingBuffer.DEFAULT_SIZE, clock);
         sources.put(metrics, JournalSource.STRATEGY_METRIC);
         SequencedRingBuffer<Intent> orders =
-                new SequencedRingBuffer<>(Intent::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE);
+                new SequencedRingBuffer<>(Intent::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE, clock);
         sources.put(orders, JournalSource.OMS_ORDER);
-        SequencedRingBuffer<OrderExecutionReport> omsExecReports =
-                new SequencedRingBuffer<>(OrderExecutionReport::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE);
+        SequencedRingBuffer<OrderExecutionReport> omsExecReports = new SequencedRingBuffer<>(
+                OrderExecutionReport::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE, clock);
         sources.put(omsExecReports, JournalSource.OMS_EXEC_REPORT);
         return new SessionBuffers(
                 sequence, sources, marketData, intents, strategyExecReports, metrics, orders, omsExecReports);

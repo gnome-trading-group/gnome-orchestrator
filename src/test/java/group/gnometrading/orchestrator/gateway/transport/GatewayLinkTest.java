@@ -43,6 +43,7 @@ import group.gnometrading.schemas.gateway.SessionWelcomeEncoder;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.logbuffer.FragmentHandler;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BooleanSupplier;
@@ -190,6 +191,45 @@ class GatewayLinkTest {
         assertEquals(2, reports.get(1).reservedValue());
         assertEquals(ExecType.FILL, execType(reports.get(1)));
         assertEquals(2, session.replay.newest());
+    }
+
+    @Test
+    void anOrderFromASessionOnANewerSchemaIsReadByItsOwnHeader() throws Exception {
+        linkedSession();
+        final Order order = order(1, LEASED);
+        // A newer version appends fields to the block: the gateway reads the ones it knows and skips the rest.
+        final int added = 24;
+        final int length = order.totalMessageSize() + added;
+        final UnsafeBuffer newer = new UnsafeBuffer(new byte[length]);
+        newer.putBytes(0, order.buffer, 0, order.totalMessageSize());
+        newer.setMemory(order.totalMessageSize(), added, (byte) 0x5A);
+        newer.putShort(0, (short) (SbeMessage.blockLength(order.buffer, 0) + added), ByteOrder.LITTLE_ENDIAN);
+        offer(newer, length);
+
+        final LaneCommand command = awaitCommands(1).get(0);
+        assertEquals(LaneCommand.NEW, command.kind);
+        assertEquals(1, command.clientOidCounter);
+        assertEquals(LEASED, command.securityId);
+        assertEquals(400_000_000L, command.price);
+    }
+
+    @Test
+    void anOrderWhoseBlockStopsShortOfTheFieldsTheGatewayReadsIsUnreadable() throws Exception {
+        linkedSession();
+        final Order order = order(1, LEASED);
+        final int block = SbeMessage.blockLength(order.buffer, 0) - 8;
+        order.buffer.putShort(0, (short) block, ByteOrder.LITTLE_ENDIAN);
+        offer(order.buffer, SbeMessage.HEADER_LENGTH + block);
+
+        final List<GatewayMessage> messages = new ArrayList<>();
+        await(
+                () -> {
+                    this.toControl.read(message -> messages.add(copy(message)), Integer.MAX_VALUE);
+                    return !messages.isEmpty();
+                },
+                "the order to reach the control thread");
+        assertEquals(GatewayMessage.UNREADABLE, messages.get(0).kind);
+        assertEquals(0, drainCommands().size());
     }
 
     @Test
@@ -375,6 +415,11 @@ class GatewayLinkTest {
     }
 
     private void sendOrder(final long counter, final long securityId) throws InterruptedException {
+        final Order order = order(counter, securityId);
+        offer(order.buffer, order.totalMessageSize());
+    }
+
+    private static Order order(final long counter, final long securityId) {
         final Order order = new Order();
         order.encoder
                 .exchangeId(EXCHANGE_ID)
@@ -385,7 +430,7 @@ class GatewayLinkTest {
                 .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
         order.encoder.flags().postOnly(true);
         order.encodeClientOid(counter, 3);
-        offer(order.buffer, order.totalMessageSize());
+        return order;
     }
 
     private void sendCancel(final long counter) throws InterruptedException {

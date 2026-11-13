@@ -68,7 +68,7 @@ class JournalManagerAgentTest {
         agent.onClose();
 
         List<Integer> recordedSources = new ArrayList<>();
-        long last = readSealed((seq, sourceId, templateId, buffer, length) -> recordedSources.add(sourceId));
+        long last = readSealed((seq, time, sourceId, templateId, buffer, length) -> recordedSources.add(sourceId));
 
         assertEquals(
                 List.of(
@@ -106,7 +106,7 @@ class JournalManagerAgentTest {
         agent.onClose();
 
         List<Long> recorded = new ArrayList<>();
-        readSealed((seq, sourceId, templateId, buffer, length) -> recorded.add(seq));
+        readSealed((seq, time, sourceId, templateId, buffer, length) -> recorded.add(seq));
         assertEquals(backlog + 1, recorded.size());
         for (int i = 0; i < recorded.size(); i++) {
             assertEquals(i + 1L, recorded.get(i));
@@ -126,7 +126,7 @@ class JournalManagerAgentTest {
         publish(intents);
         agent.onClose();
 
-        assertEquals(2, readSealed((seq, sourceId, templateId, buffer, length) -> {}));
+        assertEquals(2, readSealed((seq, time, sourceId, templateId, buffer, length) -> {}));
     }
 
     @Test
@@ -159,7 +159,7 @@ class JournalManagerAgentTest {
                         tempDir.resolve(JournalWriter.sealedFileName(0)),
                         tempDir.resolve(JournalWriter.sealedFileName(1))),
                 sealedSegments());
-        assertEquals(2, readSealed((seq, sourceId, templateId, buffer, length) -> {}));
+        assertEquals(2, readSealed((seq, time, sourceId, templateId, buffer, length) -> {}));
     }
 
     @Test
@@ -188,7 +188,7 @@ class JournalManagerAgentTest {
         JournalWriter writer = new JournalWriter(tempDir, SEGMENT_SIZE, sealer::submit);
         List<SequencedPoller> pollers = new ArrayList<>();
         for (SequencedRingBuffer<?> buffer : sessionSequence.buffers()) {
-            pollers.add(buffer.createPoller(writer.source(sources.get(buffer).id())));
+            pollers.add(writer.journal(buffer, sources.get(buffer).id()));
         }
         return new JournalManagerAgent(
                 writer, pollers, sealer, SEGMENT_INTERVAL, Duration.ofSeconds(10), clock, new NullLogger());

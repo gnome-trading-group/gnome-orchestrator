@@ -53,6 +53,7 @@ import group.gnometrading.sequencer.metrics.JournaledMetricRecorder;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.strategies.StrategyAgent;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
@@ -66,7 +67,6 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
-import org.agrona.concurrent.SystemEpochNanoClock;
 
 /**
  * A live or paper trading session: its market data from shards, the OMS, the strategy and each listing's order entry,
@@ -107,7 +107,8 @@ public class SessionOrchestrator extends Orchestrator {
     @Provides
     @Singleton
     public final EpochNanoClock provideEpochNanoClock() {
-        return new SystemEpochNanoClock();
+        // Allocation-free: the system clock builds an Instant on every read.
+        return SampledEpochNanoClock.INSTANCE;
     }
 
     @Provides
@@ -180,7 +181,7 @@ public class SessionOrchestrator extends Orchestrator {
         RiskEngine riskEngine = RiskModule.riskEngine(properties, listingDirectory);
         AgentRuntimeInstaller.install(properties, logger);
 
-        SessionBuffers buffers = SessionBuffers.create();
+        SessionBuffers buffers = SessionBuffers.create(nanoClock);
         ShardMarketData marketData = startAeron(logger, properties, listings, streams, dataStreams, buffers);
 
         DefaultPositionTracker positionTracker = positionTracker(listings);

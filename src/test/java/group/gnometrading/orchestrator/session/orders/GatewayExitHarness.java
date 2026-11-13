@@ -1173,6 +1173,7 @@ public final class GatewayExitHarness {
                 @Override
                 public void onRecord(
                         final long sequence,
+                        final long timestampNanos,
                         final int source,
                         final int templateId,
                         final UnsafeBuffer buffer,

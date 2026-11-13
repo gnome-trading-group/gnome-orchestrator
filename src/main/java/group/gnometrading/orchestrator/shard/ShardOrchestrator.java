@@ -41,6 +41,7 @@ import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sequencer.StreamRecordEventAdapter;
 import group.gnometrading.utils.CauseChain;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -57,7 +58,6 @@ import java.util.function.Function;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
-import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -83,7 +83,8 @@ public class ShardOrchestrator extends Orchestrator {
 
     @Provides
     public final EpochNanoClock provideEpochNanoClock() {
-        return new SystemEpochNanoClock();
+        // Allocation-free: the system clock builds an Instant on every read.
+        return SampledEpochNanoClock.INSTANCE;
     }
 
     @Provides

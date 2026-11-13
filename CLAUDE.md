@@ -147,7 +147,8 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     `AccountLane`, `AccountReader` + `AccountConnection`, and on Polymarket Intl `PolymarketIntlHeartbeats`, beating only
     while the lane's passes move, `LaneLiveness`), sized by `gateway.max.orders` and `gateway.lane.connections`.
   - Sessions reach it over Aeron on `gateway.ingress.port` (40010). `GatewayIngress` tells the sender by the image's
-    Aeron session id (core orders carry no session), turns orders into lane commands or refuses them straight back
+    Aeron session id (core orders carry no session), reads each order by its own SBE header (any core version whose
+    block reaches the v2 fields it reads, so sessions and gateways change schema version apart), turns orders into lane commands or refuses them straight back
     (`GatewayRejects`); `GatewayEgress` numbers each session's reports into its `ReplayRing` (`gateway.replay.reports`)
     and sends them with the number as the frame's reserved value, at that session's pace, plus a 100 ms heartbeat;
     `GatewayControl` checks hellos against the registry (`SessionRegistry`, a 10-minute fallback cache), loads the
@@ -301,6 +302,10 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
 - Exact replay: strategy market data plus every trading buffer (intents, OMS orders, exec reports, metrics) share one
   session `GlobalSequence`, and every buffer on it must be journaled. `SessionJournal.verifyCoverage` fails startup for a
   buffer with no `JournalSource`, even with the journal off. Create pollers before the producers start.
+- Time: every process's `EpochNanoClock` is gnome-core's `SampledEpochNanoClock` (allocation-free; Agrona's
+  `SystemEpochNanoClock` builds an `Instant` per read). Every ring stamps each event when it is published, and the
+  journal (format 2: a `GNJ2` segment header, 22-byte record headers) keeps the stamp; `journal.json` names the
+  format. gnomepy reads format 2 and the older 14-byte format.
 - Close order matters: a producer blocks on a full ring whose reader has closed. Keep `SessionAgents.close` ordered
   market data -> strategy -> OMS -> gateways -> ledger -> journal -> heartbeat.
 - Every process starts with `java -jar` and takes its module access from the jar's manifest (`Add-Opens`/`Add-Exports`

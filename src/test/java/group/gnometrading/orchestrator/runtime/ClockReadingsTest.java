@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.management.ThreadMXBean;
 import group.gnometrading.orchestrator.runtime.ClockReadings.Source;
@@ -104,7 +105,8 @@ class ClockReadingsTest {
         rewrite(file, status("PHC", -5, 23_617, 18_372));
         final ThreadMXBean threads = (ThreadMXBean) ManagementFactory.getThreadMXBean();
         try (ClockReadings clock = readings(file)) {
-            for (int i = 0; i < 20_000; i++) {
+            // Until the JIT has compiled sample(), the interpreter allocates where compiled code doesn't.
+            for (int i = 0; i < 50_000; i++) {
                 clock.sample();
             }
             final long threadId = Thread.currentThread().getId();
@@ -112,7 +114,9 @@ class ClockReadingsTest {
             for (int i = 0; i < 10_000; i++) {
                 clock.sample();
             }
-            assertEquals(0, threads.getThreadAllocatedBytes(threadId) - before);
+            final long allocated = threads.getThreadAllocatedBytes(threadId) - before;
+            // Measuring can itself allocate a little; anything per sample would be hundreds of kilobytes here.
+            assertTrue(allocated < 2_048, "allocated " + allocated + " bytes over 10000 samples");
         }
     }
 }

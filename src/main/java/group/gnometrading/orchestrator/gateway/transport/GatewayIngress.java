@@ -109,6 +109,11 @@ public final class GatewayIngress implements AeronPathAgent {
         return this.unlinked;
     }
 
+    // Core v2 block lengths of the messages the gateway reads (see fits).
+    private static final int ORDER_V2_BLOCK = 50;
+    private static final int CANCEL_V2_BLOCK = 30;
+    private static final int MODIFY_V2_BLOCK = 49;
+
     /** Messages that arrived in fragments, dropped: every gateway message fits one frame. */
     public long fragmented() {
         return this.fragmented;
@@ -159,13 +164,15 @@ public final class GatewayIngress implements AeronPathAgent {
     private ControlledFragmentHandler.Action onOrder(
             final int templateId, final DirectBuffer buffer, final int offset, final int length, final int image) {
         final boolean done;
-        if (templateId == OrderDecoder.TEMPLATE_ID && fits(this.order, length)) {
+        if (templateId == OrderDecoder.TEMPLATE_ID && fits(this.order, buffer, offset, length, ORDER_V2_BLOCK)) {
             this.order.buffer.putBytes(0, buffer, offset, length);
             done = onNew(image);
-        } else if (templateId == CancelOrderDecoder.TEMPLATE_ID && fits(this.cancel, length)) {
+        } else if (templateId == CancelOrderDecoder.TEMPLATE_ID
+                && fits(this.cancel, buffer, offset, length, CANCEL_V2_BLOCK)) {
             this.cancel.buffer.putBytes(0, buffer, offset, length);
             done = onCancel(image);
-        } else if (templateId == ModifyOrderDecoder.TEMPLATE_ID && fits(this.modify, length)) {
+        } else if (templateId == ModifyOrderDecoder.TEMPLATE_ID
+                && fits(this.modify, buffer, offset, length, MODIFY_V2_BLOCK)) {
             this.modify.buffer.putBytes(0, buffer, offset, length);
             done = onAmend(image);
         } else {
@@ -174,8 +181,22 @@ public final class GatewayIngress implements AeronPathAgent {
         return done ? ControlledFragmentHandler.Action.CONTINUE : ControlledFragmentHandler.Action.ABORT;
     }
 
-    private static boolean fits(final SbeMessage message, final int length) {
-        return length >= message.totalMessageSize() && length <= message.buffer.capacity();
+    /**
+     * Whether a session's message can be read: whole by its own header, and holding every field the gateway reads.
+     * Sessions and gateways move between core schema versions apart, and a version only appends to a block, so a
+     * message from an older or newer session is read as long as its block reaches the core v2 fields: the gateway reads
+     * no field added since. Fixed numbers, not the decoders' {@code BLOCK_LENGTH}, which grows with each version.
+     */
+    private static boolean fits(
+            final SbeMessage message,
+            final DirectBuffer buffer,
+            final int offset,
+            final int length,
+            final int minimumBlock) {
+        final int block = SbeMessage.blockLength(buffer, offset);
+        return block >= minimumBlock
+                && length >= SbeMessage.HEADER_LENGTH + block
+                && length <= message.buffer.capacity();
     }
 
     /** @return false if there was no room to act on it: the message is read again on the next poll */

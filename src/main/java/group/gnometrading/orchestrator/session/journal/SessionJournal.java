@@ -62,13 +62,18 @@ public record SessionJournal(GnomeAgentRunner runner, JournalSegmentSealer seale
             MAPPER.writeValue(
                     directory.resolve(MANIFEST).toFile(),
                     Map.of(
-                            "bucket", properties.getStringProperty("journal.bucket"),
-                            "keyPrefix", sessionId,
-                            "region", properties.getStringProperty("journal.bucket.region")));
+                            "bucket",
+                            properties.getStringProperty("journal.bucket"),
+                            "keyPrefix",
+                            sessionId,
+                            "region",
+                            properties.getStringProperty("journal.bucket.region"),
+                            "format",
+                            JournalWriter.FORMAT));
             List<SequencedPoller> pollers = new ArrayList<>(journalSources.size());
             for (SequencedRingBuffer<?> buffer : sessionSequence.buffers()) {
-                pollers.add(buffer.createPoller(
-                        journalWriter.source(journalSources.get(buffer).id())));
+                pollers.add(
+                        journalWriter.journal(buffer, journalSources.get(buffer).id()));
             }
             JournalManagerAgent agent = new JournalManagerAgent(
                     journalWriter,

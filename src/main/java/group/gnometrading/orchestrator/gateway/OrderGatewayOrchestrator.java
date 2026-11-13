@@ -72,6 +72,7 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.utils.CauseChain;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import io.aeron.Subscription;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -94,7 +95,6 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemEpochClock;
-import org.agrona.concurrent.SystemEpochNanoClock;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.regions.Region;
@@ -131,7 +131,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
 
     @Provides
     public final EpochNanoClock provideEpochNanoClock() {
-        return new SystemEpochNanoClock();
+        // Allocation-free: the system clock builds an Instant on every read.
+        return SampledEpochNanoClock.INSTANCE;
     }
 
     @Provides

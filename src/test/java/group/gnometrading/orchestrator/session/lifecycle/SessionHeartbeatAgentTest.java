@@ -455,7 +455,7 @@ class SessionHeartbeatAgentTest {
         final JournalSegmentSealer sealer = new JournalSegmentSealer(1 << 20, () -> now[0], new NullLogger());
         final JournalWriter writer = new JournalWriter(tempDir.resolve("journal"), 1 << 20, sealer::submit);
         for (int sequence = 1; sequence <= count; sequence++) {
-            writer.append(0, sequence, 1, new UnsafeBuffer(new byte[0]), 0);
+            writer.append(0, sequence, 0, 1, new UnsafeBuffer(new byte[0]), 0);
             writer.roll();
         }
         writer.close();
