@@ -30,6 +30,7 @@ import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.ViewString;
 import group.gnometrading.utils.Schedule;
 import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
@@ -49,6 +50,10 @@ import org.agrona.concurrent.UnsafeBuffer;
  * Falling a whole ring behind loses track: every market scores nothing until its next book, and the lap is counted in
  * what it posts. It reloads its listings' programs from the registry as now known, and posts what accrued every post
  * interval and once more on close. A failed post or reload is logged and retried; nothing here can stop trading.
+ *
+ * <p>A reload asks only for programs that end after a day ago: the registry keeps every program a listing ever had
+ * (Kalshi's run a day each), so the whole history of a film's strikes is hundreds of kilobytes and growing. A day back
+ * still covers one that ended since the last reload, so its last accrual is posted before it is dropped.
  */
 public final class RewardsAgent implements GnomeAgent {
 
@@ -63,6 +68,13 @@ public final class RewardsAgent implements GnomeAgent {
     private static final int ENTRY_BYTES = 768;
     /** The most a post's body takes, so the connection that sends it can be sized. */
     public static final int BODY_BYTES = 256 * 1024;
+    /**
+     * The most a reload's answer takes, so the connection that reads it can be sized: a program is about 400 bytes and a
+     * listing has two or three that end within a day, so this holds a film's twenty-odd strikes many times over.
+     */
+    public static final int PROGRAMS_RESPONSE_BYTES = 1024 * 1024;
+
+    private static final long PROGRAMS_LOOKBACK_MS = TimeUnit.DAYS.toMillis(1);
 
     private static final int LISTINGS_PER_PROGRAM = 2;
 
@@ -378,14 +390,8 @@ public final class RewardsAgent implements GnomeAgent {
     /** Reloads the listings' programs as the registry knows them now; a failed reload keeps the last ones. */
     void refreshPrograms() {
         try {
-            final ExpandingMutableString path = new ExpandingMutableString(PROGRAMS_PATH);
-            for (int i = 0; i < this.listingIds.length; i++) {
-                if (i > 0) {
-                    path.append((byte) ',');
-                }
-                path.appendNaturalIntAscii(this.listingIds[i]);
-            }
-            final ByteBuffer response = this.registry.get(path);
+            final ByteBuffer response =
+                    this.registry.get(new ExpandingMutableString(programsPath(this.listingIds, this.clock.time())));
             final byte[] bytes = new byte[response.remaining()];
             response.get(bytes);
             for (final int listingId : this.listingIds) {
@@ -394,6 +400,20 @@ public final class RewardsAgent implements GnomeAgent {
         } catch (Exception e) {
             this.logger.logf(LogMessage.UNKNOWN_ERROR, "Reward programs didn't reload, keeping the last: %s", e);
         }
+    }
+
+    /** The reload's path: the listings' programs that end after a day before {@code nowMs}. */
+    static String programsPath(final int[] listingIds, final long nowMs) {
+        final StringBuilder path = new StringBuilder(PROGRAMS_PATH);
+        for (int i = 0; i < listingIds.length; i++) {
+            if (i > 0) {
+                path.append(',');
+            }
+            path.append(listingIds[i]);
+        }
+        return path.append("&from=")
+                .append(Instant.ofEpochMilli(nowMs - PROGRAMS_LOOKBACK_MS))
+                .toString();
     }
 
     /** Posts what every running program has accrued up to now, and drops those whose period has ended once posted. */

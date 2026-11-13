@@ -51,6 +51,8 @@ final class SimulatedBook {
     // Whether a clean record of the listing has reached the book yet: until then an order could rest on an empty book
     // that the first snapshot crosses, so new orders are refused.
     boolean clean;
+    // On the lane's list of books with something to do; the lane's alone.
+    boolean busy;
 
     private final byte[] orderIdPrefix;
     private final byte[] orderIdBytes = new byte[OrderExecutionReportEncoder.exchangeOrderIdLength()];
@@ -155,6 +157,11 @@ final class SimulatedBook {
         if (!record.isBadData()) {
             this.clean = true;
         }
+        if (this.exchange.nextDueNanos() == Long.MAX_VALUE) {
+            // A book with nothing due isn't worked each pass, so its venue's clock would stand where it last had work;
+            // a fill this record makes is priced at now, as if it had been.
+            this.exchange.processDue(nowNanos);
+        }
         schedule(this.exchange.onMarketData(record), nowNanos);
     }
 
@@ -186,9 +193,9 @@ final class SimulatedBook {
         return work;
     }
 
-    /** What is still on its way either way: a book that holds none can be dropped without losing anything. */
+    /** Nothing on its way either way and nothing the venue holds: {@link #work} has nothing to do until it is given some. */
     boolean idle() {
-        return this.actions.isEmpty() && this.reports.isEmpty();
+        return this.actions.isEmpty() && this.reports.isEmpty() && this.exchange.nextDueNanos() == Long.MAX_VALUE;
     }
 
     private List<OrderExecutionReport> arrive(final Pending action, final long nowNanos) {

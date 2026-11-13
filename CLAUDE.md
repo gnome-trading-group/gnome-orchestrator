@@ -306,6 +306,11 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   `SystemEpochNanoClock` builds an `Instant` per read). Every ring stamps each event when it is published, and the
   journal (format 2: a `GNJ2` segment header, 22-byte record headers) keeps the stamp; `journal.json` names the
   format. gnomepy reads format 2 and the older 14-byte format.
+- Causes (core v3): each intent carries the event the strategy was handling (`triggerSequence`, `TriggerKind`, ring
+  arrival, platform receipt) and when it started (`dispatchTimestamp`); each order, modify and cancel the OMS sends
+  carries its `intentSequence` and that trigger (gnome-oms `OrderCause`), or `EXEC_REPORT`/`RISK` for the OMS's own
+  actions. Journal sequences join them: an order's `intentSequence` and `triggerSequence` are records in the same
+  journal.
 - Close order matters: a producer blocks on a full ring whose reader has closed. Keep `SessionAgents.close` ordered
   market data -> strategy -> OMS -> gateways -> ledger -> journal -> heartbeat.
 - Every process starts with `java -jar` and takes its module access from the jar's manifest (`Add-Opens`/`Add-Exports`

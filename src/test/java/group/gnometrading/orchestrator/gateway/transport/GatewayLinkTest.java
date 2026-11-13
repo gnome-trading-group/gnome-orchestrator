@@ -216,10 +216,26 @@ class GatewayLinkTest {
     }
 
     @Test
+    void anOrderFromASessionOnAnOlderSchemaIsReadWithItsMissingFieldsEmpty() throws Exception {
+        linkedSession();
+        final Order order = order(1, LEASED);
+        order.encoder.triggerSequence(77).triggerTimestamp(88);
+        // A core v2 session's order: the same fields up to the v2 block, nothing after.
+        order.buffer.putShort(0, (short) CORE_V2_ORDER_BLOCK, ByteOrder.LITTLE_ENDIAN);
+        offer(order.buffer, SbeMessage.HEADER_LENGTH + CORE_V2_ORDER_BLOCK);
+
+        final LaneCommand command = awaitCommands(1).get(0);
+        assertEquals(LaneCommand.NEW, command.kind);
+        assertEquals(1, command.clientOidCounter);
+        assertEquals(LEASED, command.securityId);
+        assertEquals(400_000_000L, command.price);
+    }
+
+    @Test
     void anOrderWhoseBlockStopsShortOfTheFieldsTheGatewayReadsIsUnreadable() throws Exception {
         linkedSession();
         final Order order = order(1, LEASED);
-        final int block = SbeMessage.blockLength(order.buffer, 0) - 8;
+        final int block = CORE_V2_ORDER_BLOCK - 8;
         order.buffer.putShort(0, (short) block, ByteOrder.LITTLE_ENDIAN);
         offer(order.buffer, SbeMessage.HEADER_LENGTH + block);
 
@@ -396,6 +412,9 @@ class GatewayLinkTest {
     }
 
     // ----- helpers -----
+
+    /** Core v2's Order block: the fields every session sends, and all the gateway reads. */
+    private static final int CORE_V2_ORDER_BLOCK = 50;
 
     private GatewaySession session(final int state) {
         final GatewaySession session = new GatewaySession(SLOT, "session-a", 3, this.account, 64);

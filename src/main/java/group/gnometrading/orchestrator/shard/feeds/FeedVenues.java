@@ -28,7 +28,6 @@ import group.gnometrading.resources.Properties;
 import java.net.URI;
 import java.util.Map;
 import org.agrona.concurrent.EpochNanoClock;
-import org.agrona.concurrent.SystemEpochClock;
 
 /**
  * Every market data source a process can read, keyed by {@code md.source.adapter}: the venue's own description of its
@@ -71,11 +70,7 @@ public final class FeedVenues {
 
     private static final Map<String, Venue> VENUES = Map.of(
             "HYPERLIQUID",
-            new Venue(
-                    HyperliquidVenue.FEED,
-                    false,
-                    (context, table, channel) -> new HyperliquidProtocol(table, SystemEpochClock.INSTANCE),
-                    null),
+            new Venue(HyperliquidVenue.FEED, false, (context, table, channel) -> new HyperliquidProtocol(table), null),
             "LIGHTER",
             new Venue(
                     LighterVenue.FEED,

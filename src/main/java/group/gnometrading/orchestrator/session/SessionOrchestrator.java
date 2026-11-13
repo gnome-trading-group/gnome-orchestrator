@@ -472,7 +472,9 @@ public class SessionOrchestrator extends Orchestrator {
                 buffers.marketData(),
                 buffers.orders(),
                 buffers.omsExecReports(),
-                registryWriterConnection(registryWriterClient().withWriteBufferSize(RewardsAgent.BODY_BYTES)),
+                registryWriterConnection(registryWriterClient()
+                        .withWriteBufferSize(RewardsAgent.BODY_BYTES)
+                        .withReadBufferSize(RewardsAgent.PROGRAMS_RESPONSE_BYTES)),
                 epochClock,
                 properties.getLongProperty("rewards.programs.refresh.interval.ms"),
                 properties.getLongProperty("rewards.post.interval.ms"),

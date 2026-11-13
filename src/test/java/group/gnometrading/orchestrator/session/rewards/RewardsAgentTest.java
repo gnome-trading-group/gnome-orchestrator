@@ -31,6 +31,9 @@ import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.incentive.IncentiveProgram;
 import group.gnometrading.sm.incentive.IncentiveTimeline;
+import group.gnometrading.sm.incentive.IncentiveTimelineJson;
+import java.io.InputStream;
+import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -369,5 +372,40 @@ class RewardsAgentTest {
                 900_000,
                 300_000,
                 new NullLogger()));
+    }
+
+    @Test
+    void aReloadAsksOnlyForTheListingsProgramsEndingAfterADayAgo() {
+        assertEquals(
+                "/api/incentive-programs?listingIds=5,7&from=2026-11-12T14:00:00Z",
+                RewardsAgent.programsPath(
+                        new int[] {5, 7}, Instant.parse("2026-11-13T14:00:00Z").toEpochMilli()));
+    }
+
+    /**
+     * A film's nineteen Kalshi strikes as the registry answers a reload (programs ending after a day before 14:00 UTC):
+     * every strike's programs read back, with the one paying at that time in force, and the answer leaves the reload's
+     * connection room for a film many times its size.
+     */
+    @Test
+    void aFilmsProgramsAsTheRegistryAnswersAReloadReadBackAndFitItsConnection() throws Exception {
+        final byte[] json;
+        try (InputStream in = getClass().getResourceAsStream("/rewards/kalshi-ebenezer-programs.json")) {
+            json = in.readAllBytes();
+        }
+        assertTrue(json.length * 10 < RewardsAgent.PROGRAMS_RESPONSE_BYTES, json.length + " bytes");
+        final long at = Instant.parse("2026-11-13T14:00:00Z").toEpochMilli() * 1_000_000L;
+        final int[] strikes = {
+            1466121, 1493686, 1291251, 2726762, 1493463, 2702819, 1493465, 2723959, 1211495, 2727044, 1110260, 1129918,
+            1218018, 1212983, 1212989, 1456893, 1133834, 2756015, 2633020
+        };
+        for (final int listingId : strikes) {
+            final IncentiveTimeline timeline = IncentiveTimelineJson.parse(json, listingId);
+            boolean paying = false;
+            for (int i = 0; i < timeline.size(); i++) {
+                paying |= timeline.inForce(i, at) != null;
+            }
+            assertTrue(paying, "listing " + listingId);
+        }
     }
 }

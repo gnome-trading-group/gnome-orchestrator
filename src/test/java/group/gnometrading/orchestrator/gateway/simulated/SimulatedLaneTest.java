@@ -75,15 +75,20 @@ class SimulatedLaneTest {
                 this.wallNanos::get);
     }
 
-    private static MbpSimulatedExchange venue() {
+    private static MbpSimulatedExchange venue(final long latencyNanos) {
         final QueueModel queue = (prev, next, orders) -> {};
         return new MbpSimulatedExchange(
-                (nowNanos, buy, price, quantity, maker, state) -> 0L, () -> 0L, () -> 0L, queue);
+                (nowNanos, buy, price, quantity, maker, state) -> 0L, () -> latencyNanos, () -> 0L, queue);
     }
 
     private void join(final long slot, final String sessionId, final AccountBudget budget) {
+        join(slot, sessionId, budget, 0);
+    }
+
+    /** A session whose venue is {@code latencyNanos} away each way. */
+    private void join(final long slot, final String sessionId, final AccountBudget budget, final long latencyNanos) {
         final SimulatedBook book = new SimulatedBook(
-                slot, SimulatedAccount.listingKey(EXCHANGE, SECURITY), LISTING, STREAM, venue(), sessionId);
+                slot, SimulatedAccount.listingKey(EXCHANGE, SECURITY), LISTING, STREAM, venue(latencyNanos), sessionId);
         this.handoffs.offer(new SimulatedLane.AddSession(new SimulatedSession(slot, sessionId, budget, List.of(book))));
         pass();
     }
@@ -343,5 +348,56 @@ class SimulatedLaneTest {
         command(LaneCommand.NEW, A, 1, Side.Bid, 99 * P);
         assertEquals(
                 RejectReason.GATEWAY_NOT_READY, of(A, ExecType.REJECT).get(0).reason());
+    }
+
+    @Test
+    void onlyBooksWithSomethingOnItsWayAreWorked_ARestingOrderStillFillsAndItsReportStillArrives() {
+        final long latency = TimeUnit.MILLISECONDS.toNanos(10);
+        join(A, "session-a", null, latency);
+        join(B, "session-b", null, latency);
+        book(100 * P, 10 * S, 102 * P, 40 * S);
+        assertEquals(0, this.lane.busyBooks(), "a record that sends nothing back leaves both books idle");
+
+        command(LaneCommand.NEW, A, 1, Side.Bid, 100 * P);
+        assertEquals(1, this.lane.busyBooks(), "A's order is on its way; B's book has nothing to do");
+        assertTrue(of(A, ExecType.NEW).isEmpty());
+
+        this.wallNanos.addAndGet(latency);
+        pass();
+        assertTrue(of(A, ExecType.NEW).isEmpty(), "at the venue now; its ack is on the way back");
+        this.wallNanos.addAndGet(latency);
+        pass();
+        assertEquals(1, of(A, ExecType.NEW).size());
+        assertEquals(0, this.lane.busyBooks(), "a resting order alone gives its book nothing to do");
+
+        trade(group.gnometrading.schemas.book.Side.Ask, 100 * P, 20 * S, false);
+        assertEquals(1, this.lane.busyBooks(), "the fill the trade made is on its way back");
+        this.wallNanos.addAndGet(latency);
+        pass();
+        assertEquals(1, of(A, ExecType.FILL).size());
+        assertEquals(0, this.lane.busyBooks());
+    }
+
+    @Test
+    void aSessionForgottenWithAnOrderOnItsWayLeavesNothingBusy() {
+        final long latency = TimeUnit.MILLISECONDS.toNanos(10);
+        join(A, "session-a", null, latency);
+        join(B, "session-b", null, latency);
+        book(100 * P, 10 * S, 102 * P, 40 * S);
+        command(LaneCommand.NEW, A, 1, Side.Bid, 99 * P);
+        command(LaneCommand.NEW, B, 1, Side.Bid, 99 * P);
+        assertEquals(2, this.lane.busyBooks());
+
+        this.handoffs.offer(new SimulatedLane.RemoveSession(A));
+        pass();
+        assertEquals(1, this.lane.busyBooks());
+
+        this.wallNanos.addAndGet(latency);
+        pass();
+        this.wallNanos.addAndGet(latency);
+        pass();
+        assertTrue(of(A, ExecType.NEW).isEmpty(), "a forgotten session hears nothing more");
+        assertEquals(1, of(B, ExecType.NEW).size(), "the other session's order carries on");
+        assertEquals(0, this.lane.busyBooks());
     }
 }

@@ -68,7 +68,9 @@ final class SimulatedLane implements GnomeAgent {
     // a quiet stream's last record with its original time, and a book's first record may be that re-send, minutes old
     // on a quiet market though nothing is late.
     private final Long2LongHashMap lastRecvByStream = new Long2LongHashMap(NO_RECORD);
-    private final List<SimulatedBook> books = new ArrayList<>();
+    // Only books with something on its way or held at the venue: a pass costs what is happening, not how many books
+    // there are. A book joins when it is handed an order, cancel, amend or a record that sends something back.
+    private final List<SimulatedBook> busy = new ArrayList<>();
     private final Mbp10Schema record = new Mbp10Schema();
     private final OrderExecutionReport reject = new OrderExecutionReport();
     private final SimulatedBook.ReportSink sink = this::deliver;
@@ -137,8 +139,13 @@ final class SimulatedLane implements GnomeAgent {
             work += admit();
         }
         work += this.marketData.poll(RECORDS_PER_PASS);
-        for (int i = 0; i < this.books.size(); i++) {
-            work += this.books.get(i).work(this.wallNow, this.sink);
+        // Backwards, so the book a rest moves into this slot has already been worked this pass.
+        for (int i = this.busy.size() - 1; i >= 0; i--) {
+            final SimulatedBook book = this.busy.get(i);
+            work += book.work(this.wallNow, this.sink);
+            if (book.idle()) {
+                rest(i);
+            }
         }
         this.passes = this.passes + 1;
         return work;
@@ -150,6 +157,11 @@ final class SimulatedLane implements GnomeAgent {
 
     long passes() {
         return this.passes;
+    }
+
+    /** Books with something on its way or held at the venue; the lane's thread only. */
+    int busyBooks() {
+        return this.busy.size();
     }
 
     long refusedNotReady() {
@@ -183,7 +195,6 @@ final class SimulatedLane implements GnomeAgent {
         forget(session.slot);
         this.sessions.put(session.slot, session);
         for (final SimulatedBook book : session.books) {
-            this.books.add(book);
             this.booksByStream
                     .computeIfAbsent(book.streamId, id -> new ArrayList<>())
                     .add(book);
@@ -197,7 +208,9 @@ final class SimulatedLane implements GnomeAgent {
             return;
         }
         for (final SimulatedBook book : session.books) {
-            this.books.remove(book);
+            if (book.busy) {
+                rest(this.busy.indexOf(book));
+            }
             final List<SimulatedBook> onStream = this.booksByStream.get(book.streamId);
             if (onStream != null) {
                 onStream.remove(book);
@@ -340,6 +353,7 @@ final class SimulatedLane implements GnomeAgent {
             this.admission.unqueue(order);
         }
         order.book.cancel(order, this.wallNow);
+        wake(order.book);
     }
 
     // ----- admission -----
@@ -382,6 +396,7 @@ final class SimulatedLane implements GnomeAgent {
                 order.amendWanted = false;
                 order.book.amend(order, this.wallNow);
             }
+            wake(order.book);
             work++;
         }
         return work;
@@ -431,8 +446,26 @@ final class SimulatedLane implements GnomeAgent {
             }
         }
         for (int i = 0; i < onStream.size(); i++) {
-            onStream.get(i).onMarketData(this.record, this.wallNow);
+            final SimulatedBook book = onStream.get(i);
+            book.onMarketData(this.record, this.wallNow);
+            wake(book);
         }
+    }
+
+    /** Puts a book on the busy list if it now has something to do. */
+    private void wake(final SimulatedBook book) {
+        if (!book.busy && !book.idle()) {
+            book.busy = true;
+            this.busy.add(book);
+        }
+    }
+
+    /** Takes the book at {@code index} off the busy list; order there doesn't matter, so the last book takes its place. */
+    private void rest(final int index) {
+        final int last = this.busy.size() - 1;
+        this.busy.get(index).busy = false;
+        this.busy.set(index, this.busy.get(last));
+        this.busy.remove(last);
     }
 
     /** A report a book sends back; the order ends with it if it is final. */
