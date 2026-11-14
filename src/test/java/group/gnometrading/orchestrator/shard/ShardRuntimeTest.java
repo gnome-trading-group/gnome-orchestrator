@@ -214,7 +214,7 @@ class ShardRuntimeTest {
                 }
             },
             agent,
-            (streamId, name) -> {
+            (streamId, sourceId, name) -> {
                 if (failNextCollector) {
                     failNextCollector = false;
                     return kit.stream(streamId, (sequence, templateId, buffer, length) -> {

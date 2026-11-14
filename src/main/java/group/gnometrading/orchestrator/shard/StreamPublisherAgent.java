@@ -45,9 +45,13 @@ final class StreamPublisherAgent implements AeronPathAgent {
 
     private final StreamPublication status;
     private final ShardLatency latency;
-    private final MetricCounters counters = new MetricCounters(4);
+    private final MetricCounters counters = new MetricCounters(6);
     private final int passes = counters.counter("passes");
     private final int passGapPeakNanos = counters.peak("passGapPeakNanos");
+    // A pass's own length and its records: a long pass delays every stream behind it, and its records' send stamps,
+    // all the pass's start, understate when the later ones went.
+    private final int passPeakNanos = counters.peak("passPeakNanos");
+    private final int recordsPerPassPeak = counters.peak("recordsPerPassPeak");
     private final int streamsRead = counters.gauge("streams");
     private final int publications = counters.gauge("publications");
     private long lastPassNanos;
@@ -118,11 +122,13 @@ final class StreamPublisherAgent implements AeronPathAgent {
                 leaving.remove(i);
             }
         }
+        counters.max(recordsPerPassPeak, work);
         if (now >= nextStatusNanos) {
             nextStatusNanos = now + STATUS_EVERY_NANOS;
             sendStatus(wall);
             work++;
         }
+        counters.max(passPeakNanos, nanoTime.getAsLong() - now);
         return work;
     }
 

@@ -31,6 +31,8 @@ import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
 import group.gnometrading.schemas.gateway.OrderState;
 import group.gnometrading.schemas.gateway.OrderStatusDecoder;
+import group.gnometrading.schemas.gateway.OrderTiming;
+import group.gnometrading.schemas.gateway.OrderTimingDecoder;
 import group.gnometrading.schemas.gateway.QueryStatus;
 import group.gnometrading.schemas.gateway.ReHelloRequiredDecoder;
 import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
@@ -79,7 +81,14 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <p>Given latency grids ({@link #measureLatency}), it records, on the wall clock: {@code session.tick_to_order}, from
  * the arrival of the event behind each order, cancel and amend to its hand-off to the link (offered, or queued behind
  * what waits), by exchange, action ({@link #LATENCY_ACTIONS}) and trigger kind; and {@code order_to_ack} and
- * {@code cancel_to_ack}, from that hand-off to the order's first report and to the report answering the cancel.
+ * {@code cancel_to_ack}, from that hand-off to the order's first report and to the report answering the cancel. With
+ * each request's {@code OrderTiming} from its gateway (journaled whole, {@link #journalTimings}), joined to what the
+ * session sent it for through {@link RecentRequests}: {@code tick_to_trade}, from the platform's receipt of the trigger
+ * (a shard's of a market-data record, a gateway's of a report) to the request being written to the venue, by exchange, action and trigger kind; {@code gw.to_wire}, from the hand-off to that
+ * write, and {@code venue.answer}, from it to the venue's answer, by exchange and action; and the cancel race, where a
+ * fill and the order's cancel come within a second of each other at the venue: {@code cancel_race.lost} when the fill
+ * came after the cancel was written (lost in flight), {@code cancel_race.late} by how long before it (too slow). The
+ * gateway's times and the venue's are other hosts' clocks, so these carry both hosts' error bounds.
  *
  * <p>Allocates nothing on the order path; turning an order status into reports may, when the numbers are too large for
  * a long.
@@ -104,6 +113,19 @@ public final class GatewayClient implements AeronPathAgent {
     private static final int NEW = 0;
     private static final int CANCEL = 1;
     private static final int MODIFY = 2;
+    // A fill and a cancel further apart than this at the venue weren't racing.
+    private static final long RACE_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(1);
+
+    /** The order path's latency grids, all on one MinuteHistograms the client's thread writes. */
+    public record OrderPathLatency(
+            LatencyGrid tickToOrder,
+            LatencyGrid orderToAck,
+            LatencyGrid cancelToAck,
+            LatencyGrid tickToTrade,
+            LatencyGrid toWire,
+            LatencyGrid venueAnswer,
+            LatencyGrid cancelLost,
+            LatencyGrid cancelLate) {}
 
     /** Who the session is, as its hello says. */
     /**
@@ -167,12 +189,17 @@ public final class GatewayClient implements AeronPathAgent {
     private int helloCount;
     private int helloExchange;
     private long now;
-    // Set before the client starts, or never; all three share one MinuteHistograms this thread writes.
+    // Set before the client starts, or never; all share one MinuteHistograms this thread writes.
     private LatencyGrid tickToOrder;
     private LatencyGrid orderToAck;
     private LatencyGrid cancelToAck;
+    private OrderPathLatency latency;
+    private final RecentRequests recent = new RecentRequests();
+    private final OrderTimingDecoder timing = new OrderTimingDecoder();
+    // Where each OrderTiming is journaled; set before the client starts, or never.
+    private SequencedRingBuffer<OrderTiming> timings;
     // What the client did, counted on its thread for the session's samples.
-    private final MetricCounters activity = new MetricCounters(10);
+    private final MetricCounters activity = new MetricCounters(13);
     private final int newOrdersSent = activity.counter("newOrders");
     private final int cancelsSent = activity.counter("cancels");
     private final int modifiesSent = activity.counter("modifies");
@@ -183,6 +210,10 @@ public final class GatewayClient implements AeronPathAgent {
     private final int reportsIn = activity.counter("reports");
     private final int reportsRetried = activity.counter("reportsRetried");
     private final int pendingPeak = activity.peak("pendingPeak");
+    // Gateways' timings of requests: taken, not joined to a request still remembered, and not journaled (ring full).
+    private final int timingsIn = activity.counter("timings");
+    private final int timingsUnmatched = activity.counter("timingsUnmatched");
+    private final int timingsUnjournaled = activity.counter("timingsUnjournaled");
 
     /** @param omsOrders the OMS's outbound ring; the client must be its only reader that writes {@code toOms} */
     public GatewayClient(
@@ -214,11 +245,16 @@ public final class GatewayClient implements AeronPathAgent {
     }
 
     /** Records the order path's latencies into these grids; before the client starts. */
-    public void measureLatency(
-            final LatencyGrid tickToOrder, final LatencyGrid orderToAck, final LatencyGrid cancelToAck) {
-        this.tickToOrder = tickToOrder;
-        this.orderToAck = orderToAck;
-        this.cancelToAck = cancelToAck;
+    public void measureLatency(final OrderPathLatency grids) {
+        this.latency = grids;
+        this.tickToOrder = grids.tickToOrder();
+        this.orderToAck = grids.orderToAck();
+        this.cancelToAck = grids.cancelToAck();
+    }
+
+    /** Journals each gateway's {@code OrderTiming} on this ring; before the client starts. */
+    public void journalTimings(final SequencedRingBuffer<OrderTiming> ring) {
+        this.timings = ring;
     }
 
     @Override
@@ -452,17 +488,31 @@ public final class GatewayClient implements AeronPathAgent {
         }
         activity.increment(newOrdersSent);
         if (this.tickToOrder != null) {
-            final long sentAt = handedOff(decoder.exchangeId(), NEW, decoder.triggerKind(), decoder.triggerTimestamp());
+            final long sentAt = handedOff(
+                    counter,
+                    decoder.exchangeId(),
+                    NEW,
+                    decoder.triggerKind(),
+                    decoder.triggerTimestamp(),
+                    decoder.triggerOriginTimestamp());
             this.orders.get(counter).sentAt = sentAt;
         }
     }
 
-    /** Records the hand-off's tick-to-order; @return when it was handed off */
-    private long handedOff(final int exchangeId, final int action, final TriggerKind kind, final long triggerAt) {
+    /** Records the hand-off's tick-to-order, and remembers it for the request's timing; @return when it was handed off */
+    private long handedOff(
+            final long counter,
+            final int exchangeId,
+            final int action,
+            final TriggerKind kind,
+            final long triggerAt,
+            final long originAt) {
         final long sentAt = this.wallClock.nanoTime();
+        final int kindValue = kind == TriggerKind.NULL_VAL ? 0 : kind.value();
         if (triggerAt != 0) {
-            this.tickToOrder.record(exchangeId, action, kind.value(), sentAt - triggerAt, sentAt);
+            this.tickToOrder.record(exchangeId, action, kindValue, sentAt - triggerAt, sentAt);
         }
+        this.recent.handedOff(counter, action, exchangeId, kindValue, originAt, sentAt);
         return sentAt;
     }
 
@@ -489,8 +539,13 @@ public final class GatewayClient implements AeronPathAgent {
         }
         activity.increment(link.state == GatewayLink.READY ? cancelsSent : cancelsHeld);
         if (this.tickToOrder != null) {
-            final long sentAt =
-                    handedOff(decoder.exchangeId(), CANCEL, decoder.triggerKind(), decoder.triggerTimestamp());
+            final long sentAt = handedOff(
+                    counter,
+                    decoder.exchangeId(),
+                    CANCEL,
+                    decoder.triggerKind(),
+                    decoder.triggerTimestamp(),
+                    decoder.triggerOriginTimestamp());
             final GatewayOrders.Entry entry = this.orders.get(counter);
             if (entry != null) {
                 entry.cancelSentAt = sentAt;
@@ -513,7 +568,13 @@ public final class GatewayClient implements AeronPathAgent {
         }
         activity.increment(modifiesSent);
         if (this.tickToOrder != null) {
-            handedOff(decoder.exchangeId(), MODIFY, decoder.triggerKind(), decoder.triggerTimestamp());
+            handedOff(
+                    this.modify.getClientOidCounter(),
+                    decoder.exchangeId(),
+                    MODIFY,
+                    decoder.triggerKind(),
+                    decoder.triggerTimestamp(),
+                    decoder.triggerOriginTimestamp());
         }
     }
 
@@ -784,7 +845,7 @@ public final class GatewayClient implements AeronPathAgent {
             if (SbeMessage.schemaId(buffer, offset) == MessageSchema.CORE.schemaId()) {
                 return onReport(this.link, buffer, offset, length, frame.reservedValue());
             }
-            onGatewayMessage(this.link, templateId, buffer, offset, frame.reservedValue());
+            onGatewayMessage(this.link, templateId, buffer, offset, length, frame.reservedValue());
             return Action.CONTINUE;
         }
     }
@@ -812,6 +873,7 @@ public final class GatewayClient implements AeronPathAgent {
         this.inbound.buffer.putBytes(0, buffer, offset, length);
         if (this.orderToAck != null) {
             answered(this.orders.get(this.inbound.getClientOidCounter()), this.inbound.decoder);
+            filled(this.inbound.getClientOidCounter(), this.inbound.decoder);
         }
         this.orders.reported(this.inbound.getClientOidCounter(), this.inbound.decoder);
         return ControlledFragmentHandler.Action.CONTINUE;
@@ -832,6 +894,102 @@ public final class GatewayClient implements AeronPathAgent {
         }
     }
 
+    /** A fill's venue time, for the cancel race. */
+    private void filled(final long counter, final OrderExecutionReportDecoder report) {
+        final ExecType type = report.execType();
+        if (type != ExecType.FILL && type != ExecType.PARTIAL_FILL) {
+            return;
+        }
+        final int slot = this.recent.find(counter);
+        final long venueNanos = report.timestampEvent();
+        if (slot < 0 || venueNanos == OrderExecutionReportDecoder.timestampEventNullValue() || venueNanos <= 0) {
+            return;
+        }
+        this.recent.fillAt(slot, venueNanos);
+        race(slot);
+    }
+
+    /** A gateway's timing of one request: journaled, then joined to what the session sent it for. */
+    private void onTiming(final DirectBuffer buffer, final int offset, final int length) {
+        activity.increment(timingsIn);
+        if (this.timings != null
+                && !this.timings.tryPublishRaw(buffer, offset, OrderTimingDecoder.TEMPLATE_ID, length)) {
+            activity.increment(timingsUnjournaled);
+        }
+        if (this.latency == null) {
+            return;
+        }
+        this.timing.wrap(
+                buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH, this.header.blockLength(), this.header.version());
+        final int action = actionOf(this.timing.requestClass());
+        final int slot = action < 0 ? -1 : this.recent.find(this.timing.clientOidCounter());
+        if (slot < 0) {
+            activity.increment(timingsUnmatched);
+            return;
+        }
+        final long at = this.wallClock.nanoTime();
+        final int exchangeId = this.recent.exchangeId(slot);
+        final long wired = this.timing.wireSentNanos();
+        final long answered = this.timing.answeredNanos();
+        if (wired != 0) {
+            recordSpan(
+                    this.latency.tickToTrade(),
+                    exchangeId,
+                    action,
+                    this.recent.triggerKind(slot, action),
+                    this.recent.originAt(slot, action),
+                    wired,
+                    at);
+            recordSpan(this.latency.toWire(), exchangeId, action, 0, this.recent.handedOffAt(slot, action), wired, at);
+            recordSpan(this.latency.venueAnswer(), exchangeId, action, 0, wired, answered, at);
+            if (action == CANCEL) {
+                this.recent.cancelWiredAt(slot, wired);
+                race(slot);
+            }
+        }
+    }
+
+    /** Records {@code to - from} where both happened and the span isn't negative (clocks of different hosts). */
+    private static void recordSpan(
+            final LatencyGrid grid,
+            final int exchangeId,
+            final int action,
+            final int kind,
+            final long from,
+            final long to,
+            final long at) {
+        if (from != 0 && to != 0 && to >= from) {
+            grid.record(exchangeId, action, kind, to - from, at);
+        }
+    }
+
+    /** A fill and the order's cancel both known at the venue and close enough to have raced: which way it went. */
+    private void race(final int slot) {
+        final long fill = this.recent.fillAt(slot);
+        final long wired = this.recent.cancelWiredAt(slot);
+        if (fill == 0 || wired == 0 || Math.abs(fill - wired) > RACE_WINDOW_NANOS) {
+            return;
+        }
+        final long at = this.wallClock.nanoTime();
+        final int exchangeId = this.recent.exchangeId(slot);
+        if (fill >= wired) {
+            this.latency.cancelLost().record(exchangeId, 0, 0, fill - wired, at);
+        } else {
+            this.latency.cancelLate().record(exchangeId, 0, 0, wired - fill, at);
+        }
+        // Counted once per fill and cancel: a later fill races again only against a later cancel.
+        this.recent.fillAt(slot, 0);
+    }
+
+    private static int actionOf(final group.gnometrading.schemas.gateway.RequestClass requestClass) {
+        return switch (requestClass) {
+            case NEW -> NEW;
+            case CANCEL -> CANCEL;
+            case AMEND -> MODIFY;
+            default -> -1;
+        };
+    }
+
     /** The cancel's own answer, or the order's end, which answers it too. */
     private static boolean answersCancel(final ExecType execType) {
         return execType == ExecType.CANCEL
@@ -846,6 +1004,7 @@ public final class GatewayClient implements AeronPathAgent {
             final int templateId,
             final DirectBuffer buffer,
             final int offset,
+            final int length,
             final long sequence) {
         this.header.wrap(buffer, offset);
         final int body = offset + MessageHeaderDecoder.ENCODED_LENGTH;
@@ -878,6 +1037,7 @@ public final class GatewayClient implements AeronPathAgent {
                 this.queryResult.wrap(buffer, body, this.header.blockLength(), this.header.version());
                 onQueryResult();
             }
+            case OrderTimingDecoder.TEMPLATE_ID -> onTiming(buffer, offset, length);
             default -> {}
         }
     }

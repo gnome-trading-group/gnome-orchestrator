@@ -228,6 +228,7 @@ public class SessionOrchestrator extends Orchestrator {
         this.orders = new SessionOrders(
                 logger, properties, nanoClock, () -> getInstance(RegistryConnection.class), this.aeron);
         GatewayClient client = orders.wire(listings, buffers.orders(), buffers.omsExecReports(), venueQueries);
+        client.journalTimings(buffers.gatewayTimings());
         latency.measure(client);
         // Before recovery: a live session asks the venue through its gateways, which must have welcomed it first.
         GnomeAgentRunner orderEntry = SessionAgents.startOrderEntry(client, errorHandler);

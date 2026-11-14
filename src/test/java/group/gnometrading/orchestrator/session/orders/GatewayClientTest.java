@@ -5,7 +5,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.latency.LatencyKey;
+import group.gnometrading.latency.MinuteHistograms;
+import group.gnometrading.latency.MinuteSummary;
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
@@ -22,6 +27,7 @@ import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.SbeMessage;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.TriggerKind;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.GatewayState;
 import group.gnometrading.schemas.gateway.GoodbyeReason;
@@ -30,20 +36,27 @@ import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
 import group.gnometrading.schemas.gateway.OrderState;
 import group.gnometrading.schemas.gateway.OrderStatusEncoder;
+import group.gnometrading.schemas.gateway.OrderTiming;
+import group.gnometrading.schemas.gateway.OrderTimingEncoder;
 import group.gnometrading.schemas.gateway.ReHelloReason;
 import group.gnometrading.schemas.gateway.ReHelloRequiredEncoder;
+import group.gnometrading.schemas.gateway.RequestClass;
 import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersDecoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeEncoder;
+import group.gnometrading.schemas.gateway.TimingOutcome;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import org.agrona.concurrent.SystemEpochNanoClock;
@@ -102,6 +115,9 @@ class GatewayClientTest {
             key -> new GatewayLinks.Endpoint("127.0.0.1", this.resolvedPort),
             System::nanoTime);
     private final List<UnsafeBuffer> atGateway = new ArrayList<>();
+    private final SystemEpochNanoClock wall = new SystemEpochNanoClock();
+    private final List<Long> journaledTimings = new ArrayList<>();
+    private SequencedPoller timingReader;
     private long gatewayHeartbeatSeq;
 
     @AfterEach
@@ -126,6 +142,64 @@ class GatewayClientTest {
         connectAndWelcome();
         await(() -> received(CancelOrderDecoder.TEMPLATE_ID).size() == 1, "the held cancel");
         assertTrue(received(OrderDecoder.TEMPLATE_ID).isEmpty(), "the refused order never goes");
+    }
+
+    @Test
+    void aRequestsTimingIsJournaledAndJoinedToWhatItWasSentForEvenAfterItsOrderEnded() throws Exception {
+        final Latency latency = measured();
+        connectAndWelcome();
+        final long receivedAt = this.wall.nanoTime() - TimeUnit.MILLISECONDS.toNanos(5);
+        sendOrder(1, receivedAt);
+        await(() -> received(OrderDecoder.TEMPLATE_ID).size() == 1, "the order");
+        // An IOC's fill can beat the answer that placed it: the order has ended before its timing comes.
+        report(1, ExecType.FILL, OrderStatus.FILLED, 3_000_000, 400_000_000, 3_000_000, 0, 1);
+        await(() -> this.omsReports.size() == 1, "the fill");
+
+        final long wired = this.wall.nanoTime();
+        sendToSession(orderTiming(1, RequestClass.NEW, wired, wired + TimeUnit.MILLISECONDS.toNanos(2)), 0);
+        await(() -> this.journaledTimings.size() == 1, "the timing journaled");
+
+        final Map<String, Long> recorded = latency.closeMinute();
+        assertTrue(
+                recorded.get("tick_to_trade/NEW/MARKET_DATA") >= TimeUnit.MILLISECONDS.toNanos(5),
+                "from the platform's receipt of the trigger to the wire: " + recorded);
+        assertTrue(recorded.containsKey("gw.to_wire/NEW/"), "from the hand-off to the wire: " + recorded);
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(2), recorded.get("venue.answer/NEW/"), 0.05 * 2e6);
+    }
+
+    @Test
+    void aFillAndTheOrdersCancelAtTheVenueAreTimedAsARaceEitherWay() throws Exception {
+        final Latency latency = measured();
+        connectAndWelcome();
+        sendOrder(1, 0);
+        sendOrder(2, 0);
+        await(() -> received(OrderDecoder.TEMPLATE_ID).size() == 2, "the orders");
+        sendCancel(1);
+        sendCancel(2);
+        await(() -> received(CancelOrderDecoder.TEMPLATE_ID).size() == 2, "the cancels");
+
+        final long wired = this.wall.nanoTime();
+        sendToSession(orderTiming(1, RequestClass.CANCEL, wired, wired + 1_000), 0);
+        sendToSession(orderTiming(2, RequestClass.CANCEL, wired, wired + 1_000), 0);
+        await(() -> this.journaledTimings.size() == 2, "the cancels' timings");
+        fill(1, wired + TimeUnit.MILLISECONDS.toNanos(4), 1);
+        fill(2, wired - TimeUnit.MILLISECONDS.toNanos(6), 2);
+        await(() -> this.omsReports.size() == 2, "the fills");
+
+        final Map<String, Long> recorded = latency.closeMinute();
+        assertEquals(
+                TimeUnit.MILLISECONDS.toNanos(4), recorded.get("cancel_race.lost//"), 0.05 * 4e6, "filled in flight");
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(6), recorded.get("cancel_race.late//"), 0.05 * 6e6, "too slow");
+    }
+
+    @Test
+    void aTimingForARequestNoLongerRememberedIsJournaledButCountedUnmatched() throws Exception {
+        measured();
+        connectAndWelcome();
+        final long wired = this.wall.nanoTime();
+        sendToSession(orderTiming(77, RequestClass.NEW, wired, wired + 1_000), 0);
+        await(() -> this.journaledTimings.size() == 1, "the timing journaled");
+        await(() -> counter("timingsUnmatched") == 1, "counted unmatched");
     }
 
     @Test
@@ -416,16 +490,120 @@ class GatewayClientTest {
                 "the reply");
     }
 
+    private Message orderTiming(
+            final long counter, final RequestClass requestClass, final long wired, final long answered) {
+        final UnsafeBuffer buffer = new UnsafeBuffer(new byte[256]);
+        final OrderTimingEncoder timing = new OrderTimingEncoder()
+                .wrapAndApplyHeader(buffer, 0, new MessageHeaderEncoder())
+                .venueAccountId(5)
+                .sessionSeq(SLOT)
+                .clientOidCounter(counter)
+                .requestClass(requestClass)
+                .outcome(TimingOutcome.ANSWERED)
+                .ingressNanos(wired - 3_000)
+                .takenNanos(wired - 2_000)
+                .decidedNanos(wired - 1_000)
+                .wireSentNanos(wired)
+                .answeredNanos(answered)
+                .answerSlackNanos(0)
+                .venueCode(200)
+                .venueTsNanos(0)
+                .venueProcessingMicros(-1);
+        return new Message(buffer, MessageHeaderEncoder.ENCODED_LENGTH + timing.encodedLength());
+    }
+
+    /** A fill the venue says it made at {@code venueNanos}. */
+    private void fill(final long counter, final long venueNanos, final long reportSeq) throws InterruptedException {
+        final OrderExecutionReport report = new OrderExecutionReport();
+        report.encoder
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .execType(ExecType.PARTIAL_FILL)
+                .orderStatus(OrderStatus.PARTIALLY_FILLED)
+                .filledQty(1_000_000)
+                .fillPrice(400_000_000)
+                .cumulativeQty(1_000_000)
+                .leavesQty(2_000_000)
+                .timestampEvent(venueNanos);
+        report.encodeClientOid(counter, STRATEGY_ID);
+        sendToSession(new Message(report.buffer, report.totalMessageSize()), reportSeq);
+    }
+
+    /** The order path's grids, as the session builds them, with every timing journaled; read by closing the minute. */
+    private Latency measured() {
+        final String[] exchanges = {"KALSHI"};
+        final int[] ids = {EXCHANGE_ID};
+        // Labelled by TriggerKind value, as the session's grids are.
+        final String[] kinds = new String[TriggerKind.OTHER.value() + 1];
+        Arrays.fill(kinds, "");
+        for (final TriggerKind kind : TriggerKind.values()) {
+            if (kind != TriggerKind.NULL_VAL) {
+                kinds[kind.value()] = kind.name();
+            }
+        }
+        final String[] none = {""};
+        final String[] actions = GatewayClient.LATENCY_ACTIONS;
+        final MinuteHistograms histograms = new MinuteHistograms(256);
+        this.client.measureLatency(new GatewayClient.OrderPathLatency(
+                new LatencyGrid(histograms, 4, "session.tick_to_order", ids, exchanges, actions, kinds),
+                new LatencyGrid(histograms, 5, "order_to_ack", ids, exchanges, none, none),
+                new LatencyGrid(histograms, 6, "cancel_to_ack", ids, exchanges, none, none),
+                new LatencyGrid(histograms, 8, "tick_to_trade", ids, exchanges, actions, kinds),
+                new LatencyGrid(histograms, 9, "gw.to_wire", ids, exchanges, actions, none),
+                new LatencyGrid(histograms, 10, "venue.answer", ids, exchanges, actions, none),
+                new LatencyGrid(histograms, 11, "cancel_race.lost", ids, exchanges, none, none),
+                new LatencyGrid(histograms, 12, "cancel_race.late", ids, exchanges, none, none)));
+        final SequencedRingBuffer<OrderTiming> journal = new SequencedRingBuffer<>(OrderTiming::new, this.sequence);
+        this.timingReader = journal.createPoller((seq, templateId, buffer, length) -> this.journaledTimings.add(seq));
+        this.client.journalTimings(journal);
+        return new Latency(histograms);
+    }
+
+    /** Recorded values by metric/action/kind label, the minute's largest of each. */
+    private record Latency(MinuteHistograms histograms) {
+        Map<String, Long> closeMinute() {
+            this.histograms.roll(System.currentTimeMillis() * 1_000_000L + MinuteHistograms.MINUTE_NANOS);
+            final MinuteSummary summary = new MinuteSummary(this.histograms.capacity());
+            assertTrue(this.histograms.summarize(summary));
+            final Map<String, Long> recorded = new HashMap<>();
+            for (int key = 0; key < summary.keys(); key++) {
+                if (summary.count(key) > 0) {
+                    final LatencyKey label = this.histograms.label(key);
+                    recorded.put(label.metric() + "/" + label.action() + "/" + label.kind(), summary.max(key));
+                }
+            }
+            return recorded;
+        }
+    }
+
+    private long counter(final String name) {
+        final MetricCounters activity = this.client.activity();
+        for (int i = 0; i < activity.count(); i++) {
+            if (activity.name(i).equals(name)) {
+                return activity.get(i);
+            }
+        }
+        throw new IllegalArgumentException(name);
+    }
+
     // ----- the OMS's side -----
 
     private void sendOrder(final long counter) {
+        sendOrder(counter, 0);
+    }
+
+    /** An order the OMS sent for a market-data record a shard received at {@code receivedAt}, 2 ms before the session. */
+    private void sendOrder(final long counter, final long receivedAt) {
         final Order order = new Order();
         order.encoder
                 .exchangeId(EXCHANGE_ID)
                 .securityId(SECURITY_ID)
                 .price(400_000_000)
                 .size(3_000_000)
-                .side(Side.Bid);
+                .side(Side.Bid)
+                .triggerKind(TriggerKind.MARKET_DATA)
+                .triggerTimestamp(receivedAt == 0 ? 0 : receivedAt + TimeUnit.MILLISECONDS.toNanos(2))
+                .triggerOriginTimestamp(receivedAt);
         order.encodeClientOid(counter, STRATEGY_ID);
         this.omsOrders.publishRaw(order.buffer, OrderDecoder.TEMPLATE_ID, order.totalMessageSize());
     }
@@ -489,6 +667,9 @@ class GatewayClientTest {
             try {
                 this.client.doWork();
                 this.omsReader.poll();
+                if (this.timingReader != null) {
+                    this.timingReader.poll();
+                }
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }

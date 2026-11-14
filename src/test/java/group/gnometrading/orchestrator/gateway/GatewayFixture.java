@@ -9,6 +9,7 @@ import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.account.lane.FakeVenueServer;
 import group.gnometrading.gateways.account.lane.LaneCommand;
+import group.gnometrading.gateways.account.lane.RequestTiming;
 import group.gnometrading.gateways.account.lane.TestLaneVenue;
 import group.gnometrading.gateways.account.reader.AccountConnection;
 import group.gnometrading.gateways.account.reader.AccountReader;
@@ -45,7 +46,9 @@ import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
 import group.gnometrading.orchestrator.gateway.core.Kills;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
 import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
@@ -238,12 +241,16 @@ public final class GatewayFixture implements AutoCloseable {
                         setup.journalRing());
         this.journalPaused = setup.journalPaused();
         this.admissions = new ArrayList<>();
+        final ManyToOneRingBuffer<TimingMessage> timings =
+                new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, 256);
         for (int i = 0; i < this.accounts.size(); i++) {
             final GatewayAccount account = this.accounts.get(i);
             final LaneAdmissions journaled = new LaneAdmissions(
                     account.accountId(),
                     this.journal == null ? JournalRecorder.NONE : this.journal.lane(i),
-                    System::nanoTime);
+                    System::nanoTime,
+                    SampledEpochNanoClock.INSTANCE,
+                    new OrderTimings(timings));
             this.admissions.add(journaled);
             account.lane().admissions(tapped(journaled, setup.tap()));
         }
@@ -290,6 +297,7 @@ public final class GatewayFixture implements AutoCloseable {
                 status,
                 reportRings(this.accounts, rejects),
                 toEgress,
+                timings,
                 System::nanoTime,
                 new SystemEpochNanoClock(),
                 this.journal == null ? JournalRecorder.NONE : this.journal.egress(),
@@ -409,6 +417,12 @@ public final class GatewayFixture implements AutoCloseable {
             public void connectionsBusy() {
                 journaled.connectionsBusy();
                 tap.connectionsBusy();
+            }
+
+            @Override
+            public void timed(final RequestTiming timing) {
+                journaled.timed(timing);
+                tap.timed(timing);
             }
         };
     }

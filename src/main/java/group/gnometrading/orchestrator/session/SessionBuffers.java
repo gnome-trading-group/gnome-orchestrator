@@ -6,6 +6,7 @@ import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.MetricRow;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.gateway.OrderTiming;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import java.util.IdentityHashMap;
@@ -24,6 +25,7 @@ import org.agrona.concurrent.EpochNanoClock;
  * @param latency the heartbeat's latency rows ({@code _latency}), a minute at a time
  * @param orders the OMS's orders, to order entry
  * @param omsExecReports order entry's reports, to the OMS
+ * @param gatewayTimings each request's timing from its gateway, as order entry got it; journaled, read by nothing else
  */
 record SessionBuffers(
         GlobalSequence sequence,
@@ -34,16 +36,25 @@ record SessionBuffers(
         SequencedRingBuffer<MetricRow> metrics,
         SequencedRingBuffer<MetricRow> latency,
         SequencedRingBuffer<Intent> orders,
-        SequencedRingBuffer<OrderExecutionReport> omsExecReports) {
+        SequencedRingBuffer<OrderExecutionReport> omsExecReports,
+        SequencedRingBuffer<OrderTiming> gatewayTimings) {
 
     /** Each ring's name in the session's samples, in the order of {@link #rings}. */
     List<String> ringNames() {
         return List.of(
-                "marketData", "intents", "strategyExecReports", "metrics", "latency", "orders", "omsExecReports");
+                "marketData",
+                "intents",
+                "strategyExecReports",
+                "metrics",
+                "latency",
+                "orders",
+                "omsExecReports",
+                "gatewayTimings");
     }
 
     List<SequencedRingBuffer<?>> rings() {
-        return List.of(marketData, intents, strategyExecReports, metrics, latency, orders, omsExecReports);
+        return List.of(
+                marketData, intents, strategyExecReports, metrics, latency, orders, omsExecReports, gatewayTimings);
     }
 
     static SessionBuffers create(EpochNanoClock clock) {
@@ -70,7 +81,19 @@ record SessionBuffers(
         SequencedRingBuffer<OrderExecutionReport> omsExecReports = new SequencedRingBuffer<>(
                 OrderExecutionReport::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE, clock);
         sources.put(omsExecReports, JournalSource.OMS_EXEC_REPORT);
+        SequencedRingBuffer<OrderTiming> gatewayTimings =
+                new SequencedRingBuffer<>(OrderTiming::new, sequence, SessionOrders.OUTBOUND_BUFFER_SIZE, clock);
+        sources.put(gatewayTimings, JournalSource.GATEWAY_TIMING);
         return new SessionBuffers(
-                sequence, sources, marketData, intents, strategyExecReports, metrics, latency, orders, omsExecReports);
+                sequence,
+                sources,
+                marketData,
+                intents,
+                strategyExecReports,
+                metrics,
+                latency,
+                orders,
+                omsExecReports,
+                gatewayTimings);
     }
 }

@@ -14,6 +14,9 @@ import org.agrona.collections.LongHashSet;
  */
 public final class GatewaySession {
 
+    /** Timings held for a session whose publication is behind; past this, new ones are dropped. */
+    static final int TIMINGS_HELD = 256;
+
     /** Known, but with no link yet: after a restart, or before its hello. Its reports wait. */
     public static final int HELLO_PENDING = 0;
 
@@ -49,6 +52,8 @@ public final class GatewaySession {
     public final PendingMessages unnumbered = new PendingMessages(16, ReplayRing.SLOT_LENGTH);
     // Egress's: the message to send once everything else has gone, and whether it has; the control thread waits on it.
     public final PendingMessages last = new PendingMessages(1, ReplayRing.SLOT_LENGTH);
+    // Egress's: requests' timings waiting to go once its reports have, best effort: dropped when this is full.
+    public final PendingMessages timings = new PendingMessages(TIMINGS_HELD, TimingMessage.MAX_LENGTH);
     public volatile boolean lastSent;
 
     public GatewaySession(

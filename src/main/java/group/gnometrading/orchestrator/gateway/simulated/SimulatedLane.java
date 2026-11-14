@@ -8,11 +8,13 @@ import group.gnometrading.gateways.account.admission.AdmissionSession;
 import group.gnometrading.gateways.account.admission.FairQueue;
 import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.account.lane.LaneCommand;
+import group.gnometrading.gateways.account.lane.RequestTiming;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.latency.LatencyGrid;
 import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.metrics.MetricCounters;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.Mbp10Schema;
@@ -77,6 +79,12 @@ final class SimulatedLane implements GnomeAgent {
     private final Mbp10Schema record = new Mbp10Schema();
     private final OrderExecutionReport reject = new OrderExecutionReport();
     private final SimulatedBook.ReportSink sink = this::deliver;
+    // Where each session request's timing goes; set before the lane starts. Times here are already epoch.
+    private OrderTimings timings = OrderTimings.NONE;
+    private final RequestTiming timing = new RequestTiming();
+    // The command being handled's stamps, epoch.
+    private long commandIngressNanos;
+    private long commandTakenNanos;
     private long now;
     private long wallNow;
     private int commandsTaken;
@@ -294,6 +302,8 @@ final class SimulatedLane implements GnomeAgent {
 
     private void onCommand(final LaneCommand command) {
         this.commandsTaken++;
+        this.commandIngressNanos = command.enqueuedNanos == 0 ? 0 : command.enqueuedNanos + (this.wallNow - this.now);
+        this.commandTakenNanos = this.wallNow;
         if (command.enqueuedNanos != 0) {
             this.commandLatency.record(0, 0, 0, this.now - command.enqueuedNanos, this.wallNow);
         }
@@ -350,6 +360,8 @@ final class SimulatedLane implements GnomeAgent {
         order.orderType = command.orderType;
         order.postOnly = command.postOnly;
         order.book = book;
+        order.submitIngressNanos = this.commandIngressNanos;
+        order.submitTakenNanos = this.commandTakenNanos;
         session.orders.put(order.counter, order);
         place.opened();
         this.working = this.working + 1;
@@ -363,6 +375,8 @@ final class SimulatedLane implements GnomeAgent {
             refuse(command, ExecType.CANCEL_REJECT, OrderStatus.CANCELED, RejectReason.UNKNOWN_ORDER);
             return;
         }
+        order.cancelIngressNanos = this.commandIngressNanos;
+        order.cancelTakenNanos = this.commandTakenNanos;
         cancel(order);
     }
 
@@ -383,6 +397,8 @@ final class SimulatedLane implements GnomeAgent {
         order.amendPrice = command.price;
         order.amendSize = command.size;
         order.amendPostOnly = command.postOnly;
+        order.amendIngressNanos = this.commandIngressNanos;
+        order.amendTakenNanos = this.commandTakenNanos;
         if (!order.amendWanted) {
             order.amendWanted = true;
             this.admission.enqueue(order, AdmissionEntry.AMEND);
@@ -418,6 +434,7 @@ final class SimulatedLane implements GnomeAgent {
             this.admission.unqueue(order);
         }
         order.book.cancel(order, this.wallNow);
+        awaiting(order, RequestClass.CANCEL);
         wake(order.book);
     }
 
@@ -461,6 +478,7 @@ final class SimulatedLane implements GnomeAgent {
                 order.amendWanted = false;
                 order.book.amend(order, this.wallNow);
             }
+            awaiting(order, submit ? RequestClass.NEW : RequestClass.AMEND);
             wake(order.book);
             work++;
         }
@@ -474,6 +492,7 @@ final class SimulatedLane implements GnomeAgent {
         if (!order.stillQueued(kind)) {
             return;
         }
+        timeExpired(order, kind);
         if (kind == AdmissionEntry.SUBMIT) {
             end(order, ExecType.REJECT, OrderStatus.REJECTED, RejectReason.RATE_LIMITED);
         } else {
@@ -488,6 +507,67 @@ final class SimulatedLane implements GnomeAgent {
                     OrderStatus.CANCELED,
                     RejectReason.RATE_LIMITED);
         }
+    }
+
+    /** A request held past its session's wait never reached the venue: timed as not sent. */
+    private void timeExpired(final SimulatedOrder order, final int kind) {
+        final boolean submit = kind == AdmissionEntry.SUBMIT;
+        final RequestTiming timing = startTiming(order, submit ? RequestClass.NEW : RequestClass.AMEND);
+        timing.outcome = RequestTiming.NOT_SENT;
+        timing.decidedNanos = this.wallClock.nanoTime();
+        this.timings.send(SimulatedAccount.ACCOUNT_ID, timing, 0);
+    }
+
+    /** The order's request has gone to its book; its timing goes with its first report back. */
+    private void awaiting(final SimulatedOrder order, final RequestClass request) {
+        order.awaiting = request;
+        order.awaitingSentNanos = this.wallNow;
+    }
+
+    /**
+     * The first report after the order's request reached its book: the request's timing as if the simulated venue were
+     * real, sent when the lane admitted it, the venue's time the report's, answered when the report got back.
+     */
+    private void timeAnswer(final SimulatedOrder order, final OrderExecutionReport report) {
+        final RequestTiming timing = startTiming(order, order.awaiting);
+        final ExecType type = report.decoder.execType();
+        timing.outcome = type == ExecType.REJECT || type == ExecType.CANCEL_REJECT
+                ? RequestTiming.REJECTED
+                : RequestTiming.ANSWERED;
+        timing.decidedNanos = order.awaitingSentNanos;
+        timing.wireSentNanos = order.awaitingSentNanos;
+        timing.answeredNanos = report.decoder.timestampRecv();
+        timing.venueTsNanos = report.decoder.timestampEvent();
+        order.awaiting = null;
+        this.timings.send(SimulatedAccount.ACCOUNT_ID, timing, 0);
+    }
+
+    private RequestTiming startTiming(final SimulatedOrder order, final RequestClass request) {
+        final RequestTiming timing = this.timing;
+        timing.reset();
+        timing.sessionSlot = order.slot;
+        timing.clientOidCounter = order.counter;
+        timing.requestClass = request;
+        switch (request) {
+            case CANCEL -> {
+                timing.ingressNanos = order.cancelIngressNanos;
+                timing.takenNanos = order.cancelTakenNanos;
+            }
+            case AMEND -> {
+                timing.ingressNanos = order.amendIngressNanos;
+                timing.takenNanos = order.amendTakenNanos;
+            }
+            default -> {
+                timing.ingressNanos = order.submitIngressNanos;
+                timing.takenNanos = order.submitTakenNanos;
+            }
+        }
+        return timing;
+    }
+
+    /** Where each session request's timing goes; set before the lane starts. */
+    void timings(final OrderTimings timings) {
+        this.timings = timings;
     }
 
     // ----- market data and reports -----
@@ -546,16 +626,20 @@ final class SimulatedLane implements GnomeAgent {
         SimulatedBook.copy(this.reports.indexAt(index), slot, report);
         this.reports.commit(index);
         this.counters.increment(this.reportsSent);
+        final SimulatedSession session = this.sessions.get(slot);
+        final SimulatedOrder order = session == null ? null : session.orders.get(report.getClientOidCounter());
+        if (order == null) {
+            return true;
+        }
+        if (order.awaiting != null) {
+            timeAnswer(order, report);
+        }
         final OrderStatus status = report.decoder.orderStatus();
         if (status == OrderStatus.FILLED
                 || status == OrderStatus.CANCELED && report.decoder.execType() != ExecType.CANCEL_REJECT
                 || status == OrderStatus.REJECTED
                 || status == OrderStatus.EXPIRED) {
-            final SimulatedSession session = this.sessions.get(slot);
-            final SimulatedOrder order = session == null ? null : session.orders.get(report.getClientOidCounter());
-            if (order != null) {
-                release(order);
-            }
+            release(order);
         }
         return true;
     }

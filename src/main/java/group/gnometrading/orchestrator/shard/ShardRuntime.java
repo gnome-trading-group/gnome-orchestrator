@@ -44,7 +44,7 @@ final class ShardRuntime {
     /** Builds a stream's ring and minute files. */
     @FunctionalInterface
     interface StreamFactory {
-        ShardStream create(int streamId, String name);
+        ShardStream create(int streamId, int sourceId, String name);
     }
 
     private final Logger logger;
@@ -195,7 +195,9 @@ final class ShardRuntime {
             final Source source = securityMaster.getSource(info.sourceId());
             sources.accept(source);
             stream = factory.create(
-                    streamId, source.code() + " " + info.nativeSubjectId() + " (stream " + streamId + ")");
+                    streamId,
+                    source.sourceId(),
+                    source.code() + " " + info.nativeSubjectId() + " (stream " + streamId + ")");
             applyWindow(stream);
             agent.add(stream);
             publishing.add(stream);

@@ -6,11 +6,13 @@ import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.account.lane.LaneCommand;
+import group.gnometrading.gateways.account.lane.RequestTiming;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.account.reader.PublishedMap;
 import group.gnometrading.gateways.orders.CrossMarket;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
+import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
@@ -24,7 +26,9 @@ import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.KillRules;
 import group.gnometrading.orchestrator.gateway.core.Kills;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
 import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
@@ -108,11 +112,17 @@ class GatewayAllocationTest {
         private final ManyToOneRingBuffer<LaneCommand> commands;
         private final ManyToOneRingBuffer<AccountReport> reports;
         private final OrderExecutionReport report = new OrderExecutionReport();
+        // Each answer's timing too, as a real lane's admissions would send it.
+        private final OrderTimings timings;
+        private final RequestTiming timing = new RequestTiming();
 
         AnsweringLane(
-                final ManyToOneRingBuffer<LaneCommand> commands, final ManyToOneRingBuffer<AccountReport> reports) {
+                final ManyToOneRingBuffer<LaneCommand> commands,
+                final ManyToOneRingBuffer<AccountReport> reports,
+                final OrderTimings timings) {
             this.commands = commands;
             this.reports = reports;
+            this.timings = timings;
             // Each order ends at once, so the self-trade index takes it in and lets it go on every round trip.
             this.report
                     .encoder
@@ -135,6 +145,13 @@ class GatewayAllocationTest {
                         this.report.encodeClientOid(command.clientOidCounter, command.clientOidStrategyId);
                         entry.report.buffer.putBytes(0, this.report.buffer, 0, this.report.totalMessageSize());
                         this.reports.commit(index);
+                        this.timing.reset();
+                        this.timing.sessionSlot = command.sessionSlot;
+                        this.timing.clientOidCounter = command.clientOidCounter;
+                        this.timing.requestClass = RequestClass.NEW;
+                        this.timing.ingressNanos = command.enqueuedNanos;
+                        this.timing.answeredNanos = System.nanoTime();
+                        this.timings.send(1, this.timing, 0);
                     },
                     256);
             return 0;
@@ -204,11 +221,14 @@ class GatewayAllocationTest {
                     journal.ingress(),
                     cross,
                     kills);
+            final ManyToOneRingBuffer<TimingMessage> timings =
+                    new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, 256);
             final GatewayEgress egress = new GatewayEgress(
                     sessions,
                     status,
                     List.of(reports, rejects),
                     new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16),
+                    timings,
                     System::nanoTime,
                     SampledEpochNanoClock.INSTANCE,
                     journal.egress(),
@@ -233,7 +253,7 @@ class GatewayAllocationTest {
                     run(ingress, ingressThread),
                     run(egress, egressThread),
                     run(journal, journalThread),
-                    run(new AnsweringLane(account.commands, reports), new AtomicLong()));
+                    run(new AnsweringLane(account.commands, reports, new OrderTimings(timings)), new AtomicLong()));
             final AtomicLong received = new AtomicLong();
             try {
                 sendAndAwait(toGateway, replies, received, ORDERS / 2);

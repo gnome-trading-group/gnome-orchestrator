@@ -24,7 +24,9 @@ import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
 import group.gnometrading.orchestrator.gateway.core.Kills;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
 import group.gnometrading.orchestrator.gateway.simulated.SimulatedAccount;
 import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
@@ -224,6 +226,9 @@ public final class PaperGatewayFixture implements AutoCloseable {
                 new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 256);
         final ManyToOneRingBuffer<GatewayMessage> toEgress =
                 new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 256);
+        final ManyToOneRingBuffer<TimingMessage> timings =
+                new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, 256);
+        this.account.timings(new OrderTimings(timings));
         final ManyToOneRingBuffer<AccountReport> rejects =
                 new ManyToOneRingBuffer<>(AccountReport[]::new, AccountReport::new, 256);
         final Kills kills = new Kills();
@@ -246,6 +251,7 @@ public final class PaperGatewayFixture implements AutoCloseable {
                 status,
                 List.of(this.account.reports(), rejects),
                 toEgress,
+                timings,
                 System::nanoTime,
                 new SystemEpochNanoClock(),
                 JournalRecorder.NONE,

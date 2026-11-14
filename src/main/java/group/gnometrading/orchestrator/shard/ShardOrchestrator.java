@@ -10,6 +10,7 @@ import group.gnometrading.host.JvmReadings;
 import group.gnometrading.logging.AsyncLogger;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.md.Source;
 import group.gnometrading.metrics.CounterSampler;
 import group.gnometrading.metrics.SampleBuffer;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
@@ -200,7 +201,7 @@ public class ShardOrchestrator extends Orchestrator {
                 shard,
                 rawBucket);
 
-        final ShardLatency latency = new ShardLatency();
+        final ShardLatency latency = shardLatency(wallClock, securityMaster);
         final MarketDataCollectorAgent agent =
                 new MarketDataCollectorAgent(logger, System::nanoTime, ShardOrchestrator::wallNanos, latency);
         final ShardStatusWriter.Identity identity = ShardIdentity.resolve(
@@ -503,6 +504,18 @@ public class ShardOrchestrator extends Orchestrator {
         };
     }
 
+    /** Keyed by every source the registry has: a shard's partition can mix them, and the list is short. */
+    private static ShardLatency shardLatency(final EpochNanoClock wallClock, final SecurityMaster securityMaster) {
+        final Source[] all = securityMaster.getSources();
+        final int[] ids = new int[all.length];
+        final String[] codes = new String[all.length];
+        for (int i = 0; i < all.length; i++) {
+            ids[i] = all[i].sourceId();
+            codes[i] = all[i].code();
+        }
+        return new ShardLatency(wallClock, ids, codes);
+    }
+
     private static ShardRuntime.StreamFactory streamFactory(
             final Logger logger,
             final Clock clock,
@@ -510,11 +523,12 @@ public class ShardOrchestrator extends Orchestrator {
             final DirectBufferPool pool,
             final String outputBucket,
             final ShardLatency latency) {
-        return (streamId, name) -> {
+        return (streamId, sourceId, name) -> {
             final MarketDataCollector collector =
                     new MarketDataCollector(logger, clock, uploader, pool, streamId, RecordType.MBP_10, outputBucket);
             return new ShardStream(
                     streamId,
+                    sourceId,
                     name,
                     // A market's producer changes thread when a roll moves it to a new connection.
                     new SequencedRingBuffer<>(

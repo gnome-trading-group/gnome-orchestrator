@@ -17,6 +17,7 @@ import group.gnometrading.md.Stream;
 import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.orchestrator.gateway.core.AccountLink;
 import group.gnometrading.orchestrator.gateway.core.CrossKey;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.simulation.config.ExchangeSimulationConfig;
 import group.gnometrading.simulation.config.SessionSimulationConfig;
@@ -155,6 +156,11 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
                 defaultMaxQueueNanos,
                 nanoClock,
                 wallClock);
+    }
+
+    /** Where each paper request's timing goes, for its session; set before {@link #start}. */
+    public void timings(final OrderTimings timings) {
+        this.lane.timings(timings);
     }
 
     public void start() {

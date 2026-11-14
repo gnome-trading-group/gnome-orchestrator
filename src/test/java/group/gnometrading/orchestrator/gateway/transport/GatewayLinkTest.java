@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.collections.buffer.ManyToOneRingBuffer;
 import group.gnometrading.gateways.account.lane.LaneCommand;
+import group.gnometrading.gateways.account.lane.RequestTiming;
 import group.gnometrading.gateways.account.reader.AccountReport;
 import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.account.reader.PublishedMap;
 import group.gnometrading.gateways.orders.CrossMarket;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
+import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
@@ -23,7 +25,9 @@ import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
 import group.gnometrading.orchestrator.gateway.core.Kills;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
@@ -34,12 +38,15 @@ import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatDecoder;
 import group.gnometrading.schemas.gateway.GatewayState;
+import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
 import group.gnometrading.schemas.gateway.OrderStatusDecoder;
+import group.gnometrading.schemas.gateway.OrderTimingDecoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloEncoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeDecoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeEncoder;
+import group.gnometrading.schemas.gateway.TimingOutcome;
 import group.gnometrading.utils.SampledEpochNanoClock;
 import io.aeron.Publication;
 import io.aeron.Subscription;
@@ -104,11 +111,14 @@ class GatewayLinkTest {
             JournalRecorder.NONE,
             this.cross,
             Kills.none());
+    private final ManyToOneRingBuffer<TimingMessage> timings =
+            new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, 256);
     private final GatewayEgress egress = new GatewayEgress(
             this.sessions,
             this.status,
             List.of(this.accountReports, this.rejectRing),
             this.fromControl,
+            this.timings,
             System::nanoTime,
             new SystemEpochNanoClock(),
             JournalRecorder.NONE,
@@ -319,6 +329,44 @@ class GatewayLinkTest {
         assertEquals(RejectReason.SESSION_NOT_REGISTERED, rejectReason(reports.get(0)));
         assertEquals(ExecType.CANCEL_REJECT, execType(reports.get(1)));
         assertEquals(0, drainCommands().size());
+    }
+
+    @Test
+    void aRequestsTimingGoesToItsSessionUnnumberedAfterItsReportOnTheEpoch() throws Exception {
+        linkedSession();
+        report(this.accountReports, SLOT, 1, ExecType.NEW);
+        awaitReports(1);
+        final RequestTiming timing = new RequestTiming();
+        timing.reset();
+        timing.sessionSlot = SLOT;
+        timing.clientOidCounter = 1;
+        timing.requestClass = RequestClass.NEW;
+        timing.outcome = RequestTiming.ANSWERED;
+        timing.ingressNanos = 1_000;
+        timing.wireSentNanos = 2_000;
+        timing.answeredNanos = 3_000;
+        timing.answerSlackNanos = 40;
+        timing.venueCode = 201;
+        timing.venueTsNanos = 5_000_000;
+        new OrderTimings(this.timings).send(4, timing, 1_000_000);
+
+        final List<Received> got = awaitReceived(2, false);
+        assertEquals(OrderTimingDecoder.TEMPLATE_ID, got.get(1).templateId());
+        assertEquals(0, got.get(1).reservedValue(), "unnumbered: never replayed, never counted as a report");
+        final OrderTimingDecoder decoded =
+                new OrderTimingDecoder().wrapAndApplyHeader(got.get(1).message(), 0, new MessageHeaderDecoder());
+        assertEquals(4, decoded.venueAccountId());
+        assertEquals(1, decoded.clientOidCounter());
+        assertEquals(group.gnometrading.schemas.gateway.RequestClass.NEW, decoded.requestClass());
+        assertEquals(TimingOutcome.ANSWERED, decoded.outcome());
+        assertEquals(1_001_000, decoded.ingressNanos(), "the lane's times moved onto the epoch");
+        assertEquals(0, decoded.takenNanos(), "a step that didn't happen stays 0");
+        assertEquals(1_002_000, decoded.wireSentNanos());
+        assertEquals(1_003_000, decoded.answeredNanos());
+        assertEquals(40, decoded.answerSlackNanos(), "a span, not a time");
+        assertEquals(201, decoded.venueCode());
+        assertEquals(5_000_000, decoded.venueTsNanos(), "the venue's time is epoch already");
+        assertEquals(RequestTiming.NO_VENUE_PROCESSING, decoded.venueProcessingMicros());
     }
 
     @Test

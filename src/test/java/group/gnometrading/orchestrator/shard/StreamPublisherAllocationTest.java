@@ -36,7 +36,7 @@ class StreamPublisherAllocationTest {
                 AeronRuntime session =
                         AeronRuntime.launch("pub-alloc-session", AeronProfile.STANDARD, Throwable::printStackTrace)) {
             final String channel = AeronChannels.shardPublication("localhost");
-            final ShardLatency latency = new ShardLatency();
+            final ShardLatency latency = StreamTestKit.latency();
             final StreamPublisherAgent agent = new StreamPublisherAgent(
                     StreamPublication.of(shard.aeron().addPublication(channel, AeronStreamIds.SHARD_STATUS)),
                     () -> 1,

@@ -1,11 +1,13 @@
 package group.gnometrading.orchestrator.gateway.accounts;
 
 import group.gnometrading.gateways.account.lane.AccountLane;
+import group.gnometrading.gateways.account.lane.RequestTiming;
 import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.latency.LatencyGrid;
 import group.gnometrading.latency.LatencyHistogram;
 import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.schemas.gateway.AdmissionAction;
 import group.gnometrading.schemas.gateway.AdmissionRecordEncoder;
 import group.gnometrading.schemas.gateway.MessageHeaderEncoder;
@@ -87,6 +89,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
     private final JournalRecorder journal;
     private final LongSupplier nanoClock;
     private final EpochNanoClock wallClock;
+    private final OrderTimings timings;
     // A request's time at each step on the lane's side, by request class: on the lane's ring (gw.queue, from ingress
     // putting it there), waiting for the budget (gw.budget_wait), encoding, signing and writing it (gw.sign_send), and
     // the venue's answer (venue.answer, whole answers only). Nanoseconds; minutes on the wall clock.
@@ -143,16 +146,31 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         this(accountId, journal, nanoClock, SampledEpochNanoClock.INSTANCE);
     }
 
-    /** @param wallClock the minutes its latency histograms close on, read once per request told */
     public LaneAdmissions(
             final int accountId,
             final JournalRecorder journal,
             final LongSupplier nanoClock,
             final EpochNanoClock wallClock) {
+        this(accountId, journal, nanoClock, wallClock, OrderTimings.NONE);
+    }
+
+    /**
+     * @param nanoClock the lane's clock, which its requests' times are on
+     * @param wallClock the minutes its latency histograms close on, read once per request told, and the epoch each
+     *     request's timing is moved onto
+     * @param timings where each session request's timing goes, for its session
+     */
+    public LaneAdmissions(
+            final int accountId,
+            final JournalRecorder journal,
+            final LongSupplier nanoClock,
+            final EpochNanoClock wallClock,
+            final OrderTimings timings) {
         this.accountId = accountId;
         this.journal = journal;
         this.nanoClock = nanoClock;
         this.wallClock = wallClock;
+        this.timings = timings;
         this.minuteEndsNanos = nanoClock.getAsLong() + MINUTE_NANOS;
     }
 
@@ -198,7 +216,7 @@ public final class LaneAdmissions implements AccountLane.Admissions {
                 .venueAccountId(this.accountId)
                 .sessionSeq(sessionSlot)
                 .clientOidCounter(clientOidCounter)
-                .requestClass(schemaClass(type))
+                .requestClass(OrderTimings.schemaClass(type))
                 .action(action)
                 .queuedNanos(queuedNanos)
                 .tokensLeft(tokensLeft);
@@ -220,6 +238,16 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         } else if (type.isOrder()) {
             this.orderAnswers.record(micros);
         }
+    }
+
+    @Override
+    public void timed(final RequestTiming timing) {
+        this.timings.send(this.accountId, timing, this.wallClock.nanoTime() - this.nanoClock.getAsLong());
+    }
+
+    /** Where this lane's timings go, for the gateway's samples. */
+    public OrderTimings timings() {
+        return this.timings;
     }
 
     @Override
@@ -444,15 +472,5 @@ public final class LaneAdmissions implements AccountLane.Admissions {
                 this.lastCancelAnswerP99Micros,
                 this.lastUnanswered,
                 this.lastConnectionsBusy);
-    }
-
-    private static group.gnometrading.schemas.gateway.RequestClass schemaClass(final RequestClass type) {
-        return switch (type) {
-            case CANCEL -> group.gnometrading.schemas.gateway.RequestClass.CANCEL;
-            case CATCH_UP -> group.gnometrading.schemas.gateway.RequestClass.CATCH_UP;
-            case AMEND -> group.gnometrading.schemas.gateway.RequestClass.AMEND;
-            case NEW -> group.gnometrading.schemas.gateway.RequestClass.NEW;
-            case BACKGROUND -> group.gnometrading.schemas.gateway.RequestClass.BACKGROUND;
-        };
     }
 }

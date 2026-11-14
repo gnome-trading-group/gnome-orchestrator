@@ -27,6 +27,7 @@ final class ShardStream {
     private static final int OFFER_ATTEMPTS = 3;
 
     private final int streamId;
+    private final int sourceId;
     private final String name;
     private final SequencedRingBuffer<Mbp10Schema> ring;
     private final MarketDataCollector collector;
@@ -34,6 +35,9 @@ final class ShardStream {
     private final SequencedPoller poller;
     // Null for a stream built without (tests that only collect or publish).
     private final ShardLatency latency;
+    // The newest venue event time the collector has seen on this stream: a book published again rather than received
+    // repeats it. The collector's thread only.
+    private long newestEventNanos;
     // Read by the heartbeat; the agent alone writes them.
     private final AtomicLong records = new AtomicLong();
     private volatile Throwable failure;
@@ -80,7 +84,7 @@ final class ShardStream {
             final String name,
             final SequencedRingBuffer<Mbp10Schema> ring,
             final MarketDataCollector collector) {
-        this(streamId, name, ring, collector, new StreamRecordEventAdapter(collector), false, null);
+        this(streamId, 0, name, ring, collector, new StreamRecordEventAdapter(collector), false, null);
     }
 
     ShardStream(
@@ -89,15 +93,17 @@ final class ShardStream {
             final SequencedRingBuffer<Mbp10Schema> ring,
             final MarketDataCollector collector,
             final SequencedEventHandler record) {
-        this(streamId, name, ring, collector, record, false, null);
+        this(streamId, 0, name, ring, collector, record, false, null);
     }
 
     /**
+     * @param sourceId the source the stream's market comes from, which keys its latencies
      * @param publishing whether the publisher agent also reads the ring, without gating it
      * @param latency where the collector and publisher record each record's delays; null records none
      */
     ShardStream(
             final int streamId,
+            final int sourceId,
             final String name,
             final SequencedRingBuffer<Mbp10Schema> ring,
             final MarketDataCollector collector,
@@ -105,6 +111,7 @@ final class ShardStream {
             final boolean publishing,
             final ShardLatency latency) {
         this.streamId = streamId;
+        this.sourceId = sourceId;
         this.name = name;
         this.ring = ring;
         this.collector = collector;
@@ -142,7 +149,7 @@ final class ShardStream {
             waitPeakNanos.lazySet(waited);
         }
         if (latency != null) {
-            latency.sent(publishPoller.timestampNanos(), publishWallNanos);
+            latency.sent(sourceId, publishPoller.timestampNanos(), publishWallNanos);
         }
     }
 
@@ -164,7 +171,13 @@ final class ShardStream {
             return;
         }
         if (latency != null) {
-            latency.received(StreamHeader.timestampEvent(buffer, 0), StreamHeader.timestampRecv(buffer, 0));
+            final long eventNanos = StreamHeader.timestampEvent(buffer, 0);
+            latency.received(
+                    sourceId,
+                    eventNanos,
+                    StreamHeader.timestampRecv(buffer, 0),
+                    poller.timestampNanos(),
+                    fresh(eventNanos, StreamHeader.flags(buffer, 0)));
         }
         try {
             record.onSequencedEvent(sequence, templateId, buffer, length);
@@ -172,6 +185,22 @@ final class ShardStream {
             failedAtNanos = pollNanos;
             failure = error;
         }
+    }
+
+    /**
+     * Whether a record brings a venue event the stream hasn't had. A snapshot that doesn't advance the venue's time is
+     * a book published again (a stream joining a market already read, a connection roll), as is a stream's first
+     * snapshot, which may be either; a bad-data record repeats the last book.
+     */
+    private boolean fresh(final long eventNanos, final int flags) {
+        final long newest = newestEventNanos;
+        if (eventNanos > newest) {
+            newestEventNanos = eventNanos;
+        }
+        if (StreamHeader.isSet(flags, StreamHeader.BAD_DATA_BIT)) {
+            return false;
+        }
+        return !StreamHeader.isSet(flags, StreamHeader.SNAPSHOT_BIT) || (newest != 0 && eventNanos > newest);
     }
 
     int streamId() {

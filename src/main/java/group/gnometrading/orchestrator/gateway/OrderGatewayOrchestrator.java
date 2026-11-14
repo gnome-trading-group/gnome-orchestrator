@@ -47,7 +47,9 @@ import group.gnometrading.orchestrator.gateway.core.GatewaySession;
 import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
 import group.gnometrading.orchestrator.gateway.core.Kills;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
 import group.gnometrading.orchestrator.gateway.simulated.SimulatedAccount;
@@ -114,6 +116,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
 
     private static final int HEALTH_PORT = 8080;
     private static final int CONTROL_QUEUE = 1024;
+    // Requests' timings from every lane to egress: a few seconds of a busy gateway's orders and cancels.
+    private static final int TIMING_QUEUE = 4096;
     private static final int REJECT_QUEUE = 4096;
     // Of ECS's stop timeout: this long for the lanes to empty after every order is cancelled.
     private static final long STOP_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
@@ -202,10 +206,9 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
         final GatewayStatus status = new GatewayStatus(wallClock.nanoTime());
         final SessionTable sessions = new SessionTable();
-        final ManyToOneRingBuffer<GatewayMessage> toControl =
-                new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, CONTROL_QUEUE);
-        final ManyToOneRingBuffer<GatewayMessage> toEgress =
-                new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, CONTROL_QUEUE);
+        final ManyToOneRingBuffer<GatewayMessage> toControl = messageRing();
+        final ManyToOneRingBuffer<GatewayMessage> toEgress = messageRing();
+        final ManyToOneRingBuffer<TimingMessage> timings = timingRing();
         final ManyToOneRingBuffer<AccountReport> rejects =
                 new ManyToOneRingBuffer<>(AccountReport[]::new, AccountReport::new, REJECT_QUEUE);
         final List<ManyToOneRingBuffer<AccountReport>> reportRings = new ArrayList<>();
@@ -215,7 +218,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
 
         final GatewayJournal journal = journal(logger, properties, settings, wallClock, accounts.size());
         final Kills kills = new Kills();
-        final List<LaneAdmissions> admissions = admissions(accounts, journal);
+        final List<LaneAdmissions> admissions = admissions(accounts, paper, journal, timings);
         final GatewayIngress ingress = new GatewayIngress(
                 ingressSubscription,
                 sessions,
@@ -232,6 +235,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 status,
                 reportRings,
                 toEgress,
+                timings,
                 System::nanoTime,
                 wallClock,
                 journal == null ? JournalRecorder.NONE : journal.egress(),
@@ -527,14 +531,36 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 logger, AlertsApi.of(url, getInstance(RegistryEndpoint.class).apiKey()), settings.key());
     }
 
-    /** Each lane's decisions, journaled when the journal is on; set before any lane starts. */
-    private static List<LaneAdmissions> admissions(final List<GatewayAccount> accounts, final GatewayJournal journal) {
+    private static ManyToOneRingBuffer<GatewayMessage> messageRing() {
+        return new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, CONTROL_QUEUE);
+    }
+
+    private static ManyToOneRingBuffer<TimingMessage> timingRing() {
+        return new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, TIMING_QUEUE);
+    }
+
+    /**
+     * Each lane's decisions, journaled when the journal is on, and every request's timing for its session (a paper
+     * gateway's simulated lane's too); set before any lane starts.
+     */
+    private static List<LaneAdmissions> admissions(
+            final List<GatewayAccount> accounts,
+            final PaperVenue paper,
+            final GatewayJournal journal,
+            final ManyToOneRingBuffer<TimingMessage> timings) {
+        if (paper != null) {
+            paper.account().timings(new OrderTimings(timings));
+        }
         final List<LaneAdmissions> admissions = new ArrayList<>();
         for (int i = 0; i < accounts.size(); i++) {
             final GatewayAccount account = accounts.get(i);
             final JournalRecorder recorder = journal == null ? JournalRecorder.NONE : journal.lane(i);
-            final LaneAdmissions lane =
-                    new LaneAdmissions(account.accountId(), recorder, System::nanoTime, SampledEpochNanoClock.INSTANCE);
+            final LaneAdmissions lane = new LaneAdmissions(
+                    account.accountId(),
+                    recorder,
+                    System::nanoTime,
+                    SampledEpochNanoClock.INSTANCE,
+                    new OrderTimings(timings));
             account.lane().admissions(lane);
             admissions.add(lane);
         }

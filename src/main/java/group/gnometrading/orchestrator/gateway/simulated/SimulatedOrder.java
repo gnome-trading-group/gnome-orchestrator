@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.gateway.simulated;
 
 import group.gnometrading.gateways.account.admission.AdmissionEntry;
+import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
@@ -30,6 +31,17 @@ final class SimulatedOrder extends AdmissionEntry {
     long amendSize;
     boolean amendPostOnly;
     SimulatedBook book;
+    // For its requests' timings, epoch: when ingress queued, and the lane took, its submit, its latest cancel and its
+    // latest amend.
+    long submitIngressNanos;
+    long submitTakenNanos;
+    long cancelIngressNanos;
+    long cancelTakenNanos;
+    long amendIngressNanos;
+    long amendTakenNanos;
+    // The request sent to its book that awaits its first report, and when it went; null when none does.
+    RequestClass awaiting;
+    long awaitingSentNanos;
 
     SimulatedOrder(final int index) {
         super(index);
@@ -64,5 +76,13 @@ final class SimulatedOrder extends AdmissionEntry {
         this.amendSize = 0;
         this.amendPostOnly = false;
         this.book = null;
+        this.submitIngressNanos = 0;
+        this.submitTakenNanos = 0;
+        this.cancelIngressNanos = 0;
+        this.cancelTakenNanos = 0;
+        this.amendIngressNanos = 0;
+        this.amendTakenNanos = 0;
+        this.awaiting = null;
+        this.awaitingSentNanos = 0;
     }
 }

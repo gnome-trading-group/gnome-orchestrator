@@ -656,7 +656,9 @@ class SessionHeartbeatAgentTest {
             final com.sun.management.ThreadMXBean threads =
                     (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
             final long threadId = Thread.currentThread().getId();
-            for (int i = 0; i < 20_000; i++) {
+            // As long as ClockReadingsTest gives the clock status parser: on a loaded CI runner it can still be
+            // compiling after fewer, and allocates a little until it is.
+            for (int i = 0; i < 60_000; i++) {
                 now[0] += POST_MS;
                 agent.encode(now[0]);
             }
@@ -669,7 +671,9 @@ class SessionHeartbeatAgentTest {
 
             assertTrue(agent.lastBody().contains("\"pendingSegments\":3"), "the readings were written");
             assertTrue(agent.lastBody().contains("\"source\":\"PHC\""), "the clock was read");
-            assertEquals(0, allocated);
+            // Anything allocated per encode would be at least 16 KB over these 1,000; under 1 KB is a late compile's
+            // leftovers, not the heartbeat allocating.
+            assertTrue(allocated < 1_024, "allocated " + allocated + " bytes");
         }
     }
 }

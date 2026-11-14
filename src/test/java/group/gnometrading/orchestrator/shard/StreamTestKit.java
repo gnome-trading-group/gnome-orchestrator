@@ -11,6 +11,7 @@ import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedEventHandler;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sequencer.StreamRecordEventAdapter;
+import group.gnometrading.utils.SampledEpochNanoClock;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -26,6 +27,9 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 final class StreamTestKit {
 
     static final String MARKET_BUCKET = "market";
+    // The source every publishing stream's market comes from, as its latencies are keyed.
+    static final int SOURCE_ID = 7;
+    static final String SOURCE_CODE = "KALSHI";
 
     final Clock clock = Clock.fixed(Instant.parse("2026-10-26T12:00:30Z"), ZoneOffset.UTC);
     final S3Client s3Client = mock(S3Client.class);
@@ -66,12 +70,18 @@ final class StreamTestKit {
         final MarketDataCollector collector = collector(streamId);
         return new ShardStream(
                 streamId,
+                SOURCE_ID,
                 "stream " + streamId,
                 ring(),
                 collector,
                 new StreamRecordEventAdapter(collector),
                 true,
                 latency);
+    }
+
+    /** Latencies keyed by {@link #SOURCE_ID}, timed on the clock a shard uses. */
+    static ShardLatency latency() {
+        return new ShardLatency(SampledEpochNanoClock.INSTANCE, new int[] {SOURCE_ID}, new String[] {SOURCE_CODE});
     }
 
     private static SequencedRingBuffer<Mbp10Schema> ring() {

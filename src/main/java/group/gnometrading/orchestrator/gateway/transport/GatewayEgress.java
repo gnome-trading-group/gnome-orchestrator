@@ -16,6 +16,7 @@ import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
 import group.gnometrading.orchestrator.gateway.core.ReplayRing;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.SbeMessage;
@@ -60,12 +61,14 @@ public final class GatewayEgress implements AeronPathAgent {
     private final GatewayStatus status;
     private final List<ManyToOneRingBuffer<AccountReport>> reportRings;
     private final ManyToOneRingBuffer<GatewayMessage> fromControl;
+    private final ManyToOneRingBuffer<TimingMessage> timings;
     private final LongSupplier nanoClock;
     private final EpochNanoClock wallClock;
     private final JournalRecorder journal;
     private final CrossIndex cross;
     private final MessageConsumer<AccountReport> reportHandler = this::onReport;
     private final MessageConsumer<GatewayMessage> controlHandler = this::onControl;
+    private final MessageConsumer<TimingMessage> timingHandler = this::onTiming;
     private final SequenceValue reserved = new SequenceValue();
     private final UnsafeBuffer heartbeatBuffer = new UnsafeBuffer(new byte[GatewayMessage.MAX_LENGTH]);
     private final MessageHeaderEncoder header = new MessageHeaderEncoder();
@@ -75,12 +78,16 @@ public final class GatewayEgress implements AeronPathAgent {
     private final OrderStatuses statuses;
     // Measured on its thread for the gateway's samples: reports taken and sent, sends the session's publication refused
     // for want of room, and each report's time from its making (its timestampRecv: the reader's receipt of the venue's
-    // message, or the lane's or ingress's own report) to its send (gw.report_out).
-    private final MetricCounters counters = new MetricCounters(4);
+    // message, or the lane's or ingress's own report) to its send (gw.report_out); requests' timings taken, sent, and
+    // dropped for a session too far behind to hold more (or none to send them to).
+    private final MetricCounters counters = new MetricCounters(7);
     private final int reportsTaken = this.counters.counter("reports");
     private final int reportsSent = this.counters.counter("reportsSent");
     private final int backPressured = this.counters.counter("backPressured");
     private final int heartbeatsSent = this.counters.counter("heartbeats");
+    private final int timingsTaken = this.counters.counter("timings");
+    private final int timingsSent = this.counters.counter("timingsSent");
+    private final int timingsDropped = this.counters.counter("timingsDropped");
     private final MinuteHistograms latency = new MinuteHistograms(LatencyGrid.size(0, 1, 1));
     private final LatencyGrid reportOut =
             new LatencyGrid(this.latency, REPORT_OUT, "gw.report_out", NO_EXCHANGES, NO_NAMES, NO_LABEL, NO_LABEL);
@@ -105,12 +112,16 @@ public final class GatewayEgress implements AeronPathAgent {
         }
     }
 
-    /** @param reportRings every account's out ring, and the gateway's own refusals */
+    /**
+     * @param reportRings every account's out ring, and the gateway's own refusals
+     * @param timings every lane's requests' timings
+     */
     public GatewayEgress(
             final SessionTable sessions,
             final GatewayStatus status,
             final List<ManyToOneRingBuffer<AccountReport>> reportRings,
             final ManyToOneRingBuffer<GatewayMessage> fromControl,
+            final ManyToOneRingBuffer<TimingMessage> timings,
             final LongSupplier nanoClock,
             final EpochNanoClock wallClock,
             final JournalRecorder journal,
@@ -119,6 +130,7 @@ public final class GatewayEgress implements AeronPathAgent {
         this.status = status;
         this.reportRings = reportRings;
         this.fromControl = fromControl;
+        this.timings = timings;
         this.nanoClock = nanoClock;
         this.wallClock = wallClock;
         this.journal = journal;
@@ -140,6 +152,8 @@ public final class GatewayEgress implements AeronPathAgent {
             this.reportRings.get(i).read(this.reportHandler, REPORTS_PER_PASS);
             drained &= this.handled - before < REPORTS_PER_PASS;
         }
+        // After the reports, so a request's timing tends to follow the report its answer made.
+        this.timings.read(this.timingHandler, REPORTS_PER_PASS);
         int work = this.handled;
         final long now = this.nanoClock.getAsLong();
         final boolean beat = now - this.nextHeartbeatNanos >= 0;
@@ -198,6 +212,20 @@ public final class GatewayEgress implements AeronPathAgent {
                 report.report.buffer, 0, report.report.totalMessageSize(), report.report.getClientOidCounter());
         session.totals.report(report.report, sequence);
         this.journal.record(session.slot, report.report.buffer, 0, report.report.totalMessageSize());
+    }
+
+    private void onTiming(final TimingMessage message) {
+        this.handled++;
+        this.counters.increment(this.timingsTaken);
+        final GatewaySession session = this.sessions.bySlot(message.slot);
+        if (session == null) {
+            this.counters.increment(this.timingsDropped);
+            return;
+        }
+        this.journal.record(session.slot, message.buffer, 0, message.length);
+        if (!session.timings.offer(message.buffer, 0, message.length)) {
+            this.counters.increment(this.timingsDropped);
+        }
     }
 
     private void onControl(final GatewayMessage message) {
@@ -313,6 +341,12 @@ public final class GatewayEgress implements AeronPathAgent {
         if (session.sentSeq < session.replay.newest()) {
             return sent;
         }
+        final int timingsOut = sendUnnumbered(session.timings, reply);
+        this.counters.add(this.timingsSent, timingsOut);
+        sent += timingsOut;
+        if (!session.timings.isEmpty()) {
+            return sent;
+        }
         final PendingMessages last = session.last;
         if (drained && !last.isEmpty()) {
             if (reply.offer(last.buffer(), last.headOffset(), last.headLength()) < 0) {
@@ -322,14 +356,19 @@ public final class GatewayEgress implements AeronPathAgent {
             session.lastSent = true;
             sent++;
         }
-        if (beat && session.state == GatewaySession.ACTIVE) {
-            final int length = encodeHeartbeat(session);
-            if (reply.offer(this.heartbeatBuffer, 0, length) >= 0) {
-                this.counters.increment(this.heartbeatsSent);
-                sent++;
-            }
+        return sent + (beat ? sendHeartbeat(session, reply) : 0);
+    }
+
+    private int sendHeartbeat(final GatewaySession session, final Publication reply) {
+        if (session.state != GatewaySession.ACTIVE) {
+            return 0;
         }
-        return sent;
+        final int length = encodeHeartbeat(session);
+        if (reply.offer(this.heartbeatBuffer, 0, length) < 0) {
+            return 0;
+        }
+        this.counters.increment(this.heartbeatsSent);
+        return 1;
     }
 
     /** @return how many went out; any left are for a later pass, the publication being back-pressured */

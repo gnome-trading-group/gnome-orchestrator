@@ -28,6 +28,11 @@ public final class SessionLatency {
     public static final int ORDER_TO_ACK = 5;
     public static final int CANCEL_TO_ACK = 6;
     public static final int STRAT_TRANSIT = 7;
+    public static final int TICK_TO_TRADE = 8;
+    public static final int GW_TO_WIRE = 9;
+    public static final int VENUE_ANSWER = 10;
+    public static final int CANCEL_RACE_LOST = 11;
+    public static final int CANCEL_RACE_LATE = 12;
 
     private static final String[] NO_LABEL = {""};
 
@@ -41,6 +46,11 @@ public final class SessionLatency {
     private final LatencyGrid tickToOrder;
     private final LatencyGrid orderToAck;
     private final LatencyGrid cancelToAck;
+    private final LatencyGrid tickToTrade;
+    private final LatencyGrid toWire;
+    private final LatencyGrid venueAnswer;
+    private final LatencyGrid cancelLost;
+    private final LatencyGrid cancelLate;
 
     private SessionLatency(final int[] exchangeIds, final String[] exchangeNames) {
         final String[] kinds = kindLabels();
@@ -56,9 +66,10 @@ public final class SessionLatency {
         this.oms = new MinuteHistograms(LatencyGrid.size(exchanges, actions, kinds.length));
         this.omsProcess = new LatencyGrid(
                 oms, OMS_PROCESS, "oms.process", exchangeIds, exchangeNames, OmsAgent.LATENCY_ACTIONS, kinds);
-        this.orders =
-                new MinuteHistograms(LatencyGrid.size(exchanges, GatewayClient.LATENCY_ACTIONS.length, kinds.length)
-                        + 2 * LatencyGrid.size(exchanges, 1, 1));
+        final int actionsOf = GatewayClient.LATENCY_ACTIONS.length;
+        this.orders = new MinuteHistograms(2 * LatencyGrid.size(exchanges, actionsOf, kinds.length)
+                + 2 * LatencyGrid.size(exchanges, actionsOf, 1)
+                + 4 * LatencyGrid.size(exchanges, 1, 1));
         this.tickToOrder = new LatencyGrid(
                 orders,
                 TICK_TO_ORDER,
@@ -71,6 +82,28 @@ public final class SessionLatency {
                 new LatencyGrid(orders, ORDER_TO_ACK, "order_to_ack", exchangeIds, exchangeNames, NO_LABEL, NO_LABEL);
         this.cancelToAck =
                 new LatencyGrid(orders, CANCEL_TO_ACK, "cancel_to_ack", exchangeIds, exchangeNames, NO_LABEL, NO_LABEL);
+        this.tickToTrade = new LatencyGrid(
+                orders,
+                TICK_TO_TRADE,
+                "tick_to_trade",
+                exchangeIds,
+                exchangeNames,
+                GatewayClient.LATENCY_ACTIONS,
+                kinds);
+        this.toWire = new LatencyGrid(
+                orders, GW_TO_WIRE, "gw.to_wire", exchangeIds, exchangeNames, GatewayClient.LATENCY_ACTIONS, NO_LABEL);
+        this.venueAnswer = new LatencyGrid(
+                orders,
+                VENUE_ANSWER,
+                "venue.answer",
+                exchangeIds,
+                exchangeNames,
+                GatewayClient.LATENCY_ACTIONS,
+                NO_LABEL);
+        this.cancelLost = new LatencyGrid(
+                orders, CANCEL_RACE_LOST, "cancel_race.lost", exchangeIds, exchangeNames, NO_LABEL, NO_LABEL);
+        this.cancelLate = new LatencyGrid(
+                orders, CANCEL_RACE_LATE, "cancel_race.late", exchangeIds, exchangeNames, NO_LABEL, NO_LABEL);
     }
 
     /** Over the exchanges these listings trade on, by exchange code. */
@@ -110,7 +143,8 @@ public final class SessionLatency {
     }
 
     void measure(final GatewayClient client) {
-        client.measureLatency(tickToOrder, orderToAck, cancelToAck);
+        client.measureLatency(new GatewayClient.OrderPathLatency(
+                tickToOrder, orderToAck, cancelToAck, tickToTrade, toWire, venueAnswer, cancelLost, cancelLate));
     }
 
     void measure(final OmsAgent agent) {

@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
@@ -13,6 +15,8 @@ import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.TriggerKind;
+import group.gnometrading.schemas.gateway.OrderTiming;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
@@ -66,6 +70,28 @@ class GatewayClientAllocationTest {
                     1024,
                     System::nanoTime,
                     new SystemEpochNanoClock());
+            // The whole order path measured, every gateway timing journaled and joined, as a session runs it.
+            final MinuteHistograms histograms = new MinuteHistograms(256);
+            final int[] ids = {GatewayFixture.EXCHANGE_ID};
+            final String[] names = {"TEST"};
+            final String[] actions = GatewayClient.LATENCY_ACTIONS;
+            final String[] kinds = {"", "MARKET_DATA", "EXEC_REPORT", "STREAM", "RISK", "OTHER"};
+            final String[] none = {""};
+            client.measureLatency(new GatewayClient.OrderPathLatency(
+                    new LatencyGrid(histograms, 4, "session.tick_to_order", ids, names, actions, kinds),
+                    new LatencyGrid(histograms, 5, "order_to_ack", ids, names, none, none),
+                    new LatencyGrid(histograms, 6, "cancel_to_ack", ids, names, none, none),
+                    new LatencyGrid(histograms, 8, "tick_to_trade", ids, names, actions, kinds),
+                    new LatencyGrid(histograms, 9, "gw.to_wire", ids, names, actions, none),
+                    new LatencyGrid(histograms, 10, "venue.answer", ids, names, actions, none),
+                    new LatencyGrid(histograms, 11, "cancel_race.lost", ids, names, none, none),
+                    new LatencyGrid(histograms, 12, "cancel_race.late", ids, names, none, none)));
+            final SequencedRingBuffer<OrderTiming> journaledTimings =
+                    new SequencedRingBuffer<>(OrderTiming::new, sequence);
+            final AtomicLong timings = new AtomicLong();
+            final SequencedPoller timingReader =
+                    journaledTimings.createPoller((seq, templateId, buffer, length) -> timings.incrementAndGet());
+            client.journalTimings(journaledTimings);
             final GatewayLinks links = new GatewayLinks(
                     new NullLogger(),
                     aeron.aeron(),
@@ -89,14 +115,16 @@ class GatewayClientAllocationTest {
                     links.run();
                     Thread.sleep(20);
                 }
-                trade(venue, omsOrders, omsReader, reports, 1, ORDERS / 2);
+                trade(venue, omsOrders, omsReader, timingReader, reports, 1, ORDERS / 2);
                 final com.sun.management.ThreadMXBean threads =
                         (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
                 final long before = threads.getThreadAllocatedBytes(clientThread.get());
-                trade(venue, omsOrders, omsReader, reports, ORDERS / 2 + 1, ORDERS);
+                trade(venue, omsOrders, omsReader, timingReader, reports, ORDERS / 2 + 1, ORDERS);
                 final long allocated = threads.getThreadAllocatedBytes(clientThread.get()) - before;
-                System.out.println("#### gateway client allocated " + allocated + "B over " + (ORDERS / 2) + " orders");
+                System.out.println("#### gateway client allocated " + allocated + "B over " + (ORDERS / 2) + " orders, "
+                        + timings.get() + " timings journaled");
                 assertTrue(allocated < 16_384, "the gateway client allocated " + allocated + " bytes");
+                assertTrue(timings.get() >= ORDERS / 2, "the gateway's timings came through: " + timings.get());
             } finally {
                 runner.close();
                 links.close();
@@ -111,6 +139,7 @@ class GatewayClientAllocationTest {
             final GatewayFixture.Venue venue,
             final SequencedRingBuffer<Intent> omsOrders,
             final SequencedPoller omsReader,
+            final SequencedPoller timingReader,
             final AtomicLong reports,
             final int from,
             final int to)
@@ -121,14 +150,17 @@ class GatewayClientAllocationTest {
                 .securityId(GatewayFixture.SECURITY_ID)
                 .price(400_000_000)
                 .size(1_000_000)
-                .side(Side.Bid);
+                .side(Side.Bid)
+                .triggerKind(TriggerKind.MARKET_DATA);
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
         for (int counter = from; counter <= to; counter++) {
             order.encodeClientOid(counter, STRATEGY_ID);
+            order.encoder.triggerOriginTimestamp(System.currentTimeMillis() * 1_000_000L);
             omsOrders.publishRaw(order.buffer, OrderDecoder.TEMPLATE_ID, order.totalMessageSize());
             // Filled once the venue has the order, which frees its slot for the next.
             while (venue.server().received() < counter) {
                 omsReader.poll();
+                timingReader.poll();
                 if (System.nanoTime() > deadline) {
                     throw new AssertionError("order " + counter + " never reached the venue");
                 }
@@ -138,6 +170,7 @@ class GatewayClientAllocationTest {
         }
         while (reports.get() < to) {
             omsReader.poll();
+            timingReader.poll();
             if (System.nanoTime() > deadline) {
                 throw new AssertionError("only " + reports.get() + " of " + to + " reports came back");
             }

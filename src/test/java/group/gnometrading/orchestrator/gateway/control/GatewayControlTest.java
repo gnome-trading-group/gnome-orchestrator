@@ -31,6 +31,7 @@ import group.gnometrading.orchestrator.gateway.core.GatewayStatus;
 import group.gnometrading.orchestrator.gateway.core.JournalRecorder;
 import group.gnometrading.orchestrator.gateway.core.Kills;
 import group.gnometrading.orchestrator.gateway.core.SessionTable;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
@@ -234,6 +235,7 @@ class GatewayControlTest {
                 this.status,
                 List.of(this.account.reports, this.rejectRing),
                 this.toEgress,
+                new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, 256),
                 System::nanoTime,
                 new SystemEpochNanoClock(),
                 JournalRecorder.NONE,

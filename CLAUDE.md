@@ -150,7 +150,13 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     Aeron session id (core orders carry no session), reads each order by its own SBE header (any core version whose
     block reaches the v2 fields it reads, so sessions and gateways change schema version apart), turns orders into lane commands or refuses them straight back
     (`GatewayRejects`); `GatewayEgress` numbers each session's reports into its `ReplayRing` (`gateway.replay.reports`)
-    and sends them with the number as the frame's reserved value, at that session's pace, plus a 100 ms heartbeat;
+    and sends them with the number as the frame's reserved value, at that session's pace, plus a 100 ms heartbeat; once a
+    session's reports have gone it is also sent each of its requests' `OrderTiming` (gateway schema 212: ingress,
+    taken, decided, written and answered times, the answer's slack, outcome, HTTP status and the venue's own time or
+    processing; epoch nanoseconds), unnumbered and best effort: every lane's `LaneAdmissions.timed` (gnome-gateways
+    `RequestTiming`, its times moved onto the epoch) and the paper lane (timed at each request's first report) put them
+    through `core/OrderTimings` on one `TimingMessage` ring, egress journals them and holds up to 256 per session, past
+    which they are dropped (`gateway.transport`'s `timingsDropped`). Older sessions ignore them;
     `GatewayControl` checks hellos against the registry (`SessionRegistry`, a 10-minute fallback cache), loads the
     listings they name, opens reply publications, sends the welcome and replay, cancels a silent or deaf session's
     orders (lane `CANCEL_SESSION`) and asks it to hello again, evicts a session that sends something unreadable
@@ -461,9 +467,12 @@ earlier sessions). A session already stopped before startup exits 0 without repo
     and publisher passes, worst gap between passes), `shard.streams` (`ShardSampler`: states, connections, and summed
     over streams since the last sample offered/held/lapped/re-sent, records, ring-full waits (a venue reader held
     back), worst collector backlog, the 10 streams that waited longest and the 10 held most), and
-    `latency.shard.collector` (`shard.venue_to_recv`, receipt minus the venue's event time) /
-    `latency.shard.publisher` (`shard.wait`, send minus receipt: the time a record spent in the shard, held records
-    included) (`ShardLatency`). Each record sent carries the publisher's pass wall clock in its Aeron frame's reserved
+    `latency.shard.collector` (`shard.venue_to_recv`, receipt minus the venue's event time, only for records bringing
+    a new venue event: not a stream's first snapshot, a snapshot that doesn't advance its venue time (a republish or
+    roll) or bad data; `shard.decode`, ring publish minus receipt: raw capture, decode, book and encode on the reader) /
+    `latency.shard.publisher` (`shard.wait`, the publisher's pass minus ring publish, held records included;
+    `shard.send`, each offer's return minus the pass start, which is every record's send stamp) (`ShardLatency`, each
+    keyed by source). `shard.agents`' publisher also has `passPeakNanos` and `recordsPerPassPeak`. Each record sent carries the publisher's pass wall clock in its Aeron frame's reserved
     value (`AeronReservedValues.sentNanos`; `RESENT` re-sends carry none), so readers can split network from shard.
   - No registry heartbeat: `HEARTBEAT` log lines every 15 s (process, connection, and a stream only when its state
     changed; a `publish` line when a stream held or dropped records for sessions since the last: `held` counts offers

@@ -12,7 +12,8 @@ public enum JournalSource {
     OMS_EXEC_REPORT(4),
     STRATEGY_MARKET_DATA(7),
     STRATEGY_METRIC(8),
-    LATENCY_METRIC(9);
+    LATENCY_METRIC(9),
+    GATEWAY_TIMING(10);
 
     private final int id;
 

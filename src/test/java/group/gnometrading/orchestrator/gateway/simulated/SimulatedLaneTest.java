@@ -12,6 +12,8 @@ import group.gnometrading.gateways.ratelimit.RequestClass;
 import group.gnometrading.gateways.ratelimit.VenueRateLimits;
 import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.latency.MinuteSummary;
+import group.gnometrading.orchestrator.gateway.core.OrderTimings;
+import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.OrderStatus;
@@ -23,6 +25,9 @@ import group.gnometrading.schemas.StreamHeader;
 import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.schemas.book.Action;
 import group.gnometrading.schemas.book.Mbp10Decoder;
+import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
+import group.gnometrading.schemas.gateway.OrderTimingDecoder;
+import group.gnometrading.schemas.gateway.TimingOutcome;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.simulation.exchange.MbpSimulatedExchange;
@@ -33,6 +38,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 
 /** A simulated account's lane on real simulated venues, fed records and commands as the gateway feeds it. */
@@ -291,6 +297,57 @@ class SimulatedLaneTest {
         assertEquals(OrderStatus.FILLED, fills.get(0).status());
         assertEquals(5 * S, fills.get(0).filled());
         assertEquals(0, this.lane.workingOrders(), "a filled order is no longer held");
+    }
+
+    @Test
+    void eachRequestIsTimedAsIfTheSimulatedVenueWereRealAndOneHeldPastItsWaitAsNotSent() {
+        final ManyToOneRingBuffer<TimingMessage> timings =
+                new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, 64);
+        this.lane.timings(new OrderTimings(timings));
+        final long latency = TimeUnit.MILLISECONDS.toNanos(2);
+        join(A, "session-a", oneOrderASecond(), latency);
+        book(100 * P, 10 * S, 102 * P, 40 * S);
+        this.nanos.addAndGet(TimeUnit.SECONDS.toNanos(1));
+
+        final long sentAt = this.wallNanos.get();
+        command(LaneCommand.NEW, A, 1, Side.Bid, 99 * P);
+        command(LaneCommand.NEW, A, 2, Side.Bid, 98 * P);
+        this.wallNanos.addAndGet(latency);
+        pass();
+        assertTrue(timings(timings).isEmpty(), "on its way: no answer yet");
+        this.wallNanos.addAndGet(latency);
+        pass();
+        final List<OrderTimingDecoder> first = timings(timings);
+        assertEquals(1, first.size(), "order 1 reached the venue; order 2 still waits for the budget");
+        final OrderTimingDecoder reached = first.get(0);
+        assertEquals(1, reached.clientOidCounter());
+        assertEquals(SimulatedAccount.ACCOUNT_ID, reached.venueAccountId());
+        assertEquals(TimingOutcome.ANSWERED, reached.outcome());
+        assertEquals(sentAt, reached.wireSentNanos(), "sent when the lane admitted it");
+        assertTrue(reached.venueTsNanos() >= sentAt + latency, "the venue made its answer once it arrived");
+        assertEquals(reached.venueTsNanos() + latency, reached.answeredNanos(), "answered when its report got back");
+
+        this.nanos.addAndGet(MAX_QUEUE_NANOS + 1);
+        pass();
+        final List<OrderTimingDecoder> second = timings(timings);
+        assertEquals(1, second.size());
+        assertEquals(2, second.get(0).clientOidCounter());
+        assertEquals(TimingOutcome.NOT_SENT, second.get(0).outcome());
+        assertEquals(0, second.get(0).wireSentNanos());
+        assertEquals(0, second.get(0).answeredNanos());
+    }
+
+    /** Each timing on the ring, copied out. */
+    private static List<OrderTimingDecoder> timings(final ManyToOneRingBuffer<TimingMessage> ring) {
+        final List<OrderTimingDecoder> read = new ArrayList<>();
+        ring.read(
+                message -> {
+                    final UnsafeBuffer copy = new UnsafeBuffer(new byte[message.length]);
+                    copy.putBytes(0, message.buffer, 0, message.length);
+                    read.add(new OrderTimingDecoder().wrapAndApplyHeader(copy, 0, new MessageHeaderDecoder()));
+                },
+                64);
+        return read;
     }
 
     @Test

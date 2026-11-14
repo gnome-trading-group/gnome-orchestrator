@@ -134,7 +134,7 @@ class StreamPublisherAgentTest {
     void eachRecordSentCarriesThePassesWallClockAndCountsItsTimeInTheShard() throws Exception {
         final long delay = 5_000_000;
         final long[] wall = {0};
-        final ShardLatency latency = new ShardLatency();
+        final ShardLatency latency = StreamTestKit.latency();
         final StreamPublisherAgent timed = new StreamPublisherAgent(status, () -> 7, () -> now, () -> wall[0], latency);
         final ShardStream stream = kit.publishingStream(10, latency);
         timed.add(stream);
