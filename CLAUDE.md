@@ -350,7 +350,7 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
 `push-release.yml` force-pushes the tag to `release` -> `OrchestratorPipeline` (CodePipeline in the InfraPipelines
 account) deploys stage `Dev`, waits on `ApproveProd`, then `Prod`. Stacks per stage: `<Stage>-OrchestratorStorageStack`
 (journal bucket `gnome-journals-<stage>`, SSM params), `<Stage>-OrchestratorAmiStack` (us-east-1, AMIs copied to all
-regions), and per region in us-east-1, ap-northeast-1, eu-west-1: `<Stage>-OrchestratorEcsStack-<region>` (VPC,
+regions), and per region in us-east-1, ap-northeast-1, eu-west-1, us-east-2: `<Stage>-OrchestratorEcsStack-<region>` (VPC,
 security group, log group; the name is historical, renaming recreates the VPC) and `<Stage>-OrchestratorEc2Stack-<region>`
 (launch templates `gnome-orchestrator` and `gnome-orchestrator-live`; no session role can read `gnome/accounts/*`;
 live ones can read `order-gateway#*` items in `service-endpoints`), `<Stage>-OrchestratorOrderGatewayStack-<region>`
@@ -369,7 +369,10 @@ the last 30 minutes or reports sessions or orders (or, running, went quiet while
 with orders; one that never wrote an endpoint holds nothing), in its row's region, as service
 `order-gateway-<key with : as ->` from its own revision (key, release and `ALERTS_API_URL` filled in), and allocates
 its Elastic IP (tag `gnome:order-gateway`), which `gateway-start.sh` attaches at boot; otherwise it sets the service to
-zero. When it starts or creates one, it raises the region's host group (found through the capacity provider) to one
+zero. A row moved to another region (its exchange's `sm.exchange.region` changed) has its service set to zero in
+every other platform region first, and starts in its new one (outcome `moving` until then) only once no task of it
+runs or is pending elsewhere, so its accounts are never traded from two processes; a region with no gateway cluster
+yet counts as holding nothing. Its old Elastic IP is left allocated. When it starts or creates one, it raises the region's host group (found through the capacity provider) to one
 host per gateway set to run, at once, rather than leave it to managed scaling's alarm (~2 min); it never lowers it. Paper gateways (`paper:<exchange>:main`, rows the registry creates on first want, in the exchange's region) run in the same cluster on hosts of their own, `order-gateway-paper-hosts` (on-demand `c7a.medium`, scaling from zero, max 4 per region), from base task definition `order-gateway-paper` (same image and `gateway-start.sh`, 1536 MiB reservation, 384 MiB `/dev/shm`, task role `gnome-order-gateway-paper-task-<region>`: the market-data key `gnome/api-keys/market-data` in us-east-1, the gh token, the registry key and `order-gateway#*` endpoint writes, but no `gnome/accounts/*` and no Elastic IP actions). The reconciler reads rows of every mode; a row's mode picks its base family and capacity provider (`ORDER_GATEWAYS.modes`), a paper revision also gets `MARKET_DATA_API_URL` and `MARKET_DATA_API_KEY_SECRET` to read its sessions' leases, and paper gateways get no Elastic IP (`gateway-start.sh` skips attaching one for a `paper:` key and gives a paper JVM half the host for heap); host raises count only the services on that mode's provider; its alerts carry the row's mode, so paper gateways' never page. `gateway-start.sh` sets ZGC's `ConcGCThreads` from the host's CPUs (1 on a 1-vCPU host, otherwise 2). Paper and live sessions' roles may both read `order-gateway#*` in `service-endpoints`. A start on a new revision moves the service onto it at zero and raises the count on a later tick, once the old
 deployment has drained: raised sooner, ECS starts a task of the previous release on the old one),
 and `<Stage>-OrchestratorEmergencyCancelStack-<region>`: Lambda `EmergencyCancel` (event names the registry's
@@ -469,7 +472,9 @@ earlier sessions). A session already stopped before startup exits 0 without repo
     back), worst collector backlog, the 10 streams that waited longest and the 10 held most), and
     `latency.shard.collector` (`shard.venue_to_recv`, receipt minus the venue's event time, only for records bringing
     a new venue event: not a stream's first snapshot, a snapshot that doesn't advance its venue time (a republish or
-    roll) or bad data; `shard.decode`, ring publish minus receipt: raw capture, decode, book and encode on the reader) /
+    roll) or bad data; `shard.decode`, ring publish minus receipt: raw capture, decode, book and encode on the reader;
+    where the venue says when it sent the message (Kalshi; Lighter's books), `shard.venue_hold`, send minus event, and
+    `shard.venue_network`, receipt minus send, which add up to `venue_to_recv`) /
     `latency.shard.publisher` (`shard.wait`, the publisher's pass minus ring publish, held records included;
     `shard.send`, each offer's return minus the pass start, which is every record's send stamp) (`ShardLatency`, each
     keyed by source). `shard.agents`' publisher also has `passPeakNanos` and `recordsPerPassPeak`. Each record sent carries the publisher's pass wall clock in its Aeron frame's reserved

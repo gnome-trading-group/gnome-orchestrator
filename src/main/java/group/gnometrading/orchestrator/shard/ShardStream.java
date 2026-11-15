@@ -2,7 +2,10 @@ package group.gnometrading.orchestrator.shard;
 
 import group.gnometrading.gateways.feed.Subject;
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.schemas.SbeMessage;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.StreamHeader;
+import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.LappingPoller;
 import group.gnometrading.sequencer.SequencedEvent;
 import group.gnometrading.sequencer.SequencedEventHandler;
@@ -175,6 +178,7 @@ final class ShardStream {
             latency.received(
                     sourceId,
                     eventNanos,
+                    sentNanos(templateId, buffer),
                     StreamHeader.timestampRecv(buffer, 0),
                     poller.timestampNanos(),
                     fresh(eventNanos, StreamHeader.flags(buffer, 0)));
@@ -192,6 +196,15 @@ final class ShardStream {
      * a book published again (a stream joining a market already read, a connection roll), as is a stream's first
      * snapshot, which may be either; a bad-data record repeats the last book.
      */
+    /** When the venue sent the record's message, where the record says (book records; 0 for none). */
+    private static long sentNanos(final int templateId, final UnsafeBuffer buffer) {
+        if (templateId != Mbp10Decoder.TEMPLATE_ID) {
+            return 0;
+        }
+        return buffer.getLong(
+                SbeMessage.HEADER_LENGTH + Mbp10Decoder.timestampSentEncodingOffset(), Statics.BYTE_ORDER);
+    }
+
     private boolean fresh(final long eventNanos, final int flags) {
         final long newest = newestEventNanos;
         if (eventNanos > newest) {

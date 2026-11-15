@@ -26,8 +26,22 @@ class ShardLatencyTest {
         final Mbp10Encoder encoder = slot.encoder;
         encoder.streamId(stream.streamId());
         encoder.timestampEvent(eventNanos == 0 ? recv - VENUE_LAG : eventNanos);
+        encoder.timestampSent(Mbp10Encoder.timestampSentNullValue());
         encoder.timestampRecv(recv);
         encoder.flags().clear().marketByPrice(true).snapshot(snapshot).badData(badData);
+        stream.ring().publish();
+    }
+
+    /** An update the venue says it sent {@code holdNanos} after its event, received {@code networkNanos} later. */
+    private void sentRecord(final long holdNanos, final long networkNanos) {
+        final long recv = SampledEpochNanoClock.INSTANCE.nanoTime() - READER_TIME;
+        final Mbp10Schema slot = stream.ring().claim();
+        final Mbp10Encoder encoder = slot.encoder;
+        encoder.streamId(stream.streamId());
+        encoder.timestampEvent(recv - networkNanos - holdNanos);
+        encoder.timestampSent(recv - networkNanos);
+        encoder.timestampRecv(recv);
+        encoder.flags().clear().marketByPrice(true);
         stream.ring().publish();
     }
 
@@ -82,5 +96,25 @@ class ShardLatencyTest {
         assertTrue(
                 minute.p50(decode) >= READER_TIME && minute.max(decode) < TimeUnit.SECONDS.toNanos(1),
                 "ring stamp minus receipt: " + minute.p50(decode));
+    }
+
+    @Test
+    void aVenueThatSaysWhenItSentSplitsItsTimeIntoHoldingAndTheNetwork() throws Exception {
+        final long hold = TimeUnit.MILLISECONDS.toNanos(3);
+        final long network = TimeUnit.MILLISECONDS.toNanos(7);
+        record(0, true, false);
+        sentRecord(hold, network);
+        sentRecord(hold, network);
+        record(0, false, false);
+
+        final MinuteSummary minute = collectorMinute();
+        final MinuteHistograms collector = latency.sets().get(0);
+        final int held = key(collector, "shard.venue_hold", StreamTestKit.SOURCE_CODE);
+        final int wire = key(collector, "shard.venue_network", StreamTestKit.SOURCE_CODE);
+        assertEquals(2, minute.count(held), "only records with a send time");
+        assertEquals(2, minute.count(wire));
+        assertEquals(hold, minute.max(held), 0.05 * hold, "send minus event");
+        assertEquals(network, minute.max(wire), 0.05 * network, "receipt minus send");
+        assertEquals(3, minute.count(key(collector, "shard.venue_to_recv", StreamTestKit.SOURCE_CODE)));
     }
 }

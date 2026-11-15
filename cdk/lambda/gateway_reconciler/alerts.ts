@@ -110,7 +110,7 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
     // Stopped as asked: its planned stop cancels and tells everyone, so its going is no outage.
     return { degradedTicks: 0, failedTicks: 0 };
   }
-  if (outcome === 'starting' || outcome === 'started' || outcome === 'created') {
+  if (outcome === 'starting' || outcome === 'moving' || outcome === 'started' || outcome === 'created') {
     // A start that waits for the old deployment to drain counts from when it began.
     return { degradedTicks: 0, failedTicks: 0, startingSinceMs: memory.startingSinceMs ?? nowMs };
   }

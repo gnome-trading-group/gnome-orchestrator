@@ -103,8 +103,9 @@ export interface ReconcileDeps {
   observed?(observation: Observation): void;
 }
 
-// 'starting': moved onto a new revision with nothing wanted yet, waiting for the old deployment to drain.
-export type Outcome = 'starting' | 'started' | 'created' | 'stopped' | 'running' | 'stopped already';
+// 'starting': moved onto a new revision with nothing wanted yet, waiting for the old deployment to drain. 'moving': its
+// row names a new region, and it waits there until it has stopped in the old one.
+export type Outcome = 'starting' | 'moving' | 'started' | 'created' | 'stopped' | 'running' | 'stopped already';
 
 export function serviceName(names: GatewayNames, gatewayKey: string): string {
   return names.servicePrefix + gatewayKey.replace(/:/g, '-');
@@ -146,10 +147,10 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   const { names } = deps;
   const mode = names.modes[row.mode];
   if (!mode) throw new Error(`${row.gateway_key} is a ${row.mode} gateway, which nothing here runs`);
+  const stoppedElsewhere = await stopElsewhere(row, deps);
   const ecs = deps.ecs(row.region);
   const service = serviceName(names, row.gateway_key);
-  const described = await ecs.send(new DescribeServicesCommand({ cluster: names.cluster, services: [service] }));
-  const current = (described.services ?? []).find((s: any) => s.status === 'ACTIVE');
+  const current = await activeService(ecs, names, service);
   const running = current != null && current.desiredCount > 0;
   const now = deps.nowMs();
   const activity = await deps.activity(row.gateway_key, now);
@@ -169,6 +170,7 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
     // Not up: why its last task stopped, for the alert should it stay so.
     return { ...seen('running'), taskId, stoppedReason: await lastStopped(ecs, names, service) };
   }
+  if (!stoppedElsewhere) return seen('moving');
   const version = row.orchestrator_version ?? await deps.latestVersion();
   const environment = [{ name: 'ALERTS_API_URL', value: await deps.alertsApiUrl() }];
   // A paper gateway trades with no venue, so has no address of its own; it reads its sessions'
@@ -207,6 +209,42 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   }));
   await ensureHosts(deps, row.region, mode);
   return seen('created');
+}
+
+/** The gateway's service in the region's cluster; undefined when it has none, or the region has no cluster yet. */
+async function activeService(ecs: Client, names: GatewayNames, service: string): Promise<any | undefined> {
+  try {
+    const described = await ecs.send(new DescribeServicesCommand({ cluster: names.cluster, services: [service] }));
+    return (described.services ?? []).find((s: any) => s.status === 'ACTIVE');
+  } catch (error: any) {
+    if (error?.name === 'ClusterNotFoundException') return undefined;
+    throw error;
+  }
+}
+
+/**
+ * Stops the gateway in every region but its row's, where it ran before its row moved, and says whether nothing of it
+ * runs there any more. It must not start in its new region before then: its accounts would be traded from two
+ * processes and two addresses at once. Its planned stop in the old region cancels and tells everyone, as any stop does.
+ */
+async function stopElsewhere(row: GatewayRow, deps: ReconcileDeps): Promise<boolean> {
+  const { names } = deps;
+  const service = serviceName(names, row.gateway_key);
+  let stopped = true;
+  for (const region of platformRegions()) {
+    if (region === row.region) continue;
+    const ecs = deps.ecs(region);
+    const found = await activeService(ecs, names, service);
+    if (!found) continue;
+    if (found.desiredCount > 0) {
+      await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 0 }));
+      console.log(`Gateway ${row.gateway_key}: moved to ${row.region}, stopping it in ${region}`);
+      stopped = false;
+    } else if ((found.runningCount ?? 0) > 0 || (found.pendingCount ?? 0) > 0) {
+      stopped = false;
+    }
+  }
+  return stopped;
 }
 
 /**

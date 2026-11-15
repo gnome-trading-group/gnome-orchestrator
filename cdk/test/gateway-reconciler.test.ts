@@ -16,7 +16,7 @@ const GROUPS: Record<string, string> = {
 };
 
 type Service = {
-  serviceName: string; status: string; desiredCount: number; taskDefinition?: string;
+  serviceName: string; status: string; desiredCount: number; taskDefinition?: string; runningCount?: number;
   deployments?: { taskDefinition?: string }[];
   capacityProviderStrategy?: { capacityProvider: string; weight: number }[];
 };
@@ -41,6 +41,8 @@ class FakeRegion {
   hosts = { DesiredCapacity: 0, MaxSize: 4 };
   paperHosts = { DesiredCapacity: 0, MaxSize: 4 };
   hostsFail = false;
+  // A region whose gateway stack isn't deployed yet.
+  noCluster = false;
 
   group(name: string) {
     return name === GROUPS[PAPER.capacityProvider] ? this.paperHosts : this.hosts;
@@ -60,6 +62,7 @@ class FakeRegion {
         return { serviceArns: this.services.map((s) => `arn:aws:ecs:us-east-1:1:service/${CLUSTER}/${s.serviceName}`) };
       }
       if (name === 'DescribeServicesCommand') {
+        if (this.noCluster) throw Object.assign(new Error('Cluster not found.'), { name: 'ClusterNotFoundException' });
         return { services: this.services.filter((s) => command.input.services.includes(s.serviceName)) };
       }
       if (name === 'DescribeTaskDefinitionCommand') {
@@ -180,6 +183,8 @@ function row(key: string, region: string, wantedAgoMs: number | null, version: s
 }
 
 function deps(rows: GatewayRow[], regions: Record<string, FakeRegion>, activity: Record<string, Activity | null> = {}): ReconcileDeps {
+  // Every platform region is looked in; one a test doesn't name holds nothing.
+  const at = (region: string) => (regions[region] ??= new FakeRegion());
   return {
     names: NAMES,
     gateways: async () => rows,
@@ -187,9 +192,9 @@ function deps(rows: GatewayRow[], regions: Record<string, FakeRegion>, activity:
     latestVersion: async () => '1.32.1',
     alertsApiUrl: async () => 'https://alerts.example/',
     marketDataApi: async () => ({ url: 'https://market-data.example', keySecret: 'gnome/api-keys/market-data' }),
-    ecs: (region) => regions[region].ecs,
-    ec2: (region) => regions[region].ec2,
-    autoscaling: (region) => regions[region].autoscaling,
+    ecs: (region) => at(region).ecs,
+    ec2: (region) => at(region).ec2,
+    autoscaling: (region) => at(region).autoscaling,
     nowMs: () => NOW,
   };
 }
@@ -223,7 +228,8 @@ describe('the gateway reconciler', () => {
     const outcomes = await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east, 'eu-west-1': west }));
 
     expect(outcomes.get(KALSHI)).toBe('created');
-    expect(west.sent).toEqual([]);
+    // Looked in, for a copy of it left from before a move, and nothing changed there.
+    expect(west.commands()).toEqual(['DescribeServicesCommand']);
     const registered = east.sent.find((s) => s.command === 'RegisterTaskDefinitionCommand')!.input;
     expect(registered.family).toBe('order-gateway-live-kalshi-main');
     expect(registered.containerDefinitions[0].environment).toEqual([
@@ -438,6 +444,47 @@ describe('the gateway reconciler', () => {
     expect(outcomes.get(KALSHI)).toBe('created');
     expect(east.services.map((s) => s.serviceName)).toEqual([serviceName(KALSHI)]);
     errors.mockRestore();
+  });
+});
+
+describe('a gateway whose row moved region', () => {
+  it('stops it in the old region and starts it in the new one only once nothing of it runs in the old', async () => {
+    const east = new FakeRegion();
+    const ohio = new FakeRegion();
+    east.services.push({ ...service(KALSHI, 1), runningCount: 1 });
+    const regions = { 'us-east-1': east, 'us-east-2': ohio };
+    const tick = async () => (await reconcile(deps([row(KALSHI, 'us-east-2', 5_000)], regions))).get(KALSHI);
+
+    expect(await tick()).toBe('moving');
+    expect(east.services[0].desiredCount).toBe(0);
+    expect(ohio.commands()).not.toContain('CreateServiceCommand');
+
+    // ECS is still stopping the old task, whose planned stop cancels its orders.
+    expect(await tick()).toBe('moving');
+    expect(east.commands().filter((c) => c === 'UpdateServiceCommand')).toHaveLength(1);
+    expect(ohio.commands()).not.toContain('CreateServiceCommand');
+
+    east.services[0].runningCount = 0;
+    expect(await tick()).toBe('created');
+    expect(ohio.services.map((s) => s.serviceName)).toEqual([serviceName(KALSHI)]);
+    expect(ohio.addresses).toHaveLength(1);
+    expect(east.services[0].desiredCount).toBe(0);
+  });
+
+  it('stops it in the old region even while nobody wants it in the new one', async () => {
+    const east = new FakeRegion();
+    east.services.push({ ...service(KALSHI, 1), runningCount: 1 });
+    const outcomes = await reconcile(deps([row(KALSHI, 'us-east-2', WANT_WINDOW_MS + 1)], { 'us-east-1': east }));
+    expect(outcomes.get(KALSHI)).toBe('stopped already');
+    expect(east.services[0].desiredCount).toBe(0);
+  });
+
+  it('takes a region with no gateway cluster yet to hold nothing of it', async () => {
+    const ohio = new FakeRegion();
+    ohio.noCluster = true;
+    const east = new FakeRegion();
+    const outcomes = await reconcile(deps([row(KALSHI, 'us-east-1', 5_000)], { 'us-east-1': east, 'us-east-2': ohio }));
+    expect(outcomes.get(KALSHI)).toBe('created');
   });
 });
 
