@@ -147,6 +147,10 @@ public final class GatewayControl implements GnomeAgent {
     static final long SETTLE_BUDGET_NANOS = TimeUnit.SECONDS.toNanos(20);
     // How long the planned stop waits for its last endpoint write.
     static final long FINAL_ADVERT_MILLIS = 2_000;
+    // A handover's wait for the lanes to take what ingress passed on before the refusals began: the lane takes a
+    // command within microseconds of its commit, so this covers it with room; and then for egress to send the reports
+    // and refusals that came of it, which it does as fast.
+    static final long HANDOVER_SETTLE_MILLIS = 100;
 
     private final Logger logger;
     private final GatewayAlerts alerts;
@@ -1186,6 +1190,31 @@ public final class GatewayControl implements GnomeAgent {
         this.advertiser.advertise(GatewayState.STOPPING, linkedSessions(), workingOrders());
         final boolean advertised = this.advertiser.flush(FINAL_ADVERT_MILLIS);
         return emptied && saidGoodbye && advertised;
+    }
+
+    // ----- handover -----
+
+    /**
+     * Stops for a roll, leaving every order resting for the next process on this host, which takes them back from the
+     * ownership logs: the endpoint says STOPPING with {@code handover}, so no session links to it and the reconciler
+     * knows it from a planned stop; new orders and amends are refused {@code GATEWAY_UNAVAILABLE} while cancels still
+     * pass; then it waits until no lane holds a request unsent or unanswered, so every request's outcome is known (one
+     * still unanswered at exit is safe too: the log has its order, and the next reader's catch-up settles it). Sends no
+     * goodbye, after which a session would never link again, and cancels nothing. Gives up waiting once
+     * {@code timeoutNanos} passes. Call with the control thread stopped and ingress and egress running.
+     *
+     * @return whether every lane went quiet and what it left was written, each in time
+     */
+    public boolean handOver(final long timeoutNanos) throws InterruptedException {
+        final long deadline = this.nanoClock.getAsLong() + timeoutNanos;
+        this.status.handOver();
+        this.advertiser.advertise(GatewayState.STOPPING, linkedSessions(), workingOrders());
+        Thread.sleep(HANDOVER_SETTLE_MILLIS);
+        final boolean quiet = waitUntil(() -> this.accounts.values().stream().allMatch(AccountLink::quiet), deadline);
+        Thread.sleep(HANDOVER_SETTLE_MILLIS);
+        this.advertiser.advertise(GatewayState.STOPPING, linkedSessions(), workingOrders());
+        final boolean advertised = this.advertiser.flush(FINAL_ADVERT_MILLIS);
+        return quiet && advertised;
     }
 
     private boolean waitUntil(final BooleanSupplier condition, final long deadline) throws InterruptedException {

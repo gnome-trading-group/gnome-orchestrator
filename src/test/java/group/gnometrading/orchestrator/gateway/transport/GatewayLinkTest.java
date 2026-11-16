@@ -320,6 +320,17 @@ class GatewayLinkTest {
     }
 
     @Test
+    void aGatewayHandingOverRefusesOrdersAsALinkDownDoesButStillTakesCancels() throws Exception {
+        linkedSession();
+        this.status.handOver();
+        sendOrder(1, LEASED);
+        assertEquals(
+                RejectReason.GATEWAY_UNAVAILABLE, rejectReason(awaitReports(1).get(0)));
+        sendCancel(1);
+        assertEquals(LaneCommand.CANCEL, awaitCommands(1).get(0).kind);
+    }
+
+    @Test
     void aSessionNotTradingHasItsOrdersRefusedAndItsCancelsAnswered() throws Exception {
         final GatewaySession session = linkedSession();
         session.state = GatewaySession.UNLINKED;

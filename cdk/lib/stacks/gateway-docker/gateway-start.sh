@@ -1,11 +1,17 @@
 #!/bin/bash
-# Starts an order gateway: downloads its release (pinned per gateway by the registry's gateways/ensure), attaches its
-# Elastic IP (a live one; a paper gateway has none), and runs it.
+# Starts an order gateway: fetches its release (pinned per gateway by the registry's gateways/ensure; kept on the host
+# for the next start), attaches its Elastic IP (a live one; a paper gateway has none), and runs it.
 set -euo pipefail
 : "${GATEWAY_KEY:?GATEWAY_KEY must be set in the gateway's task definition}"
 : "${ORCHESTRATOR_VERSION:?ORCHESTRATOR_VERSION must be set in the gateway's task definition}"
 
-APP_JAR=/opt/gnome/app.jar
+# The host's directory the gateway's ownership logs live in, which outlives the container.
+STATE_DIRECTORY=/var/lib/gnome/gateway
+# Releases already fetched on this host, by version, so a restart on it (a crash's, or a roll's and its rollback's)
+# starts without the download. A release is never republished under its version, so a kept one is the same jar.
+JAR_CACHE="${STATE_DIRECTORY}/jars"
+JARS_KEPT=3
+APP_JAR="${JAR_CACHE}/${ORCHESTRATOR_VERSION}.jar"
 # How often the JVM's /health is asked, and how long without an answer means it is frozen.
 HEALTH_INTERVAL_SECONDS=5
 HEALTH_SILENCE_SECONDS=15
@@ -14,20 +20,32 @@ secret() {
   aws secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text 2>/dev/null \
     || aws secretsmanager get-secret-value --region us-east-1 --secret-id "$1" --query SecretString --output text
 }
-raw=$(secret gnomepy/gh-token)
-GH_TOKEN=$(echo "$raw" | jq -r '.token? // empty' 2>/dev/null || true)
-GH_TOKEN=${GH_TOKEN:-$raw}
-echo "gateway-start: fetching gnome-orchestrator ${ORCHESTRATOR_VERSION}"
-curl -fsSL -u "gnome:${GH_TOKEN}" -o "$APP_JAR" \
-  "https://maven.pkg.github.com/gnome-trading-group/gnome-orchestrator/group/gnometrading/gnome-orchestrator/${ORCHESTRATOR_VERSION}/gnome-orchestrator-${ORCHESTRATOR_VERSION}.jar"
-unset GH_TOKEN raw
+fetch_release() {
+  mkdir -p "$JAR_CACHE"
+  if [ -s "$APP_JAR" ]; then
+    echo "gateway-start: gnome-orchestrator ${ORCHESTRATOR_VERSION} already on this host"
+  else
+    raw=$(secret gnomepy/gh-token)
+    GH_TOKEN=$(echo "$raw" | jq -r '.token? // empty' 2>/dev/null || true)
+    GH_TOKEN=${GH_TOKEN:-$raw}
+    echo "gateway-start: fetching gnome-orchestrator ${ORCHESTRATOR_VERSION}"
+    # Written aside and moved into place whole, so a download cut short is never taken for the release.
+    curl -fsSL -u "gnome:${GH_TOKEN}" -o "${APP_JAR}.part" \
+      "https://maven.pkg.github.com/gnome-trading-group/gnome-orchestrator/group/gnometrading/gnome-orchestrator/${ORCHESTRATOR_VERSION}/gnome-orchestrator-${ORCHESTRATOR_VERSION}.jar"
+    mv "${APP_JAR}.part" "$APP_JAR"
+    unset GH_TOKEN raw
+  fi
+  # Used now, so it isn't the oldest; the oldest past the last few go.
+  touch "$APP_JAR"
+  ls -1t "$JAR_CACHE"/*.jar | tail -n +$((JARS_KEPT + 1)) | xargs -r rm -f
+}
+fetch_release
 
 # The gateway's Elastic IP (allocated by gateways/ensure, tagged with its key) follows it to whichever host it runs on:
 # a venue may count its limit per IP, and an allowlist would name it. A paper gateway trades with no venue, and its
 # task role may not look addresses up.
 attach_address() {
-  imds_token=$(curl -fsSX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-  instance=$(curl -fsSH "X-aws-ec2-metadata-token: ${imds_token}" http://169.254.169.254/latest/meta-data/instance-id)
+  instance=$GATEWAY_INSTANCE_ID
   found=$(aws ec2 describe-addresses --filters "Name=tag:gnome:order-gateway,Values=${GATEWAY_KEY}" \
     --query 'Addresses[0].[AllocationId,PublicIp]' --output text)
   read -r allocation address <<< "$found"
@@ -53,6 +71,11 @@ attach_address() {
 if [ "${GATEWAY_KEY%%:*}" = "paper" ]; then
   echo "gateway-start: ${GATEWAY_KEY} is a paper gateway; no Elastic IP"
 else
+  # The host this runs on, which a roll pins the next process to: only the gateway on that host hands over its orders.
+  imds_token=$(curl -fsSX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+  GATEWAY_INSTANCE_ID=$(curl -fsSH "X-aws-ec2-metadata-token: ${imds_token}" \
+    http://169.254.169.254/latest/meta-data/instance-id)
+  export GATEWAY_INSTANCE_ID
   attach_address
 fi
 

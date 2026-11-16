@@ -4,21 +4,22 @@ import group.gnometrading.data.StreamEntry;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.UUID;
-import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.DirectBuffer;
 
-/** Captures the raw frames one connection receives, each with its receive timestamp, into minute files. */
+/**
+ * Writes the raw frames one connection receives, each with its receive timestamp, into minute files: a 12-byte header
+ * (receive nanos, payload length; little-endian) then the payload. Fed by {@link RawCaptureAgent} from the connection's
+ * {@link RawCaptureQueue}, already in that layout, on the agent's thread only.
+ */
 public final class RawDataCollector {
 
-    private static final int HEADER_SIZE = 12; // 8B recvTimestamp + 4B payloadLength
+    static final int HEADER_SIZE = 12; // 8B recvTimestamp + 4B payloadLength
 
     private final Logger logger;
     private final CycleManager cycleManager;
-    private final UnsafeBuffer header = new UnsafeBuffer(new byte[HEADER_SIZE]);
 
     public RawDataCollector(
             Logger logger,
@@ -43,31 +44,28 @@ public final class RawDataCollector {
                 Duration.ZERO);
     }
 
-    public void capture(long recvTimestamp, ByteBuffer buffer) {
-        if (cycleManager.isClosed() || !buffer.hasRemaining()) {
-            return;
+    /** Starts a frame received at {@code recvTimestamp}, rolling the minute if it is past; false once flushed. */
+    boolean startFrame(long recvTimestamp) {
+        if (cycleManager.isClosed()) {
+            return false;
         }
-
         if (cycleManager.isPastCurrentCycle(recvTimestamp)) {
             cycleManager.rotate(cycleManager.cycleStart(recvTimestamp));
             cycleManager.maybeExpireGracePeriod(recvTimestamp);
         }
+        return true;
+    }
 
-        final int payloadLength = buffer.remaining();
-        header.putLong(0, recvTimestamp, ByteOrder.LITTLE_ENDIAN);
-        header.putInt(Long.BYTES, payloadLength, ByteOrder.LITTLE_ENDIAN);
-
+    /** Appends bytes of the frame last started: its header and payload, in as many pieces as they came. */
+    void append(DirectBuffer source, int offset, int length) {
         try {
-            final CycleBuffer cycle = cycleManager.currentCycle();
-            cycle.write(header, 0, HEADER_SIZE);
-            // Absolute: the gateway parses the message from this same position next.
-            cycle.write(buffer, buffer.position(), payloadLength);
+            cycleManager.currentCycle().write(source, offset, length);
         } catch (IOException e) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Error writing raw capture: %s", e.getMessage());
         }
     }
 
-    /** Hands the connection's open minutes to the uploader; once the thread feeding it has stopped. */
+    /** Hands the connection's open minutes to the uploader; once nothing feeds it any more. */
     public void flush() {
         cycleManager.flush();
     }

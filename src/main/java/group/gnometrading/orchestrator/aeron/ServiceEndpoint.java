@@ -14,6 +14,8 @@ package group.gnometrading.orchestrator.aeron;
  * @param writtenAtNanos when it last wrote the item, epoch nanoseconds
  * @param linkedSessions an order gateway's sessions linked or saying hello; 0 for a shard
  * @param workingOrders an order gateway's orders working; 0 for a shard
+ * @param canHandOver whether an order gateway's release stops without cancelling when its reconciler rolls it
+ * @param handover an order gateway stopping for a roll, its orders left resting for the next process on its host
  */
 public record ServiceEndpoint(
         Kind kind,
@@ -26,7 +28,37 @@ public record ServiceEndpoint(
         String version,
         long writtenAtNanos,
         int linkedSessions,
-        long workingOrders) {
+        long workingOrders,
+        boolean canHandOver,
+        boolean handover) {
+
+    public ServiceEndpoint(
+            final Kind kind,
+            final String id,
+            final String instance,
+            final String region,
+            final String privateIp,
+            final int port,
+            final String state,
+            final String version,
+            final long writtenAtNanos,
+            final int linkedSessions,
+            final long workingOrders) {
+        this(
+                kind,
+                id,
+                instance,
+                region,
+                privateIp,
+                port,
+                state,
+                version,
+                writtenAtNanos,
+                linkedSessions,
+                workingOrders,
+                false,
+                false);
+    }
 
     public enum Kind {
         SHARD("shard"),

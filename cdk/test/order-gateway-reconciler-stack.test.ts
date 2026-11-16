@@ -94,4 +94,11 @@ describe('the gateway reconciler\'s alarms', () => {
     expect(statements).toContain('order-gateway-reconciler#*');
     expect(statements).toContain('event-bus/gnome-alerts');
   });
+
+  it('lets it write gateways\' roll items and find and check the hosts it pins them to', () => {
+    const statements = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(statements).toContain('order-gateway#*#roll');
+    expect(statements).toContain('ecs:ListContainerInstances');
+    expect(statements).toContain('ecs:DescribeContainerInstances');
+  });
 });

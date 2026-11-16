@@ -219,6 +219,11 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
         return this.crossKeys;
     }
 
+    @Override
+    public boolean quiet() {
+        return this.lane.queuedRequests() == 0 && this.lane.requestsAwaitingAnswer() == 0;
+    }
+
     public AccountLane<?> lane() {
         return this.lane;
     }

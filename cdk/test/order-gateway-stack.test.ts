@@ -113,4 +113,12 @@ describe('the order gateway stack', () => {
     expect(liveRole).toContain('ec2:AssociateAddress');
     expect(liveRole).not.toContain('market-data');
   });
+
+  it('lets a live gateway read its roll item, to hand over when the reconciler rolls it', () => {
+    const liveRole = JSON.parse(roleStatements('gnome-order-gateway-task-eu-west-1')).flat();
+    expect(liveRole).toContainEqual(expect.objectContaining({
+      Action: 'dynamodb:GetItem',
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*#roll'] } },
+    }));
+  });
 });

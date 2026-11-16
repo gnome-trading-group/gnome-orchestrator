@@ -96,6 +96,12 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
       conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
     }));
+    // Each gateway's roll item: what the gateway reads at SIGTERM to hand over, and the controller shows.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*#roll'] } },
+    }));
     // What its alerts keep between ticks, on one item of its own.
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
@@ -120,6 +126,17 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
         ArnEquals: { 'ecs:cluster': platformRegions().map(region =>
           `arn:aws:ecs:${region}:${this.account}:cluster/${ORDER_GATEWAYS.cluster}`) },
       },
+    }));
+    // The host a rolled gateway runs on, which it is pinned to, and whether that host is still in the cluster.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:ListContainerInstances'],
+      resources: platformRegions().map(region =>
+        `arn:aws:ecs:${region}:${this.account}:cluster/${ORDER_GATEWAYS.cluster}`),
+    }));
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:DescribeContainerInstances'],
+      resources: platformRegions().map(region =>
+        `arn:aws:ecs:${region}:${this.account}:container-instance/${ORDER_GATEWAYS.cluster}/*`),
     }));
     fn.addToRolePolicy(new iam.PolicyStatement({
       // Task definitions take no resource-level permission for these.

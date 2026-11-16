@@ -53,7 +53,6 @@ import group.gnometrading.utils.CauseChain;
 import group.gnometrading.utils.SampledEpochNanoClock;
 import java.io.File;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -188,6 +187,7 @@ public class ShardOrchestrator extends Orchestrator {
         final BookProber prober =
                 new BookProber(logger, getInstance(EpochNanoClock.class), BookProber.Settings.DEFAULT);
         final Feeds feeds = new Feeds(logger, prober);
+        final RawCaptureAgent rawCapture = rawCapture(logger, properties);
         final FeedSources sources = feedSources(
                 logger,
                 properties,
@@ -198,6 +198,7 @@ public class ShardOrchestrator extends Orchestrator {
                 clock,
                 uploader,
                 pool,
+                rawCapture,
                 shard,
                 rawBucket);
 
@@ -238,6 +239,11 @@ public class ShardOrchestrator extends Orchestrator {
 
         final GnomeAgentRunner agentRunner = new GnomeAgentRunner(agent, exitOnError(logger, "Collector"));
         GnomeAgentRunner.startOnThread(agentRunner);
+        // Before the first connection opens; a failure loses raw capture, never the books, so it doesn't exit.
+        final GnomeAgentRunner rawRunner = new GnomeAgentRunner(
+                rawCapture,
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Raw capture failed: %s", CauseChain.of(error)));
+        GnomeAgentRunner.startOnThread(rawRunner);
         // Its poller gates every ring as the collector's does, so a publisher that stopped would stop collection: exit.
         final GnomeAgentRunner publisherRunner = new GnomeAgentRunner(publisher, exitOnError(logger, "Publisher"));
         GnomeAgentRunner.startOnThread(publisherRunner);
@@ -255,9 +261,10 @@ public class ShardOrchestrator extends Orchestrator {
                 identity.shard(),
                 aeron,
                 latencyProbe,
-                List.of(agentRunner, publisherRunner, proberRunner),
+                List.of(agentRunner, publisherRunner, proberRunner, rawRunner),
                 agent,
                 publisher,
+                rawCapture,
                 latency,
                 heartbeatShard(runtime, prober),
                 uploader);
@@ -281,7 +288,7 @@ public class ShardOrchestrator extends Orchestrator {
                             // First, so sessions stop joining a shard that is going; a replacement task overwrites it.
                             advertised.set("STOPPING");
                             advertise(logger, endpoints, identity, region, advertised.get(), wallClock);
-                            shutdown(logger, runtime, runtimeThread, proberRunner, agentRunner, uploader);
+                            shutdown(logger, runtime, runtimeThread, proberRunner, agentRunner, rawRunner, uploader);
                             close(logger, publisherRunner, "stream publisher");
                             // Before the driver closes: the runtime sample reads its counters.
                             if (samples != null) {
@@ -304,6 +311,14 @@ public class ShardOrchestrator extends Orchestrator {
         serveHealth(agentRunner, runtime, uploader);
     }
 
+    static RawCaptureAgent rawCapture(final Logger logger, final Properties properties) {
+        return new RawCaptureAgent(
+                logger,
+                System::nanoTime,
+                properties.getIntProperty("shard.raw.capture.ring.bytes"),
+                TimeUnit.MICROSECONDS.toNanos(properties.getLongProperty("shard.raw.capture.max.wait.micros")));
+    }
+
     private FeedSources feedSources(
             final Logger logger,
             final Properties properties,
@@ -314,6 +329,7 @@ public class ShardOrchestrator extends Orchestrator {
             final Clock clock,
             final CycleUploader uploader,
             final DirectBufferPool pool,
+            final RawCaptureAgent rawCapture,
             final String shard,
             final String rawBucket) {
         return new FeedSources(
@@ -328,21 +344,10 @@ public class ShardOrchestrator extends Orchestrator {
                 // GatewayErrorHandler has logged it; the connection's supervisor keeps trying, its markets flagged
                 // meanwhile, and replacing the task would cut every other connection.
                 (status, cause) -> {},
-                source -> connection -> {
-                    final RawDataCollector raw =
-                            new RawDataCollector(logger, clock, uploader, pool, source, shard, connection, rawBucket);
-                    return new WebSocketFeedOpener.RawCapture() {
-                        @Override
-                        public void capture(final long recvTimestamp, final ByteBuffer buffer) {
-                            raw.capture(recvTimestamp, buffer);
-                        }
-
-                        @Override
-                        public void flush() {
-                            raw.flush();
-                        }
-                    };
-                },
+                source -> (connection, maxFrameBytes) -> rawCapture.open(
+                        connection,
+                        new RawDataCollector(logger, clock, uploader, pool, source, shard, connection, rawBucket),
+                        maxFrameBytes),
                 WebSocketFeedOpener.Clients.TLS);
     }
 
@@ -422,6 +427,7 @@ public class ShardOrchestrator extends Orchestrator {
             final List<GnomeAgentRunner> runners,
             final MarketDataCollectorAgent collector,
             final StreamPublisherAgent publisher,
+            final RawCaptureAgent rawCapture,
             final ShardLatency latency,
             final CollectorHeartbeat.Shard shard,
             final CycleUploader uploader) {
@@ -445,8 +451,8 @@ public class ShardOrchestrator extends Orchestrator {
         final CounterSampler agents = new CounterSampler(
                 buffer,
                 "shard.agents",
-                List.of("collector", "publisher"),
-                List.of(collector.counters(), publisher.counters()),
+                List.of("collector", "publisher", "rawCapture"),
+                List.of(collector.counters(), publisher.counters(), rawCapture.counters()),
                 SAMPLES_MINUTE_MILLIS);
         final ShardSampler streams = new ShardSampler(
                 buffer, shard, uploader::queuedUploads, uploader::failedUploads, SAMPLES_MINUTE_MILLIS);
@@ -633,6 +639,7 @@ public class ShardOrchestrator extends Orchestrator {
             final ScheduledExecutorService runtimeThread,
             final GnomeAgentRunner prober,
             final GnomeAgentRunner agent,
+            final GnomeAgentRunner rawCapture,
             final CycleUploader uploader) {
         logger.logf(LogMessage.DEBUG, "Stopping %d streams", runtime.size());
         close(logger, prober, "book prober");
@@ -659,6 +666,8 @@ public class ShardOrchestrator extends Orchestrator {
         }
         runtimeThread.shutdownNow();
         close(logger, agent, "collector agent");
+        // After every connection's flush, which waits for it to write what its reader queued.
+        close(logger, rawCapture, "raw capture");
         uploader.close();
         logger.logf(LogMessage.DEBUG, "Shard stopped; %d uploads failed", uploader.failedUploads());
     }

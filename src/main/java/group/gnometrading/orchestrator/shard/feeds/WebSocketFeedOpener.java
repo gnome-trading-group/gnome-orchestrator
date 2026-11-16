@@ -45,12 +45,12 @@ public final class WebSocketFeedOpener implements ConnectionGroup.Opener<WebSock
         void flush();
     }
 
-    /** A raw capture for each new connection, by its name. */
+    /** A raw capture for each new connection, by its name and the largest frame its venue sends. */
     @FunctionalInterface
     public interface RawCaptures {
-        RawCaptures NONE = connection -> RawCapture.NONE;
+        RawCaptures NONE = (connection, maxFrameBytes) -> RawCapture.NONE;
 
-        RawCapture open(String connection);
+        RawCapture open(String connection, int maxFrameBytes);
     }
 
     /** Makes a connection's websocket client. */
@@ -150,7 +150,7 @@ public final class WebSocketFeedOpener implements ConnectionGroup.Opener<WebSock
                 connects,
                 commands,
                 listener);
-        final RawCapture capture = raw.open(name);
+        final RawCapture capture = raw.open(name, venue.feed().readBufferBytes());
         connection.setRawSink(capture);
 
         final GatewayErrorHandler errors = new GatewayErrorHandler(

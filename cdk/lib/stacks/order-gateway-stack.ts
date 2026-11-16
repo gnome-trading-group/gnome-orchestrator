@@ -202,6 +202,12 @@ export class OrderGatewayStack extends cdk.Stack {
       resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
       conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
     }));
+    // Its roll item, read at SIGTERM: whether the reconciler is rolling it, so it hands over rather than cancels.
+    taskRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*#roll'] } },
+    }));
   }
 
   /** A base task definition, which the reconciler copies into each gateway's own revision. */

@@ -171,7 +171,7 @@ public final class FeedLiveCheck {
         if (dir == null) {
             return WebSocketFeedOpener.RawCaptures.NONE;
         }
-        return connection -> {
+        return (connection, maxFrameBytes) -> {
             final PrintWriter out;
             try {
                 out = new PrintWriter(new FileWriter(dir + "/" + connection + ".jsonl"));

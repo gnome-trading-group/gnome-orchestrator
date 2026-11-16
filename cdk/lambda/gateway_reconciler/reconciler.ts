@@ -7,12 +7,13 @@ import { AllocateAddressCommand, DescribeAddressesCommand, EC2Client } from '@aw
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import {
   CreateServiceCommand, DescribeCapacityProvidersCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand,
-  DescribeTasksCommand, ECSClient, KeyValuePair, ListServicesCommand, ListTasksCommand, RegisterTaskDefinitionCommand,
-  UpdateServiceCommand,
+  DescribeTasksCommand, ECSClient, KeyValuePair, ListContainerInstancesCommand, ListServicesCommand, ListTasksCommand,
+  RegisterTaskDefinitionCommand, UpdateServiceCommand,
 } from '@aws-sdk/client-ecs';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { platformRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
 import { Alert, AlertState, EMPTY_STATE, evaluate, firingMode, Observation } from './alerts';
+import { readRoll, Roll, rollItem, RollTick, rollTick, rollUnderWay, stepRoll } from './roll';
 
 // Decides which order gateways run, live and paper, and makes AWS match: the only writer of the gateways' ECS services
 // and Elastic IPs, run one tick at a time (a FIFO queue with one message group into a Lambda with one concurrent run,
@@ -28,6 +29,10 @@ import { Alert, AlertState, EMPTY_STATE, evaluate, firingMode, Observation } fro
 // cluster and, for each mode, the hosts that scale from zero and the base task definition each gateway's own revision
 // is copied from. A paper gateway simulates its venue: it runs on the paper hosts, reads its sessions' market-data
 // leases, and has no Elastic IP.
+//
+// An operator may ask for a running gateway to be rolled (the row's roll_requested_at): stopped without cancelling and
+// started again on its host on the release a start would run, its orders taken back from the ownership log there. The
+// roll's steps are in roll.ts; while one is under way the gateway is kept running whatever it says.
 
 /** A mode's base task definition and the capacity provider of its hosts. */
 export interface ModeNames {
@@ -64,6 +69,8 @@ const ENDPOINTS_TABLE = 'service-endpoints';
 const ENDPOINTS_REGION = 'us-east-1';
 // What the alerts keep between ticks: one item beside the gateways' own, with no expiry.
 const ALERT_STATE_ID = 'order-gateway-reconciler#alerts';
+// A gateway's roll item, beside its endpoint: what the gateway reads at SIGTERM, and the controller shows.
+const rollId = (gatewayKey: string) => `order-gateway#${gatewayKey}#roll`;
 // gnome-registry's alert bus, in this account and region (its alerts/model.ts).
 const ALERT_BUS = 'gnome-alerts';
 
@@ -73,6 +80,8 @@ export interface GatewayRow {
   region: string;
   orchestrator_version: string | null;
   wanted_at: string | null;
+  // When an operator last asked for it to be rolled.
+  roll_requested_at?: string | null;
 }
 
 /**
@@ -84,9 +93,15 @@ export interface Activity {
   linkedSessions: number;
   workingOrders: number;
   expired?: boolean;
+  // The release it runs; when it last wrote; whether its release stops without cancelling when rolled, and whether it
+  // is stopping so now.
+  version?: string;
+  writtenAtMs?: number;
+  canHandOver?: boolean;
+  handover?: boolean;
 }
 
-type Client = { send(command: any): Promise<any> };
+export type Client = { send(command: any): Promise<any> };
 
 export interface ReconcileDeps {
   names: GatewayNames;
@@ -98,6 +113,10 @@ export interface ReconcileDeps {
   ecs(region: string): Client;
   ec2(region: string): Client;
   autoscaling(region: string): Client;
+  // The gateway's roll item, null without one; and writing it.
+  roll(gatewayKey: string): Promise<Roll | null>;
+  saveRoll(gatewayKey: string, roll: Roll, nowMs: number): Promise<void>;
+  sleep(ms: number): Promise<void>;
   nowMs(): number;
   // Told what the tick saw of each gateway, for its alerts.
   observed?(observation: Observation): void;
@@ -105,7 +124,9 @@ export interface ReconcileDeps {
 
 // 'starting': moved onto a new revision with nothing wanted yet, waiting for the old deployment to drain. 'moving': its
 // row names a new region, and it waits there until it has stopped in the old one.
-export type Outcome = 'starting' | 'moving' | 'started' | 'created' | 'stopped' | 'running' | 'stopped already';
+// 'rolling': a roll an operator asked for is under way.
+export type Outcome =
+  'starting' | 'moving' | 'started' | 'created' | 'stopped' | 'running' | 'stopped already' | 'rolling';
 
 export function serviceName(names: GatewayNames, gatewayKey: string): string {
   return names.servicePrefix + gatewayKey.replace(/:/g, '-');
@@ -125,9 +146,10 @@ export function shouldRun(row: GatewayRow, activity: Activity | null, running: b
 /** One tick: each gateway brought to where it should be. One that fails is logged and tried again next tick. */
 export async function reconcile(deps: ReconcileDeps): Promise<Map<string, Outcome>> {
   const outcomes = new Map<string, Outcome>();
+  const tick = rollTick();
   for (const row of await deps.gateways()) {
     try {
-      const seen = await reconcileOne(row, deps);
+      const seen = await reconcileOne(row, deps, tick);
       outcomes.set(row.gateway_key, seen.outcome!);
       deps.observed?.(seen);
     } catch (error) {
@@ -140,7 +162,7 @@ export async function reconcile(deps: ReconcileDeps): Promise<Map<string, Outcom
   return outcomes;
 }
 
-async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Observation> {
+async function reconcileOne(row: GatewayRow, deps: ReconcileDeps, tick: RollTick): Promise<Observation> {
   if (!platformRegions().includes(row.region)) {
     throw new Error(`${row.gateway_key} trades from ${row.region}, where no gateway can run`);
   }
@@ -154,10 +176,15 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   const running = current != null && current.desiredCount > 0;
   const now = deps.nowMs();
   const activity = await deps.activity(row.gateway_key, now);
+  let roll = await deps.roll(row.gateway_key);
   const seen = (outcome: Outcome): Observation => ({
     gatewayKey: row.gateway_key, mode: row.mode, region: row.region, outcome, activity,
-    serviceEvent: current?.events?.[0]?.message,
+    serviceEvent: current?.events?.[0]?.message, roll: roll ?? undefined,
   });
+  if (stoppedElsewhere) {
+    roll = await stepRoll({ row, deps, ecs, mode, service, current, running, activity, now, tick }, roll);
+    if (roll && rollUnderWay(roll)) return seen('rolling');
+  }
   if (!shouldRun(row, activity, running, now)) {
     if (!running) return seen('stopped already');
     await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 0 }));
@@ -167,30 +194,23 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   if (running) {
     const taskId = await runningTask(ecs, names, service);
     if (activity && !activity.expired && UP_STATES.has(activity.state)) return { ...seen('running'), taskId };
+    await releaseLostHost(ecs, names, service, current);
     // Not up: why its last task stopped, for the alert should it stay so.
     return { ...seen('running'), taskId, stoppedReason: await lastStopped(ecs, names, service) };
   }
   if (!stoppedElsewhere) return seen('moving');
   const version = row.orchestrator_version ?? await deps.latestVersion();
-  const environment = [{ name: 'ALERTS_API_URL', value: await deps.alertsApiUrl() }];
-  // A paper gateway trades with no venue, so has no address of its own; it reads its sessions'
-  // market-data leases instead.
-  if (row.mode === 'paper') {
-    const marketData = await deps.marketDataApi();
-    environment.push(
-      { name: 'MARKET_DATA_API_URL', value: marketData.url },
-      { name: 'MARKET_DATA_API_KEY_SECRET', value: marketData.keySecret },
-    );
-  } else {
-    await ensureAddress(deps.ec2(row.region), names, row.gateway_key);
-  }
-  const taskDefinition = await revision(ecs, names, mode, row.gateway_key, version, environment);
+  if (row.mode !== 'paper') await ensureAddress(deps.ec2(row.region), names, row.gateway_key);
+  const taskDefinition = await revision(ecs, names, mode, row.gateway_key, version, await gatewayEnvironment(row, deps));
   if (current) {
     // Onto a new revision with nothing wanted, and wanted only once the old deployment has drained: while it is still
     // there, ECS starts a task of the previous release on it, which takes sessions until the new one replaces it. A
-    // starting session wakes this every 10 s, so the next tick comes soon.
-    if (current.taskDefinition !== taskDefinition) {
-      await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, taskDefinition, desiredCount: 0 }));
+    // starting session wakes this every 10 s, so the next tick comes soon. A host a roll pinned it to is let go: a
+    // fresh start may go on any host.
+    if (current.taskDefinition !== taskDefinition || (current.placementConstraints ?? []).length > 0) {
+      await ecs.send(new UpdateServiceCommand({
+        cluster: names.cluster, service, taskDefinition, desiredCount: 0, placementConstraints: [],
+      }));
       return seen('starting');
     }
     if ((current.deployments ?? []).length > 1) return seen('starting');
@@ -211,8 +231,44 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps): Promise<Obser
   return seen('created');
 }
 
+/**
+ * What each gateway's revision sets over its base's environment beside its key and release: where it raises alerts,
+ * and for a paper gateway, which trades with no venue, where it reads its sessions' market-data leases.
+ */
+export async function gatewayEnvironment(row: GatewayRow, deps: ReconcileDeps): Promise<KeyValuePair[]> {
+  const environment = [{ name: 'ALERTS_API_URL', value: await deps.alertsApiUrl() }];
+  if (row.mode === 'paper') {
+    const marketData = await deps.marketDataApi();
+    environment.push(
+      { name: 'MARKET_DATA_API_URL', value: marketData.url },
+      { name: 'MARKET_DATA_API_KEY_SECRET', value: marketData.keySecret },
+    );
+  }
+  return environment;
+}
+
+/**
+ * A running gateway pinned by a roll to a host that has left the cluster (lost, or taken away) can't be placed again:
+ * the pin is let go, so ECS starts it on another host, as for any host lost (its orders there are swept and reclaimed
+ * through the sessions' hellos).
+ */
+async function releaseLostHost(ecs: Client, names: GatewayNames, service: string, current: any): Promise<void> {
+  const pinned = /ec2InstanceId\s*==\s*(\S+)/.exec(current?.placementConstraints?.[0]?.expression ?? '')?.[1];
+  if (!pinned || await hostActive(ecs, names, pinned)) return;
+  await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, placementConstraints: [] }));
+  console.log(`Gateway service ${service}: its host ${pinned} is gone; letting it start on another`);
+}
+
+/** Whether the EC2 instance is an active host in the gateways' cluster. */
+export async function hostActive(ecs: Client, names: GatewayNames, instanceId: string): Promise<boolean> {
+  const listed = await ecs.send(new ListContainerInstancesCommand({
+    cluster: names.cluster, filter: `ec2InstanceId == ${instanceId}`, status: 'ACTIVE',
+  }));
+  return (listed.containerInstanceArns ?? []).length > 0;
+}
+
 /** The gateway's service in the region's cluster; undefined when it has none, or the region has no cluster yet. */
-async function activeService(ecs: Client, names: GatewayNames, service: string): Promise<any | undefined> {
+export async function activeService(ecs: Client, names: GatewayNames, service: string): Promise<any | undefined> {
   try {
     const described = await ecs.send(new DescribeServicesCommand({ cluster: names.cluster, services: [service] }));
     return (described.services ?? []).find((s: any) => s.status === 'ACTIVE');
@@ -302,13 +358,17 @@ async function gatewaysSetToRun(ecs: Client, names: GatewayNames, capacityProvid
 }
 
 // A gateway's endpoint states in which it is up.
-const UP_STATES = new Set(['READY', 'DEGRADED']);
+export const UP_STATES = new Set(['READY', 'DEGRADED']);
 
 /** The service's running task, by its id; undefined while none is. */
 async function runningTask(ecs: Client, names: GatewayNames, service: string): Promise<string | undefined> {
+  return (await runningTasks(ecs, names, service))[0];
+}
+
+/** The service's running tasks, by their ids. */
+export async function runningTasks(ecs: Client, names: GatewayNames, service: string): Promise<string[]> {
   const listed = await ecs.send(new ListTasksCommand({ cluster: names.cluster, serviceName: service, desiredStatus: 'RUNNING' }));
-  const arn = (listed.taskArns ?? [])[0];
-  return arn ? arn.substring(arn.lastIndexOf('/') + 1) : undefined;
+  return (listed.taskArns ?? []).map((arn: string) => arn.substring(arn.lastIndexOf('/') + 1));
 }
 
 /** Why the service's most recently stopped task stopped, as ECS and its container say; undefined when none has. */
@@ -334,7 +394,7 @@ const GATEWAY_ENVIRONMENT = new Set([
  * The gateway's own revision: its mode's base task definition as deployed, with its key, its release, where it raises
  * alerts and, for paper, where it reads leases; reused when unchanged.
  */
-async function revision(
+export async function revision(
   ecs: Client, names: GatewayNames, mode: ModeNames, gatewayKey: string, version: string, environment: KeyValuePair[],
 ): Promise<string> {
   const base = (await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: mode.baseFamily }))).taskDefinition;
@@ -479,8 +539,25 @@ const lambdaDeps: Omit<ReconcileDeps, 'names'> = {
       workingOrders: Number(item.working_orders?.N ?? 0),
       // DynamoDB removes expired items only eventually.
       expired: Number(item.expires_at?.N ?? 0) * 1000 <= nowMs,
+      version: item.version?.S,
+      // Written in epoch nanoseconds.
+      writtenAtMs: Number(BigInt(item.written_at_ns?.N ?? '0') / 1_000_000n),
+      canHandOver: item.can_hand_over?.BOOL === true,
+      handover: item.handover?.BOOL === true,
     };
   },
+  async roll(gatewayKey) {
+    const item = (await dynamo.send(new GetItemCommand({
+      TableName: ENDPOINTS_TABLE, Key: { service_id: { S: rollId(gatewayKey) } }, ConsistentRead: true,
+    }))).Item;
+    return item ? readRoll(item) : null;
+  },
+  async saveRoll(gatewayKey, roll, nowMs) {
+    await dynamo.send(new PutItemCommand({
+      TableName: ENDPOINTS_TABLE, Item: rollItem(rollId(gatewayKey), roll, nowMs),
+    }));
+  },
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   latestVersion: () => parameter(LATEST_VERSION_PARAMETER),
   alertsApiUrl: () => parameter(ALERTS_API_URL_PARAMETER),
   async marketDataApi() {

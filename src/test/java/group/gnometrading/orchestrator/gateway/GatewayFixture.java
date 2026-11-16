@@ -622,6 +622,25 @@ public final class GatewayFixture implements AutoCloseable {
         return stopped;
     }
 
+    /**
+     * Stops as SIGTERM does when the reconciler rolls the gateway: control's thread first, then the handover (nothing
+     * cancelled, no goodbye, every request answered) while ingress and egress still run, then everything else; the
+     * ownership log is left for the next gateway on the same state directory.
+     *
+     * @return what the handover returned: whether the lanes went quiet in time
+     */
+    public boolean handOver(final long timeoutNanos) throws Exception {
+        final GnomeAgentRunner controlRunner = this.runners.stream()
+                .filter(runner -> runner.getAgent() == this.control)
+                .findFirst()
+                .orElseThrow();
+        controlRunner.close();
+        this.runners.remove(controlRunner);
+        final boolean quiet = this.control.handOver(timeoutNanos);
+        kill();
+        return quiet;
+    }
+
     /** Stops every thread as a crash would: nothing is cancelled and no session told. Once; again does nothing. */
     public void kill() {
         if (this.stopped) {

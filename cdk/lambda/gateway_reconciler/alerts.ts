@@ -5,12 +5,13 @@
 // catalog doesn't debounce them again.
 
 import type { Activity, Outcome } from './reconciler';
+import type { Roll } from './roll';
 
 // A cold start (host, image, jar, venue connections) takes 3-5 minutes; a starting session gives up at 10.
 export const START_STUCK_MS = 6 * 60 * 1000;
 export const DEGRADED_TICKS = 2;
 export const FAILED_TICKS = 3;
-// How long a restart nobody asked for stays raised, for someone to look at what it left.
+// How long a restart nobody asked for stays raised, for someone to look at what it left; a failed roll the same.
 export const RESTARTED_HOLD_MS = 15 * 60 * 1000;
 
 /** What one tick saw of one gateway. */
@@ -30,6 +31,8 @@ export interface Observation {
   stoppedReason?: string;
   // Its running task's id, while it runs.
   taskId?: string;
+  // Its roll item: the roll under way, or the last one, ended.
+  roll?: Roll;
 }
 
 /** What is kept of a gateway between ticks. */
@@ -106,6 +109,11 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
   }
   memory.failedTicks = 0;
   const outcome = seen.outcome;
+  if (outcome === 'rolling') {
+    // Stopped and started again as asked, with what it held kept for its return: its gap is no outage and its new task
+    // no restart nobody asked for; the roll has its own limit on coming up.
+    return { degradedTicks: 0, failedTicks: 0, lastInUse: memory.lastInUse };
+  }
   if (outcome === 'stopped' || outcome === 'stopped already') {
     // Stopped as asked: its planned stop cancels and tells everyone, so its going is no outage.
     return { degradedTicks: 0, failedTicks: 0 };
@@ -130,7 +138,7 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
     memory.lastInUse = activity.linkedSessions > 0 || activity.workingOrders > 0
       ? { linkedSessions: activity.linkedSessions, workingOrders: activity.workingOrders }
       : undefined;
-  } else if (activity && activity.state === 'STOPPING') {
+  } else if (activity && activity.state === 'STOPPING' && !activity.handover) {
     // Stopping, though not asked to by this reconciler (its host shutting down, or a stop by hand): it says what it
     // still holds as it cancels, and once more when it is done.
     memory.stopping = { workingOrders: activity.workingOrders };
@@ -159,6 +167,25 @@ function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Omi
     });
   }
   if (seen.error !== undefined) return alerts;
+  const roll = seen.roll;
+  if (roll && (roll.phase === 'rolled_back' || roll.phase === 'failed') && roll.endedAtMs !== undefined) {
+    const up = present(seen.activity) != null && UP.has(seen.activity!.state);
+    const rolledBack = roll.phase === 'rolled_back';
+    // A rollback that came up holds for a while; one that didn't, until the gateway is up again.
+    if (nowMs - roll.endedAtMs < RESTARTED_HOLD_MS || (!rolledBack && !up)) {
+      alerts.push({
+        type: 'GATEWAY_ROLL_FAILED',
+        title: rolledBack
+          ? `Gateway ${seen.gatewayKey}'s roll to ${roll.toVersion} failed and it was rolled back to ${roll.fromVersion}: ${roll.reason ?? 'unknown'}`
+          : `Gateway ${seen.gatewayKey}'s roll to ${roll.toVersion} failed and it isn't up: ${roll.reason ?? 'unknown'}`,
+        labels: labels({
+          rolledBack: String(rolledBack), fromVersion: roll.fromVersion ?? '', toVersion: roll.toVersion ?? '',
+          ...(roll.instanceId ? { instanceId: roll.instanceId } : {}),
+        }),
+      });
+    }
+  }
+  if (seen.outcome === 'rolling') return alerts;
   if (memory.startingSinceMs !== undefined && nowMs - memory.startingSinceMs >= START_STUCK_MS) {
     const minutes = Math.floor((nowMs - memory.startingSinceMs) / 60_000);
     alerts.push({

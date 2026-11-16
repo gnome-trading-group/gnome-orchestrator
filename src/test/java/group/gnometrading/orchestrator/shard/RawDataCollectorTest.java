@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -68,6 +69,17 @@ class RawDataCollectorTest {
         return buf;
     }
 
+    /** As a {@link RawCaptureQueue} hands a frame over: header and payload in one piece. */
+    static void capture(RawDataCollector collector, long recvTimestamp, ByteBuffer payload) {
+        UnsafeBuffer frame = new UnsafeBuffer(new byte[RawDataCollector.HEADER_SIZE + payload.remaining()]);
+        frame.putLong(0, recvTimestamp, ByteOrder.LITTLE_ENDIAN);
+        frame.putInt(Long.BYTES, payload.remaining(), ByteOrder.LITTLE_ENDIAN);
+        frame.putBytes(RawDataCollector.HEADER_SIZE, payload, payload.position(), payload.remaining());
+        if (collector.startFrame(recvTimestamp)) {
+            collector.append(frame, 0, frame.capacity());
+        }
+    }
+
     private long nanos(int year, int month, int day, int hour, int minute, int second) {
         Instant instant =
                 LocalDateTime.of(year, month, day, hour, minute, second).toInstant(UTC);
@@ -81,62 +93,13 @@ class RawDataCollectorTest {
     }
 
     @Test
-    void captureCopiesADirectBufferWithoutMovingIt() throws IOException {
-        List<byte[]> uploaded = new ArrayList<>();
-        when(s3Client.putObject(any(Consumer.class), any(RequestBody.class))).thenAnswer(invocation -> {
-            RequestBody body = invocation.getArgument(1);
-            uploaded.add(body.contentStreamProvider().newStream().readAllBytes());
-            return PutObjectResponse.builder().build();
-        });
-        date(2025, 4, 1, 12, 0, 0);
-        RawDataCollector collector = collector();
-
-        byte[] payload = "direct payload".getBytes();
-        ByteBuffer direct = ByteBuffer.allocateDirect(64);
-        direct.put(new byte[3]).put(payload).flip().position(3);
-        collector.capture(nanos(2025, 4, 1, 12, 0, 30), direct);
-        collector.capture(nanos(2025, 4, 1, 12, 1, 1), buf("next"));
-
-        assertEquals(3, direct.position(), "the gateway still has to parse the message");
-        try (ZstdInputStream zstd = new ZstdInputStream(new ByteArrayInputStream(uploaded.get(0)))) {
-            byte[] record = zstd.readAllBytes();
-            assertArrayEquals(payload, java.util.Arrays.copyOfRange(record, 12, record.length));
-        }
-    }
-
-    @Test
-    void captureWithinACycleAllocatesNothingPerMessage() {
-        date(2025, 4, 1, 12, 0, 0);
-        RawDataCollector collector = collector();
-        ByteBuffer message = ByteBuffer.allocateDirect(256);
-        message.put(new byte[200]).flip();
-        long minuteStart = nanos(2025, 4, 1, 12, 0, 0);
-        for (int i = 0; i < 10_000; i++) {
-            collector.capture(minuteStart + i, message);
-        }
-
-        com.sun.management.ThreadMXBean threads =
-                (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
-        long thread = Thread.currentThread().getId();
-        long before = threads.getThreadAllocatedBytes(thread);
-        for (int i = 0; i < 10_000; i++) {
-            collector.capture(minuteStart + 10_000 + i, message);
-        }
-        long allocated = threads.getThreadAllocatedBytes(thread) - before;
-
-        // The minute file grows as compressed data accumulates, so some allocation is amortized across captures;
-        // a single object per capture would be at least 16 bytes each.
-        assertTrue(allocated < 10_000 * 16L, "bytes allocated by 10,000 captures: " + allocated);
-    }
-
-    @Test
     void testNoUploadWithinSameMinute() {
         date(2025, 4, 1, 12, 0, 0);
         RawDataCollector collector = collector();
 
-        collector.capture(nanos(2025, 4, 1, 12, 0, 5), buf("aaa"));
-        collector.capture(nanos(2025, 4, 1, 12, 0, 30), buf("bbb"));
-        collector.capture(nanos(2025, 4, 1, 12, 0, 59), buf("ccc"));
+        capture(collector, nanos(2025, 4, 1, 12, 0, 5), buf("aaa"));
+        capture(collector, nanos(2025, 4, 1, 12, 0, 30), buf("bbb"));
+        capture(collector, nanos(2025, 4, 1, 12, 0, 59), buf("ccc"));
 
         verify(s3Client, never()).putObject(any(Consumer.class), any(RequestBody.class));
     }
@@ -146,8 +109,8 @@ class RawDataCollectorTest {
         date(2025, 4, 1, 12, 0, 0);
         RawDataCollector collector = collector();
 
-        collector.capture(nanos(2025, 4, 1, 12, 0, 30), buf("data"));
-        collector.capture(nanos(2025, 4, 1, 12, 1, 1), buf("next"));
+        capture(collector, nanos(2025, 4, 1, 12, 0, 30), buf("data"));
+        capture(collector, nanos(2025, 4, 1, 12, 1, 1), buf("next"));
 
         verify(s3Client, times(1)).putObject(any(Consumer.class), any(RequestBody.class));
     }
@@ -157,9 +120,9 @@ class RawDataCollectorTest {
         date(2025, 4, 1, 12, 0, 0);
         RawDataCollector collector = collector();
 
-        collector.capture(nanos(2025, 4, 1, 12, 0, 10), buf("m0"));
-        collector.capture(nanos(2025, 4, 1, 12, 1, 1), buf("m1"));
-        collector.capture(nanos(2025, 4, 1, 12, 2, 1), buf("m2"));
+        capture(collector, nanos(2025, 4, 1, 12, 0, 10), buf("m0"));
+        capture(collector, nanos(2025, 4, 1, 12, 1, 1), buf("m1"));
+        capture(collector, nanos(2025, 4, 1, 12, 2, 1), buf("m2"));
 
         verify(s3Client, times(2)).putObject(any(Consumer.class), any(RequestBody.class));
     }
@@ -178,9 +141,9 @@ class RawDataCollectorTest {
 
         byte[] payload = "hello exchange".getBytes();
         long ts = nanos(2025, 4, 1, 12, 0, 30);
-        collector.capture(ts, ByteBuffer.wrap(payload));
+        capture(collector, ts, ByteBuffer.wrap(payload));
 
-        collector.capture(nanos(2025, 4, 1, 12, 1, 1), buf("rotate"));
+        capture(collector, nanos(2025, 4, 1, 12, 1, 1), buf("rotate"));
 
         assertEquals(1, uploaded.size());
         byte[] decompressed;
@@ -211,8 +174,8 @@ class RawDataCollectorTest {
         date(2025, 4, 1, 12, 34, 0);
         RawDataCollector collector = collector();
 
-        collector.capture(nanos(2025, 4, 1, 12, 34, 5), buf("data"));
-        collector.capture(nanos(2025, 4, 1, 12, 35, 1), buf("next"));
+        capture(collector, nanos(2025, 4, 1, 12, 34, 5), buf("data"));
+        capture(collector, nanos(2025, 4, 1, 12, 35, 1), buf("next"));
 
         PutObjectRequest.Builder builder = PutObjectRequest.builder();
         requestCaptor.getValue().accept(builder);
@@ -227,7 +190,7 @@ class RawDataCollectorTest {
     void flushUploadsThePartialMinute() {
         date(2025, 4, 1, 12, 0, 0);
         RawDataCollector collector = collector();
-        collector.capture(nanos(2025, 4, 1, 12, 0, 10), buf("data"));
+        capture(collector, nanos(2025, 4, 1, 12, 0, 10), buf("data"));
 
         collector.flush();
 

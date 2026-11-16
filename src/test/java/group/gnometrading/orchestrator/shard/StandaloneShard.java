@@ -52,6 +52,7 @@ import java.time.Clock;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
@@ -84,6 +85,8 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
  *   <li>Unpinned by default, as shards run. {@code --latency.profile=low_latency --cpu.affinity.enabled=true
  *       --cpu.isolated=1 --cpu.housekeeping=0 --market.data.idle.max.park.micros=50} gives hot agents a core of their
  *       own, with the shard's Aeron parks. Readers block either way, as a shard's do.
+ *   <li>{@code --standalone.aeron=standard|latency}: the media driver's {@link AeronProfile} (default standard, as
+ *       shards run)
  * </ul>
  */
 public final class StandaloneShard extends Orchestrator {
@@ -151,8 +154,11 @@ public final class StandaloneShard extends Orchestrator {
         final ShardAccounts accounts = new ShardAccounts();
         final BookProber prober = new BookProber(logger, wallClock, BookProber.Settings.DEFAULT);
         final Feeds feeds = new Feeds(logger, prober);
-        final FeedSources feedSources =
-                feedSources(logger, properties, securityMaster, accounts, wallClock, feeds, clock, uploader, pool);
+        final RawCaptureAgent rawCapture = ShardOrchestrator.rawCapture(logger, properties);
+        final GnomeAgentRunner rawRunner = new GnomeAgentRunner(rawCapture, failed(logger, "Raw capture"));
+        GnomeAgentRunner.startOnThread(rawRunner);
+        final FeedSources feedSources = feedSources(
+                logger, properties, securityMaster, accounts, wallClock, feeds, clock, uploader, pool, rawCapture);
 
         final ShardLatency latency = shardLatency(wallClock, securityMaster);
         final MarketDataCollectorAgent agent =
@@ -163,7 +169,7 @@ public final class StandaloneShard extends Orchestrator {
         }
         final AeronRuntime aeron = AeronRuntime.launch(
                 "shard",
-                AeronProfile.STANDARD,
+                aeronProfile(properties),
                 AeronPathIdle.forShard(properties),
                 error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
         final AtomicReference<ShardRuntime> runtimeRef = new AtomicReference<>();
@@ -228,13 +234,13 @@ public final class StandaloneShard extends Orchestrator {
                 ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
                 latencyProbe,
                 aeron.aeron().countersReader(),
-                List.of(agentRunner, publisherRunner, proberRunner),
+                List.of(agentRunner, publisherRunner, proberRunner, rawRunner),
                 properties.getLongProperty("samples.runtime.interval.ms"));
         final CounterSampler agents = new CounterSampler(
                 samples,
                 "shard.agents",
-                List.of("collector", "publisher"),
-                List.of(agent.counters(), publisher.counters()),
+                List.of("collector", "publisher", "rawCapture"),
+                List.of(agent.counters(), publisher.counters(), rawCapture.counters()),
                 MINUTE_MILLIS);
         final ShardSampler streams =
                 new ShardSampler(samples, shard, uploader::queuedUploads, uploader::failedUploads, MINUTE_MILLIS);
@@ -267,6 +273,7 @@ public final class StandaloneShard extends Orchestrator {
             runtimeThread.shutdownNow();
             close(logger, agentRunner, "collector");
             close(logger, publisherRunner, "publisher");
+            close(logger, rawRunner, "raw capture");
             uploader.close();
             aeron.close();
         };
@@ -292,6 +299,13 @@ public final class StandaloneShard extends Orchestrator {
             }
         }
         stop.run();
+    }
+
+    static AeronProfile aeronProfile(final Properties properties) {
+        return properties.hasProperty("standalone.aeron")
+                ? AeronProfile.valueOf(
+                        properties.getStringProperty("standalone.aeron").toUpperCase(Locale.ROOT))
+                : AeronProfile.STANDARD;
     }
 
     static int[] streamIds(final String list) {
@@ -330,7 +344,8 @@ public final class StandaloneShard extends Orchestrator {
             final Feeds feeds,
             final Clock clock,
             final CycleUploader uploader,
-            final DirectBufferPool pool) {
+            final DirectBufferPool pool,
+            final RawCaptureAgent rawCapture) {
         return new FeedSources(
                 feeds,
                 new FeedVenues.Context(
@@ -341,21 +356,10 @@ public final class StandaloneShard extends Orchestrator {
                         wallClock),
                 false,
                 (status, cause) -> {},
-                source -> connection -> {
-                    final RawDataCollector raw = new RawDataCollector(
-                            logger, clock, uploader, pool, source, SHARD_ID, connection, DISCARDED);
-                    return new WebSocketFeedOpener.RawCapture() {
-                        @Override
-                        public void capture(final long recvTimestamp, final ByteBuffer buffer) {
-                            raw.capture(recvTimestamp, buffer);
-                        }
-
-                        @Override
-                        public void flush() {
-                            raw.flush();
-                        }
-                    };
-                },
+                source -> (connection, maxFrameBytes) -> rawCapture.open(
+                        connection,
+                        new RawDataCollector(logger, clock, uploader, pool, source, SHARD_ID, connection, DISCARDED),
+                        maxFrameBytes),
                 WebSocketFeedOpener.Clients.TLS);
     }
 

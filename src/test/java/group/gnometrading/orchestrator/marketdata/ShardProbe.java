@@ -23,6 +23,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.agrona.concurrent.BusySpinIdleStrategy;
+import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
 /**
@@ -34,7 +36,9 @@ import org.agrona.concurrent.SystemEpochNanoClock;
  *
  * <p>{@code -Dshard=<private ip>} (its control port is {@link AeronPorts#SHARD_CONTROL}, or {@code ip:port}),
  * {@code -Dstreams=1,2,3}, {@code -Dminutes=60}, {@code -Dpark.micros=50} (the most its Aeron-path threads park when
- * idle), {@code -Dprofile=standard|latency} (the media driver's), {@code -Dout=<file>} (also appended to).
+ * idle), {@code -Dprofile=standard|latency} (the media driver's), {@code -Ddrain=spin|park} (whether the thread
+ * emptying its ring spins or backs off like the Aeron-path agents; a spinning drain takes a core the drivers may need),
+ * {@code -Dout=<file>} (also appended to).
  *
  * <p>Runs from a release jar plus this class: {@code java -cp gnome-orchestrator-<v>.jar:probe-classes
  * group.gnometrading.orchestrator.marketdata.ShardProbe}, with the jar's module access ({@code Add-Opens} in its
@@ -59,6 +63,8 @@ public final class ShardProbe {
         final AeronProfile profile =
                 "latency".equals(System.getProperty("profile")) ? AeronProfile.LATENCY : AeronProfile.STANDARD;
         final String outFile = System.getProperty("out");
+        final IdleStrategy drainIdle =
+                "park".equals(System.getProperty("drain")) ? idle.agentStrategy() : new BusySpinIdleStrategy();
 
         final Logger logger = new ConsoleLogger(new SystemEpochNanoClock());
         AgentRuntimeInstaller.installStandard(logger, idle);
@@ -73,9 +79,7 @@ public final class ShardProbe {
                 () -> {
                     while (running.get()) {
                         try {
-                            if (drain.poll() == 0) {
-                                Thread.onSpinWait();
-                            }
+                            drainIdle.idle(drain.poll());
                         } catch (Exception error) {
                             throw new IllegalStateException(error);
                         }
@@ -105,12 +109,13 @@ public final class ShardProbe {
             marketData.addSession("probe", () -> MarketDataLeases.local(hostPort, streams), streams);
             logger.logf(
                     LogMessage.DEBUG,
-                    "Probe reading %d streams from %s for %d min (park %d µs, %s driver)",
+                    "Probe reading %d streams from %s for %d min (park %d µs, %s driver, %s drain)",
                     streams.length,
                     hostPort,
                     minutes,
                     idle.maxParkNanos() / 1_000,
-                    profile);
+                    profile,
+                    drainIdle.alias());
 
             final ByteBuffer json = ByteBuffer.allocate(OUT_BYTES);
             final long endMs = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(minutes);

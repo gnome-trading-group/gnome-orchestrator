@@ -1,5 +1,6 @@
 package group.gnometrading.orchestrator.aeron;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -34,6 +35,8 @@ public final class ServiceEndpoints {
     static final String LINKED_SESSIONS = "linked_sessions";
     static final String WORKING_ORDERS = "working_orders";
     static final String MINUTES = "minutes_json";
+    static final String CAN_HAND_OVER = "can_hand_over";
+    static final String HANDOVER = "handover";
     /** An order gateway's minutes outlive a stop by this long, so its last numbers can still be read. */
     public static final long MINUTES_TTL_SECONDS = TimeUnit.MINUTES.toSeconds(10);
 
@@ -63,6 +66,10 @@ public final class ServiceEndpoints {
         item.put(WRITTEN_AT, AttributeValue.fromN(Long.toString(endpoint.writtenAtNanos())));
         item.put(LINKED_SESSIONS, AttributeValue.fromN(Integer.toString(endpoint.linkedSessions())));
         item.put(WORKING_ORDERS, AttributeValue.fromN(Long.toString(endpoint.workingOrders())));
+        if (endpoint.kind() == ServiceEndpoint.Kind.ORDER_GATEWAY) {
+            item.put(CAN_HAND_OVER, AttributeValue.fromBool(endpoint.canHandOver()));
+            item.put(HANDOVER, AttributeValue.fromBool(endpoint.handover()));
+        }
         final long writtenAtSeconds = TimeUnit.NANOSECONDS.toSeconds(endpoint.writtenAtNanos());
         item.put(EXPIRES_AT, AttributeValue.fromN(Long.toString(writtenAtSeconds + TTL_SECONDS)));
         this.dynamo.putItem(
@@ -119,7 +126,35 @@ public final class ServiceEndpoints {
                 item.get(VERSION).s(),
                 Long.parseLong(item.get(WRITTEN_AT).n()),
                 (int) number(item, LINKED_SESSIONS),
-                number(item, WORKING_ORDERS));
+                number(item, WORKING_ORDERS),
+                flag(item, CAN_HAND_OVER),
+                flag(item, HANDOVER));
+    }
+
+    /** A flag the item may lack, as a shard's or one written by an older release does: false. */
+    private static boolean flag(final Map<String, AttributeValue> item, final String name) {
+        final AttributeValue value = item.get(name);
+        return value != null && Boolean.TRUE.equals(value.bool());
+    }
+
+    /**
+     * An order gateway's roll item, which its reconciler writes while it rolls it, or an empty
+     * map without one. Gives up after {@code timeout}: a stopping gateway can't wait on the table for long.
+     */
+    public Map<String, AttributeValue> roll(final String gatewayKey, final Duration timeout) {
+        final Map<String, AttributeValue> item = this.dynamo
+                .getItem(GetItemRequest.builder()
+                        .tableName(this.table)
+                        .key(Map.of(KEY, AttributeValue.fromS(rollId(gatewayKey))))
+                        .consistentRead(true)
+                        .overrideConfiguration(o -> o.apiCallTimeout(timeout))
+                        .build())
+                .item();
+        return item == null ? Map.of() : item;
+    }
+
+    public static String rollId(final String gatewayKey) {
+        return ServiceEndpoint.serviceId(ServiceEndpoint.Kind.ORDER_GATEWAY, gatewayKey) + "#roll";
     }
 
     /** A count the item may lack, as one written by an older release does: 0. */

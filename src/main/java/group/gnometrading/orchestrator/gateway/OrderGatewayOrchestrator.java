@@ -110,7 +110,9 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
  * session, so the accounts are traded from one place. Builds and starts each account the registry assigned it, then
  * takes sessions over Aeron on its ingress port: {@link GatewayIngress} in, {@link GatewayEgress} out, and
  * {@link GatewayControl} for hellos, liveness and its endpoint record. On SIGTERM it stops as planned: every session's
- * orders cancelled and a goodbye sent before anything closes.
+ * orders cancelled and a goodbye sent before anything closes; unless the gateway reconciler is rolling it
+ * ({@link GatewayRoll}), when it hands over: it cancels nothing and leaves its orders in the ownership logs for the next
+ * process on this host.
  */
 public class OrderGatewayOrchestrator extends Orchestrator {
 
@@ -121,6 +123,13 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     private static final int REJECT_QUEUE = 4096;
     // Of ECS's stop timeout: this long for the lanes to empty after every order is cancelled.
     private static final long STOP_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
+    // How long a handover waits for every request on the wire to be answered: a venue answers in well under a second,
+    // and one still unanswered after this is left to the next process's catch-up.
+    private static final long HANDOVER_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
+    // The EC2 instance the gateway runs on, as gateway-start.sh reads it from the instance metadata: a roll pins the
+    // next
+    // process to it, so only the process on that host hands over.
+    private static final String INSTANCE_ID_ENV = "GATEWAY_INSTANCE_ID";
     // How long a failing gateway waits for its alert to be taken before it halts.
     private static final long FATAL_ALERT_WAIT_MILLIS = 2_000;
     private static final long CONTROL_STALL_NANOS = TimeUnit.MINUTES.toNanos(1);
@@ -189,10 +198,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final int crossCapacity = settings.maxOrders() * Math.max(1, accounts.size());
         final CrossIndex cross =
                 new CrossIndex(crossKeys, crossMode(settings, properties), crossCapacity, 2 * crossCapacity);
-        final String ip = HostAddress.privateIp();
-        if (ip == null) {
-            throw new IllegalStateException("No private IP for sessions to reach this gateway on");
-        }
+        final String ip = privateIp();
         final int port = properties.getIntProperty("gateway.ingress.port");
         final AeronRuntime aeron = AeronRuntime.launch(
                 "gateway",
@@ -256,7 +262,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 registry,
                 listings,
                 GatewayControl.Replies.over(aeron.aeron()),
-                advertiser(logger, settings, properties, ip, port),
+                advertiser(logger, settings, properties, status, ip, port),
                 System::nanoTime,
                 properties.getIntProperty("gateway.replay.reports"),
                 System::currentTimeMillis,
@@ -306,8 +312,10 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         () -> {
                             // Threads are about to stop on purpose.
                             watchdog.interrupt();
+                            final GatewayRoll.Decision roll = rollDecision(logger, properties, settings);
                             stop(
                                     logger,
+                                    roll.handOver(),
                                     control,
                                     controlRunner,
                                     ingressRunner,
@@ -985,6 +993,38 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     }
 
     /**
+     * Whether this SIGTERM is a roll: read from the gateway's roll item, never for a paper gateway (whose orders live only
+     * in this process) or a local run.
+     */
+    private GatewayRoll.Decision rollDecision(
+            final Logger logger, final Properties properties, final GatewaySettings settings) {
+        GatewayRoll.Decision decision;
+        if (settings.paper() || localRun(properties)) {
+            decision = GatewayRoll.Decision.stop(
+                    "a " + (settings.paper() ? "paper gateway" : "local run") + " never hands over");
+        } else {
+            try {
+                final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "ENDPOINTS"));
+                decision = GatewayRoll.decide(
+                        endpoints.roll(settings.key(), GatewayRoll.READ_TIMEOUT),
+                        System.getenv(INSTANCE_ID_ENV),
+                        properties.getStringProperty("orchestrator.version"),
+                        settings.venue().ordersOutliveGatewayFor(),
+                        System.currentTimeMillis());
+            } catch (Exception e) {
+                decision = GatewayRoll.Decision.stop("its roll item couldn't be read: " + CauseChain.of(e));
+            }
+        }
+        logger.logf(
+                LogMessage.DEBUG,
+                "Gateway %s: %s (%s)",
+                settings.key(),
+                decision.handOver() ? "handing over, leaving its orders resting" : "stopping as planned",
+                decision.why());
+        return decision;
+    }
+
+    /**
      * Writes where sessions reach the gateway and its state, on a thread of its own; a failed write waits for the next. A
      * local run writes nothing: its session names it, and an item under its key would pass for the deployed gateway.
      */
@@ -992,11 +1032,14 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final Logger logger,
             final GatewaySettings settings,
             final Properties properties,
+            final GatewayStatus status,
             final String ip,
             final int port) {
         if (localRun(properties)) {
             return (state, linkedSessions, workingOrders) -> {};
         }
+        // A paper gateway's orders live only in its process, so a roll restarts it as planned.
+        final boolean canHandOver = !settings.paper();
         final ServiceEndpoints endpoints = new ServiceEndpoints(getInstance(DynamoDbClient.class, "ENDPOINTS"));
         final EpochNanoClock wallClock = getInstance(EpochNanoClock.class);
         final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
@@ -1015,8 +1058,18 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                 version,
                                 wallClock.nanoTime(),
                                 linkedSessions,
-                                workingOrders)))
+                                workingOrders,
+                                canHandOver,
+                                status.handingOver())))
                 .start();
+    }
+
+    private static String privateIp() {
+        final String ip = HostAddress.privateIp();
+        if (ip == null) {
+            throw new IllegalStateException("No private IP for sessions to reach this gateway on");
+        }
+        return ip;
     }
 
     /** A gateway run beside one session on a developer's machine ({@link SessionRegistry#local}), not deployed. */
@@ -1036,11 +1089,13 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     /**
      * The planned stop: control's thread stopped, then every session's orders cancelled and a goodbye sent while
      * ingress and egress still run (cancels reach the lanes, reports and goodbyes the sessions), then everything closed,
-     * the accounts last before the media driver.
+     * the accounts last before the media driver. A handover instead cancels nothing and says no goodbye: it refuses new
+     * orders, waits for the lanes' requests to be answered and closes, leaving its orders to the next process.
      */
     @SuppressWarnings("checkstyle:ParameterNumber")
     private static void stop(
             final Logger logger,
+            final boolean handOver,
             final GatewayControl control,
             final GnomeAgentRunner controlRunner,
             final GnomeAgentRunner ingressRunner,
@@ -1051,7 +1106,13 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final AeronRuntime aeron) {
         close(logger, controlRunner);
         try {
-            if (!control.stop(STOP_TIMEOUT_NANOS)) {
+            if (handOver) {
+                if (!control.handOver(HANDOVER_TIMEOUT_NANOS)) {
+                    logger.logf(
+                            LogMessage.UNKNOWN_ERROR,
+                            "Gateway handing over with requests still unanswered or its endpoint not yet written");
+                }
+            } else if (!control.stop(STOP_TIMEOUT_NANOS)) {
                 logger.logf(
                         LogMessage.UNKNOWN_ERROR,
                         "Gateway stopping with orders still working, sessions not yet told, or its endpoint not yet written");

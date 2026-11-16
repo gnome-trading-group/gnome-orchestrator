@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.concurrent.GnomeAgentRunner;
+import group.gnometrading.gateways.account.lane.FakeVenueServer;
 import group.gnometrading.gateways.orders.recovery.VenueOrder;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.logging.NullLogger;
@@ -325,6 +326,78 @@ class GatewayInProcessTest {
         assertEquals(4, this.first.reports().size(), "both ends heard before the link went: " + this.first.reports());
         assertEquals(ExecType.CANCEL, this.first.reports().get(2).decoder.execType());
         assertEquals(ExecType.CANCEL, this.first.reports().get(3).decoder.execType());
+    }
+
+    @Test
+    void aHandedOverGatewayCancelsNothingAndTheNextOnItsHostTakesBackItsOrdersAndTheGapsFill() throws Exception {
+        this.first.order(1);
+        this.first.order(2);
+        await(() -> posts() == 2, "both orders at the venue");
+        this.venue.transport().push("ACK s42-1");
+        this.venue.transport().push("ACK s42-2");
+        await(() -> this.first.reports().size() == 2, "both resting");
+
+        assertTrue(this.gateway.handOver(TimeUnit.SECONDS.toNanos(5)), "every request answered in time");
+        assertEquals(List.of(), deletes(), "nothing cancelled at the venue");
+        // While no gateway is up, order 1 fills; the next one's catch-up finds that.
+        this.venue.protocol().catchUp = List.of("ACK s42-1", "FILL s42-1 " + UNIT, "ACK s42-2");
+        this.gateway = GatewayFixture.start("in-process-gateway", this.venue, INGRESS_PORT);
+        await(() -> this.gateway.account().lane().workingOrders() == 2, "the orders taken back");
+
+        await(() -> this.first.ready() && this.first.reports().size() == 3, "the session back, and the gap's fill");
+        assertEquals(ExecType.PARTIAL_FILL, this.first.reports().get(2).decoder.execType());
+        assertEquals(1, this.first.reports().get(2).getClientOidCounter());
+        // Past the hellos' grace: a session that came back keeps its orders.
+        Thread.sleep(300);
+        assertEquals(3, this.first.reports().size(), "nothing lost or doubled: " + this.first.reports());
+        assertEquals(List.of(), deletes(), "still nothing cancelled");
+        assertEquals(2, posts(), "nothing sent again");
+    }
+
+    @Test
+    void aHandoverWaitsForTheVenuesAnswerToAnOrderOnTheWire() throws Exception {
+        this.venue
+                .server()
+                .script(request -> request.method().equals("POST")
+                        ? FakeVenueServer.Reply.ok("v-" + request.body()).after(400)
+                        : FakeVenueServer.Reply.ok(""));
+        this.first.order(1);
+        await(() -> posts() == 1, "the order on the wire");
+
+        final long start = System.nanoTime();
+        assertTrue(this.gateway.handOver(TimeUnit.SECONDS.toNanos(5)), "the answer came in time");
+        assertTrue(
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) >= 250,
+                "it waited for the venue's answer rather than leaving it unknown");
+        assertEquals(List.of(), deletes());
+
+        this.venue.protocol().catchUp = List.of("ACK s42-1");
+        this.gateway = GatewayFixture.start("in-process-gateway", this.venue, INGRESS_PORT);
+        await(() -> this.gateway.account().lane().workingOrders() == 1, "the answered order taken back");
+        assertEquals(1, posts(), "nothing sent again");
+    }
+
+    @Test
+    void handingOverTwiceInARowLosesNothing() throws Exception {
+        this.first.order(1);
+        await(() -> posts() == 1, "the order at the venue");
+        this.venue.transport().push("ACK s42-1");
+        await(() -> this.first.reports().size() == 1, "resting");
+        this.venue.protocol().catchUp = List.of("ACK s42-1");
+
+        for (int roll = 0; roll < 2; roll++) {
+            assertTrue(this.gateway.handOver(TimeUnit.SECONDS.toNanos(5)));
+            this.gateway = GatewayFixture.start("in-process-gateway", this.venue, INGRESS_PORT);
+            await(() -> this.gateway.account().lane().workingOrders() == 1, "the order taken back");
+            await(() -> this.gateway.linked(42) && this.first.ready(), "the session linked to the new gateway");
+        }
+        this.first.order(2);
+        await(
+                () -> posts() == 2,
+                () -> "the session trades on the gateway it came back to: " + this.first.reports() + " link "
+                        + this.first.link.state + " account "
+                        + this.gateway.account().state());
+        assertEquals(List.of(), deletes(), "nothing cancelled");
     }
 
     @Test

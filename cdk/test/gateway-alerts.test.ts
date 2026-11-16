@@ -2,6 +2,7 @@ import {
   AlertState, EMPTY_STATE, evaluate, firingMode, Observation, RESTARTED_HOLD_MS, START_STUCK_MS,
 } from '../lambda/gateway_reconciler/alerts';
 import { Activity, Outcome } from '../lambda/gateway_reconciler/reconciler';
+import { Roll } from '../lambda/gateway_reconciler/roll';
 
 const KEY = 'live:kalshi:main';
 const T0 = Date.parse('2026-11-10T12:00:00Z');
@@ -249,5 +250,54 @@ describe('a paper gateway', () => {
       result = evaluate([failing], state, T0 + i * MINUTE);
     }
     expect(result.firing.get(`GATEWAY_RECONCILE_FAILED:${PAPER}`)?.mode).toBe('paper');
+  });
+});
+
+describe('a gateway being rolled', () => {
+  const rolled = (phase: Roll['phase'], endedAgoMinutes?: number, at = T0): Roll => ({
+    requestedAtMs: at - 10 * MINUTE, phase, fromVersion: '2.2.0', toVersion: '2.3.0', instanceId: 'i-0abc',
+    reason: 'not up on 2.3.0 5 min after it was started',
+    ...(endedAgoMinutes === undefined ? {} : { endedAtMs: at - endedAgoMinutes * MINUTE }),
+  });
+  const rolling = (activity: Activity | null): Observation => ({ ...seen('rolling', activity), roll: rolled('starting') });
+
+  it('is neither down nor restarted while its task is replaced as asked, nor once it is back on a new task', () => {
+    const types = ticks([
+      { ...seen('running', ready(2, 5)), taskId: 'task-1' },
+      rolling({ ...ready(2, 5), state: 'STOPPING', handover: true }),
+      rolling(null),
+      rolling({ ...ready(2, 5), expired: true }),
+      ...Array.from({ length: 7 }, () => rolling(starting)),
+      { ...seen('running', ready(2, 5)), taskId: 'task-2' },
+    ]);
+
+    expect(types).toEqual(Array(types.length).fill([]));
+  });
+
+  it('fails when rolled back, as an error with its releases, for a while', () => {
+    const back = (minutes: number): Observation => ({ ...seen('running', ready(1, 2)), roll: rolled('rolled_back', minutes) });
+    const first = evaluate([back(0)], EMPTY_STATE, T0);
+    const alert = first.firing.get(`GATEWAY_ROLL_FAILED:${KEY}`)!;
+
+    expect(alert.labels).toMatchObject({ rolledBack: 'true', fromVersion: '2.2.0', toVersion: '2.3.0' });
+    expect(alert.title).toContain('rolled back to 2.2.0');
+    const later = evaluate([back(RESTARTED_HOLD_MS / MINUTE)], first.state, T0 + RESTARTED_HOLD_MS);
+    expect(later.firing.size).toBe(0);
+  });
+
+  it('fails without a rollback, paging, until the gateway is up again', () => {
+    const failedRoll = (activity: Activity | null, minutes: number): Observation => ({
+      ...seen('running', activity), roll: rolled('failed', minutes),
+    });
+    const long = RESTARTED_HOLD_MS / MINUTE + 5;
+    const down = evaluate([failedRoll(starting, long)], EMPTY_STATE, T0);
+    expect(down.firing.get(`GATEWAY_ROLL_FAILED:${KEY}`)?.labels.rolledBack).toBe('false');
+
+    const back = evaluate([failedRoll(ready(), long)], down.state, T0 + MINUTE);
+    expect(back.firing.has(`GATEWAY_ROLL_FAILED:${KEY}`)).toBe(false);
+  });
+
+  it('says nothing of a roll that ended well', () => {
+    expect(ticks([{ ...seen('running', ready()), roll: rolled('done', 0) }])).toEqual([[]]);
   });
 });

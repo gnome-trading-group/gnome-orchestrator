@@ -180,7 +180,15 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     unanswered requests (`LaneAdmissions.minute`), and the last minute's sends per session slot (counted on the lane in
     presized maps, so nothing allocates there); for a paper gateway, its simulated venue's minutes. The registry's
     `GET /gateways/status` reads both items for the controller's Order Gateways page. SIGTERM is a planned stop: every session's orders cancelled, then, once the lanes are empty, a goodbye
-    sent last (after those cancels' reports) before anything closes.
+    sent last (after those cancels' reports) before anything closes. Unless the reconciler is rolling it (`GatewayRoll`,
+    read at SIGTERM with a 2 s timeout from the roll item `order-gateway#<key>#roll`: phase `stopping`/`rolling_back`,
+    `instance_id` = `GATEWAY_INSTANCE_ID` (exported by `gateway-start.sh` from the instance metadata), `stops_version` =
+    its release, `until_ms` not passed, and its venue keeping orders at least 10 minutes without it,
+    `GatewayVenue.ordersOutliveGatewayFor`; anything else, or no read, is the planned stop): then it hands over
+    (`GatewayControl.handOver`): STOPPING with `handover` on its endpoint, NEW and AMEND refused `GATEWAY_UNAVAILABLE`
+    (cancels pass), up to 5 s until every lane is `quiet()` (nothing queued, nothing awaiting the venue's answer), no
+    cancels and no goodbye; the ownership logs keep its orders for the next process on the host. Its endpoint says
+    `can_hand_over` (live only; a paper gateway's roll is a plain restart).
   - Caps: `gateway.session.max.open.orders` (200) and `gateway.session.max.new.per.second` (50) per session,
     `gateway.account.max.open.orders` (2,000) per account, in each lane (`AccountLane.Caps`); a session's hello may
     ask for less (`order.gateway.max.open.orders`, `order.gateway.max.new.per.second`, session properties), never
@@ -263,6 +271,16 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     waits up to 2 s for that write, so a stop the reconciler didn't ask for (host shut down) is seen to have left
     nothing. Sessions say they want it through `POST /gateways/ensure` (`GatewayLinks`: every
     10 s until linked, then every minute).
+  - Rolls (`cdk/lambda/gateway_reconciler/roll.ts`): an operator's `POST /gateways/roll` (gnome-registry) stamps the
+    row's `roll_requested_at`; the reconciler preflights (running, up, `can_hand_over`, one task, target = pin else
+    latest, at least `MIN_ROLL_VERSION`), writes the roll item, moves the service onto the target's revision at zero
+    pinned to the task's host (`memberOf ec2InstanceId == <id>`), polls within the tick (2 s, up to about a minute) for
+    the old task to go and raises it to one. Done once the endpoint is up on the target and written after the raise;
+    not up in 5 minutes or 3 task stops rolls back once to the old revision the same way (`stops_version` then the
+    target, so its process hands over), then `rolled_back` or `failed`. While one is under way the gateway runs
+    whatever its row or endpoint says. The pin stays until the gateway's next start (moved at zero with no
+    constraints) or its host leaves the cluster (let go). `gateway-start.sh` keeps the last 3 releases' jars in
+    `/var/lib/gnome/gateway/jars/`, so a restart on the host skips the download.
 - `marketdata/` - reading market-data streams from collector shards over Aeron, shared by sessions and order gateways
   (uses neither `session/`, `shard/` nor `gateway/`; `LayoutTest`). `ShardFeedAgent` (HOT_PATH, zero allocation per
   record) is the only writer of its ring and of which subscription each stream reads; `ShardMarketData`'s control
@@ -464,10 +482,18 @@ earlier sessions). A session already stopped before startup exits 0 without repo
     logged otherwise, so these are the unexpected ones; the reconciler raises `SHARD_ERRORS` on them.
   - `/health` on :8080 fails when the agent stops cycling for 30 s or an upload hangs 5 min, and ECS replaces the
     task. A failing market is quarantined and retried, a failing connection keeps retrying; neither stops the process.
-  - Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`.
+  - Raw frames go per connection to `raw/<source>/<shard>/<connection>/...` in `RAW_CAPTURE_BUCKET`. A reader only
+    copies each frame into its connection's `RawCaptureQueue` (`shard.raw.capture.ring.bytes`, at least twice the
+    venue's largest frame); one `RawCaptureAgent` (BACKGROUND, thread `raw-capture`) compresses every connection's into
+    minute files (`RawDataCollector`), since compressing on the reader held a frame up to ~0.5 ms whenever a zstd block
+    filled. A reader that finds its queue full waits up to `shard.raw.capture.max.wait.micros` (2000), then drops the
+    frame from raw capture (never from the books) and drops without waiting until half the queue is free; drops are
+    logged as `UNKNOWN_ERROR` and counted. A connection whose raw writing fails is given up alone; a stopped agent leaves
+    each connection's flush to write what it queued.
   - Samples (subject `shard`, its id; `SamplePoster` on thread `shard-samples`, posted every 30 s to
     `samples.api.url` with the registry key; none without a key): `runtime`, and each minute `shard.agents` (collector
-    and publisher passes, worst gap between passes), `shard.streams` (`ShardSampler`: states, connections, and summed
+    and publisher passes, worst gap between passes; `rawCapture`: its passes and worst gap, connections, frames, the
+    fullest queue in thousandths, readers' waits and drops), `shard.streams` (`ShardSampler`: states, connections, and summed
     over streams since the last sample offered/held/lapped/re-sent, records, ring-full waits (a venue reader held
     back), worst collector backlog, the 10 streams that waited longest and the 10 held most), and
     `latency.shard.collector` (`shard.venue_to_recv`, receipt minus the venue's event time, only for records bringing
@@ -519,7 +545,9 @@ unset means no alerts; posted through `runtime/AlertsApi`):
   while it last showed sessions linked or orders working, without being asked to stop; CRITICAL with orders working,
   WARNING with `cleanStop` when its planned stop's last write said it held nothing),
   `GATEWAY_DEGRADED` (2 ticks), `GATEWAY_RECONCILE_FAILED` (3 ticks), `GATEWAY_RESTARTED` (its running task changed
-  without the reconciler starting it while orders worked; held 15 minutes, with the old task's stop reason). CloudWatch alarms on the reconciler itself,
+  without the reconciler starting it while orders worked; held 15 minutes, with the old task's stop reason),
+  `GATEWAY_ROLL_FAILED` (a roll rolled back, `rolledBack=true`, held 15 minutes; or failed, held until it is up again).
+  A roll under way raises none of the others: its gap is no outage and its new task no restart. CloudWatch alarms on the reconciler itself,
   `GatewayReconciler-{TickFailing,NotRunning,Errors,QueueStuck}-Error`, are this repo's only alarms. Catalog and
   runbooks are gnome-registry's. Collectors have no alerting from here.
 

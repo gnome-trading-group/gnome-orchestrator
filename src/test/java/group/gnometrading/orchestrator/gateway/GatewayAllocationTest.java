@@ -56,7 +56,8 @@ import org.junit.jupiter.api.Timeout;
 
 /**
  * Once warm, the threads every order and report pass through must not allocate: ingress, egress, and the journal
- * reading behind them. A GC pause on any of them delays every session's orders.
+ * reading behind them. A GC pause on any of them delays every session's orders. Nor while the gateway hands over,
+ * refusing every new order for its sessions to send again once it is back.
  */
 @Tag("allocation")
 class GatewayAllocationTest {
@@ -281,6 +282,19 @@ class GatewayAllocationTest {
                 if (journal.lapped() == lappedBefore) {
                     assertTrue(journalAllocated < 16_384, "the journal allocated " + journalAllocated + " bytes");
                 }
+
+                status.handOver();
+                sendAndAwait(toGateway, replies, received, ORDERS + ORDERS / 4);
+                final long refusingBefore = threads.getThreadAllocatedBytes(ingressThread.get());
+                final long refusalsOutBefore = threads.getThreadAllocatedBytes(egressThread.get());
+                sendAndAwait(toGateway, replies, received, ORDERS + ORDERS / 2);
+                final long refusing = threads.getThreadAllocatedBytes(ingressThread.get()) - refusingBefore;
+                final long refusalsOut = threads.getThreadAllocatedBytes(egressThread.get()) - refusalsOutBefore;
+                System.out.printf(
+                        "#### over %d orders refused while handing over: ingress %d B, egress %d B%n",
+                        ORDERS / 4, refusing, refusalsOut);
+                assertTrue(refusing < 16_384, "ingress allocated " + refusing + " bytes refusing");
+                assertTrue(refusalsOut < 16_384, "egress allocated " + refusalsOut + " bytes sending refusals");
             } finally {
                 for (final GnomeAgentRunner runner : runners) {
                     runner.close();

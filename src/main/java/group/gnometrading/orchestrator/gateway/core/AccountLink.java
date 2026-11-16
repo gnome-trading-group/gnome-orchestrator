@@ -51,6 +51,14 @@ public interface AccountLink {
     /** Orders working on the account; approximate from any thread but the lane's. */
     int workingOrders();
 
+    /**
+     * Nothing queued for the venue and no request awaiting its answer, from any thread: every request's outcome is
+     * known, so a gateway stopping without cancels leaves nothing half-sent.
+     */
+    default boolean quiet() {
+        return true;
+    }
+
     Markets markets();
 
     /** The venue's order lookups on this account: the control thread's only, as they block and aren't thread-safe. */

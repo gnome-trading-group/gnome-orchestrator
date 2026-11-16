@@ -2,6 +2,7 @@ import { Observation } from '../lambda/gateway_reconciler/alerts';
 import {
   Activity, GatewayNames, GatewayRow, reconcile, ReconcileDeps, serviceName as nameOf, shouldRun, WANT_WINDOW_MS,
 } from '../lambda/gateway_reconciler/reconciler';
+import { MIN_ROLL_VERSION, Roll, ROLL_READY_MS } from '../lambda/gateway_reconciler/roll';
 import { ORDER_GATEWAYS } from '../lib/config';
 
 const NAMES: GatewayNames = ORDER_GATEWAYS;
@@ -17,6 +18,7 @@ const GROUPS: Record<string, string> = {
 
 type Service = {
   serviceName: string; status: string; desiredCount: number; taskDefinition?: string; runningCount?: number;
+  pendingCount?: number; placementConstraints?: { type: string; expression: string }[];
   deployments?: { taskDefinition?: string }[];
   capacityProviderStrategy?: { capacityProvider: string; weight: number }[];
 };
@@ -36,7 +38,12 @@ class FakeRegion {
   addresses: { AllocationId: string; Tags: { Key: string; Value: string }[] }[] = [];
   revisions = new Map<string, any[]>();
   sent: { command: string; input: any }[] = [];
-  stoppedTasks: { taskArn: string; stoppedAt: string; stoppedReason: string; containers: { exitCode?: number }[] }[] = [];
+  stoppedTasks: {
+    taskArn: string; stoppedAt: string; stoppedReason: string; containers: { exitCode?: number }[]; createdAt?: string;
+  }[] = [];
+  runningTasks: { taskArn: string; containerInstanceArn: string }[] = [];
+  // The cluster's hosts, by container instance ARN.
+  hostsInCluster: { containerInstanceArn: string; ec2InstanceId: string; status: string }[] = [];
   // The live and the paper capacity providers' Auto Scaling groups.
   hosts = { DesiredCapacity: 0, MaxSize: 4 };
   paperHosts = { DesiredCapacity: 0, MaxSize: 4 };
@@ -88,14 +95,28 @@ class FakeRegion {
         return {};
       }
       if (name === 'ListTasksCommand') {
-        return { taskArns: this.stoppedTasks.map((t) => t.taskArn) };
+        const tasks = command.input.desiredStatus === 'RUNNING' ? this.runningTasks : this.stoppedTasks;
+        return { taskArns: tasks.map((t) => t.taskArn) };
       }
       if (name === 'DescribeTasksCommand') {
-        return { tasks: this.stoppedTasks.filter((t) => command.input.tasks.includes(t.taskArn)) };
+        const all = [...this.stoppedTasks, ...this.runningTasks] as any[];
+        // By ARN or by id, as ECS takes either.
+        return { tasks: all.filter((t) => command.input.tasks.some((id: string) => t.taskArn === id || t.taskArn.endsWith(`/${id}`))) };
+      }
+      if (name === 'DescribeContainerInstancesCommand') {
+        return { containerInstances: this.hostsInCluster.filter((h) =>
+          command.input.containerInstances.includes(h.containerInstanceArn)) };
+      }
+      if (name === 'ListContainerInstancesCommand') {
+        const wanted = /ec2InstanceId == (\S+)/.exec(command.input.filter)![1];
+        return { containerInstanceArns: this.hostsInCluster
+          .filter((h) => h.ec2InstanceId === wanted && h.status === command.input.status)
+          .map((h) => h.containerInstanceArn) };
       }
       if (name === 'UpdateServiceCommand') {
         const service = this.services.find((s) => s.serviceName === command.input.service)!;
-        service.desiredCount = command.input.desiredCount;
+        if (command.input.desiredCount !== undefined) service.desiredCount = command.input.desiredCount;
+        if (command.input.placementConstraints !== undefined) service.placementConstraints = command.input.placementConstraints;
         if (command.input.taskDefinition && command.input.taskDefinition !== service.taskDefinition) {
           // As ECS does: the old deployment stays until it has drained.
           service.deployments = [{ taskDefinition: command.input.taskDefinition }, { taskDefinition: service.taskDefinition }];
@@ -182,10 +203,22 @@ function row(key: string, region: string, wantedAgoMs: number | null, version: s
   };
 }
 
+// The gateways' roll items, as the reconciler last wrote them.
+const rolls = new Map<string, Roll>();
+// What a test does when the reconciler waits within a tick (an old task stopping, say).
+let onSleep: (() => void) | undefined;
+
 function deps(rows: GatewayRow[], regions: Record<string, FakeRegion>, activity: Record<string, Activity | null> = {}): ReconcileDeps {
   // Every platform region is looked in; one a test doesn't name holds nothing.
   const at = (region: string) => (regions[region] ??= new FakeRegion());
   return {
+    roll: async (key) => rolls.get(key) ?? null,
+    saveRoll: async (key, roll) => {
+      rolls.set(key, roll);
+    },
+    sleep: async () => {
+      onSleep?.();
+    },
     names: NAMES,
     gateways: async () => rows,
     activity: async (key) => activity[key] ?? null,
@@ -339,7 +372,10 @@ describe('the gateway reconciler', () => {
 
     expect(await tick()).toEqual({
       outcome: 'starting',
-      updates: [{ cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: 'order-gateway-live-kalshi-main:2', desiredCount: 0 }],
+      updates: [{
+        cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: 'order-gateway-live-kalshi-main:2', desiredCount: 0,
+        placementConstraints: [],
+      }],
     });
     expect(await tick()).toEqual({ outcome: 'starting', updates: [] });
     east.drain();
@@ -575,5 +611,266 @@ describe('the gateway reconciler\'s hosts', () => {
     expect(east.services[0].desiredCount).toBe(1);
     expect(errors).toHaveBeenCalledWith(expect.stringContaining('couldn\'t raise them'), expect.any(Error));
     errors.mockRestore();
+  });
+});
+
+describe('rolling a gateway', () => {
+  const FROM = MIN_ROLL_VERSION;
+  const TO = '9.1.0';
+  const OLD_REVISION = 'order-gateway-live-kalshi-main:7';
+  const NEW_REVISION = 'order-gateway-live-kalshi-main:1';
+  const PIN = [{ type: 'memberOf', expression: 'ec2InstanceId == i-0abc' }];
+  const ASKED_AGO = 60_000;
+
+  beforeEach(() => {
+    rolls.clear();
+    onSleep = undefined;
+  });
+
+  /** A live gateway running one task on host i-0abc. */
+  function running(region: FakeRegion, key = KALSHI, taskDefinition = OLD_REVISION) {
+    region.services.push({
+      ...service(key, 1), taskDefinition, runningCount: 1, pendingCount: 0, deployments: [{ taskDefinition }],
+    });
+    region.runningTasks = [{ taskArn: `arn:aws:ecs:us-east-1:1:task/${CLUSTER}/task-1`, containerInstanceArn: 'arn:ci-1' }];
+    region.hostsInCluster = [{ containerInstanceArn: 'arn:ci-1', ec2InstanceId: 'i-0abc', status: 'ACTIVE' }];
+  }
+  const upOn = (version: string, writtenAtMs = NOW - 5_000): Activity => ({
+    state: 'READY', linkedSessions: 2, workingOrders: 5, version, writtenAtMs, canHandOver: true,
+  });
+  const asked = (key = KALSHI, version: string | null = TO): GatewayRow =>
+    ({ ...row(key, 'us-east-1', 5_000, version), roll_requested_at: ago(ASKED_AGO) });
+  // ECS stopping the old task once it is told to, by the reconciler's first wait in the tick.
+  const stopsOnWait = (region: FakeRegion) => {
+    onSleep = () => {
+      region.services[0].runningCount = 0;
+      region.drain();
+    };
+  };
+  const updates = (region: FakeRegion) => region.sent.filter((s) => s.command === 'UpdateServiceCommand').map((s) => s.input);
+  const underWay = (phase: Roll['phase'], extra: Partial<Roll> = {}): Roll => ({
+    requestedAtMs: NOW - ASKED_AGO, phase, instanceId: 'i-0abc', fromVersion: FROM, toVersion: TO,
+    fromTaskDefinition: OLD_REVISION, stopsVersion: FROM, startedAtMs: NOW - 50_000, untilMs: NOW + 500_000, ...extra,
+  });
+
+  it('writes the roll item before the stop, pins the host, and raises the new revision once the old task has gone', async () => {
+    const east = new FakeRegion();
+    running(east);
+    stopsOnWait(east);
+    const timeline: string[] = [];
+    const d = deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(FROM) });
+    const save = d.saveRoll;
+    d.saveRoll = async (key, roll, nowMs) => {
+      timeline.push(`roll ${roll.phase}`);
+      await save(key, roll, nowMs);
+    };
+    const send = east.ecs.send;
+    east.ecs.send = async (command: any) => {
+      if (command.constructor.name === 'UpdateServiceCommand') timeline.push(`service ${command.input.desiredCount}`);
+      return send(command);
+    };
+
+    expect((await reconcile(d)).get(KALSHI)).toBe('rolling');
+
+    expect(timeline).toEqual(['roll stopping', 'service 0', 'service 1', 'roll starting']);
+    expect(updates(east)).toEqual([
+      { cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: NEW_REVISION, desiredCount: 0, placementConstraints: PIN },
+      { cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 1 },
+    ]);
+    expect(rolls.get(KALSHI)).toMatchObject({
+      requestedAtMs: NOW - ASKED_AGO, phase: 'starting', instanceId: 'i-0abc', fromVersion: FROM, toVersion: TO,
+      fromTaskDefinition: OLD_REVISION, stopsVersion: FROM, raisedAtMs: NOW, untilMs: NOW + 10 * 60_000,
+    });
+    // Its host is already there.
+    expect(east.commands()).not.toContain('DescribeCapacityProvidersCommand');
+  });
+
+  it('is done once the gateway is up on the new release, as written by the new process', async () => {
+    const east = new FakeRegion();
+    running(east, KALSHI, NEW_REVISION);
+    rolls.set(KALSHI, underWay('starting', { raisedAtMs: NOW - 30_000 }));
+
+    // The old process's last READY, from before the stop: not the new one yet.
+    expect((await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(TO, NOW - 40_000) }))).get(KALSHI))
+      .toBe('rolling');
+    expect(rolls.get(KALSHI)!.phase).toBe('starting');
+
+    expect((await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(TO, NOW - 1_000) }))).get(KALSHI))
+      .toBe('running');
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'done', endedAtMs: NOW });
+    expect(rolls.get(KALSHI)!.reason).toBeUndefined();
+
+    // The request it took isn't taken again.
+    east.sent = [];
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(TO, NOW - 1_000) }));
+    expect(updates(east)).toEqual([]);
+  });
+
+  it('rolls onto the release it already runs, as a restart in place', async () => {
+    const east = new FakeRegion();
+    running(east);
+    stopsOnWait(east);
+
+    await reconcile(deps([asked(KALSHI, FROM)], { 'us-east-1': east }, { [KALSHI]: upOn(FROM) }));
+
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'starting', fromVersion: FROM, toVersion: FROM });
+  });
+
+  it('refuses a roll it can\'t make safely, and goes on as it would have', async () => {
+    const cases: [string, (east: FakeRegion) => void, Activity | null, string | null, string][] = [
+      ['not running', (east) => {
+        east.services.push({ ...service(KALSHI, 0), taskDefinition: OLD_REVISION });
+      }, null, TO, "isn't running"],
+      ['not up', (east) => running(east), { ...upOn(FROM), state: 'STARTING' }, TO, "isn't up (STARTING)"],
+      ['a release that cancels when stopped', (east) => running(east), { ...upOn(FROM), canHandOver: false }, TO,
+        "can't hand over"],
+      ['two tasks', (east) => {
+        running(east);
+        east.runningTasks.push({ taskArn: 'arn:task/task-2', containerInstanceArn: 'arn:ci-1' });
+      }, upOn(FROM), TO, 'it runs 2 tasks'],
+      ['a target older than the first release that hands over', (east) => running(east), upOn(FROM), '2.1.9',
+        `older than ${MIN_ROLL_VERSION}`],
+    ];
+    for (const [what, set, activity, version, reason] of cases) {
+      rolls.clear();
+      const east = new FakeRegion();
+      set(east);
+      await reconcile(deps([asked(KALSHI, version)], { 'us-east-1': east }, { [KALSHI]: activity }));
+      expect([what, rolls.get(KALSHI)?.phase]).toEqual([what, 'refused']);
+      expect(rolls.get(KALSHI)!.reason).toContain(reason);
+      expect(updates(east).some((u) => u.placementConstraints?.length)).toBe(false);
+    }
+  });
+
+  it('keeps the gateway running through the gap, unwanted and silent as it is', async () => {
+    const east = new FakeRegion();
+    running(east, KALSHI, NEW_REVISION);
+    east.runningTasks = [];
+    rolls.set(KALSHI, underWay('starting', { raisedAtMs: NOW - 20_000 }));
+    const quiet = { ...row(KALSHI, 'us-east-1', null, TO), roll_requested_at: ago(ASKED_AGO) };
+
+    const outcome = (await reconcile(deps([quiet], { 'us-east-1': east }, {
+      [KALSHI]: { ...upOn(FROM), state: 'STOPPING', handover: true, expired: true },
+    }))).get(KALSHI);
+
+    expect(outcome).toBe('rolling');
+    expect(updates(east)).toEqual([]);
+  });
+
+  it('leaves the raise to the next tick when the old task outlasts this one', async () => {
+    const east = new FakeRegion();
+    running(east);
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(FROM) }));
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'stopping' });
+    expect(rolls.get(KALSHI)!.raisedAtMs).toBeUndefined();
+    expect(updates(east).map((u) => u.desiredCount)).toEqual([0]);
+
+    east.services[0].runningCount = 0;
+    east.drain();
+    east.sent = [];
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: null }));
+    expect(updates(east)).toEqual([{ cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 1 }]);
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'starting', raisedAtMs: NOW });
+  });
+
+  it('rolls back to the revision it ran before when it isn\'t up in time, handing over the new release\'s process', async () => {
+    const east = new FakeRegion();
+    running(east, KALSHI, NEW_REVISION);
+    rolls.set(KALSHI, underWay('starting', { raisedAtMs: NOW - ROLL_READY_MS }));
+    stopsOnWait(east);
+
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: { ...upOn(TO), state: 'STARTING' } }));
+
+    expect(updates(east)).toEqual([
+      { cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: OLD_REVISION, desiredCount: 0, placementConstraints: PIN },
+      { cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 1 },
+    ]);
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'rolling_back', stopsVersion: TO, raisedAtMs: NOW });
+    expect(rolls.get(KALSHI)!.reason).toContain(`not up on ${TO} 5 min`);
+
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(FROM, NOW + 1) }));
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'rolled_back', endedAtMs: NOW });
+  });
+
+  it('rolls back on a task that keeps stopping, and fails when the rollback doesn\'t come up either', async () => {
+    const east = new FakeRegion();
+    running(east, KALSHI, NEW_REVISION);
+    rolls.set(KALSHI, underWay('starting', { raisedAtMs: NOW - 60_000 }));
+    east.stoppedTasks = [1, 2, 3].map((i) => ({
+      taskArn: `t-${i}`, createdAt: ago(50_000 - i * 1_000), stoppedAt: ago(40_000 - i * 1_000),
+      stoppedReason: 'Essential container in task exited', containers: [{ exitCode: 1 }],
+    }));
+    stopsOnWait(east);
+
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: null }));
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'rolling_back', reason: `its task stopped 3 times on ${TO}` });
+
+    rolls.set(KALSHI, { ...rolls.get(KALSHI)!, raisedAtMs: NOW - ROLL_READY_MS });
+    east.stoppedTasks = [];
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: null }));
+    expect(rolls.get(KALSHI)!.phase).toBe('failed');
+    expect(rolls.get(KALSHI)!.reason).toContain('too');
+  });
+
+  it('fails a roll whose host is gone, and lets the gateway start on another', async () => {
+    const east = new FakeRegion();
+    running(east, KALSHI, NEW_REVISION);
+    east.services[0].placementConstraints = PIN;
+    east.hostsInCluster = [];
+    rolls.set(KALSHI, underWay('starting', { raisedAtMs: NOW - 30_000 }));
+
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: null }));
+
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'failed', reason: 'its host i-0abc is gone' });
+    expect(updates(east)).toEqual([{ cluster: CLUSTER, service: serviceName(KALSHI), placementConstraints: [] }]);
+  });
+
+  it('lets a roll\'s pin go at the gateway\'s next start', async () => {
+    const east = new FakeRegion();
+    await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, TO)], { 'us-east-1': east }));
+    east.services[0].desiredCount = 0;
+    east.services[0].placementConstraints = PIN;
+    east.sent = [];
+
+    const outcome = (await reconcile(deps([row(KALSHI, 'us-east-1', 5_000, TO)], { 'us-east-1': east }))).get(KALSHI);
+
+    expect(outcome).toBe('starting');
+    expect(updates(east)).toEqual([{
+      cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: NEW_REVISION, desiredCount: 0, placementConstraints: [],
+    }]);
+  });
+
+  it('restarts a paper gateway plainly onto the release, with no host to pin', async () => {
+    const east = new FakeRegion();
+    running(east, PAPER_KALSHI, 'order-gateway-paper-kalshi-main:7');
+    stopsOnWait(east);
+
+    await reconcile(deps([asked(PAPER_KALSHI, '1.40.0')], { 'us-east-1': east }, {
+      [PAPER_KALSHI]: { ...upOn('1.39.0'), canHandOver: false },
+    }));
+
+    expect(updates(east)[0]).toEqual({
+      cluster: CLUSTER, service: serviceName(PAPER_KALSHI), taskDefinition: 'order-gateway-paper-kalshi-main:1', desiredCount: 0,
+    });
+    expect(rolls.get(PAPER_KALSHI)).toMatchObject({ phase: 'starting', toVersion: '1.40.0' });
+    expect(rolls.get(PAPER_KALSHI)!.instanceId).toBeUndefined();
+    expect(east.commands()).not.toContain('DescribeContainerInstancesCommand');
+  });
+
+  it('says so when the gateway cancelled everything instead of handing over', async () => {
+    const east = new FakeRegion();
+    running(east);
+    const activity: Record<string, Activity | null> = { [KALSHI]: upOn(FROM) };
+    onSleep = () => {
+      east.services[0].runningCount = 0;
+      east.drain();
+      activity[KALSHI] = { ...upOn(FROM), state: 'STOPPING', workingOrders: 0, handover: false };
+    };
+    await reconcile(deps([asked()], { 'us-east-1': east }, activity));
+    expect(rolls.get(KALSHI)!.cancelled).toBe(true);
+
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(TO, NOW + 1) }));
+    expect(rolls.get(KALSHI)!.phase).toBe('done');
+    expect(rolls.get(KALSHI)!.reason).toContain('every order was cancelled');
   });
 });

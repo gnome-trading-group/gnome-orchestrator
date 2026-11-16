@@ -322,7 +322,7 @@ public final class GatewayIngress implements AeronPathAgent {
             return RejectReason.SESSION_NOT_REGISTERED;
         }
         if (!this.status.takesOrders() || !this.kills.read()) {
-            return RejectReason.GATEWAY_NOT_READY;
+            return this.status.handingOver() ? RejectReason.GATEWAY_UNAVAILABLE : RejectReason.GATEWAY_NOT_READY;
         }
         if (!session.leases(listingKey)) {
             return RejectReason.LISTING_NOT_LEASED;

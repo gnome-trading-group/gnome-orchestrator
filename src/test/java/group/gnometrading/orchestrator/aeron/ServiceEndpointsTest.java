@@ -1,11 +1,14 @@
 package group.gnometrading.orchestrator.aeron;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -60,6 +63,45 @@ class ServiceEndpointsTest {
         assertEquals(
                 "shard#use1-e89064", this.stored.get().get(ServiceEndpoints.KEY).s());
         assertEquals(this.shard, this.endpoints.get(ServiceEndpoint.Kind.SHARD, "use1-e89064", WRITTEN));
+    }
+
+    @Test
+    void aGatewaysEndpointSaysWhetherItCanHandOverAndWhetherItIsHandingOver() {
+        final ServiceEndpoint gateway = new ServiceEndpoint(
+                ServiceEndpoint.Kind.ORDER_GATEWAY,
+                "live:kalshi:main",
+                "task-2",
+                "us-east-1",
+                "10.144.1.8",
+                40010,
+                "STOPPING",
+                "2.2.0",
+                WRITTEN,
+                3,
+                12,
+                true,
+                true);
+        this.endpoints.put(gateway);
+
+        assertTrue(this.stored.get().get(ServiceEndpoints.CAN_HAND_OVER).bool());
+        assertTrue(this.stored.get().get(ServiceEndpoints.HANDOVER).bool());
+        assertEquals(gateway, this.endpoints.get(ServiceEndpoint.Kind.ORDER_GATEWAY, "live:kalshi:main", WRITTEN));
+
+        this.endpoints.put(this.shard);
+        assertFalse(this.stored.get().containsKey(ServiceEndpoints.CAN_HAND_OVER), "a shard has no say in rolls");
+    }
+
+    @Test
+    void aGatewaysRollItemIsReadByItsOwnKeyOrIsEmpty() {
+        assertEquals(Map.of(), this.endpoints.roll("live:kalshi:main", Duration.ofSeconds(2)));
+        final Map<String, AttributeValue> roll = Map.of(
+                ServiceEndpoints.KEY,
+                AttributeValue.fromS("order-gateway#live:kalshi:main#roll"),
+                "phase",
+                AttributeValue.fromS("stopping"));
+        this.stored.set(roll);
+
+        assertEquals(roll, this.endpoints.roll("live:kalshi:main", Duration.ofSeconds(2)));
     }
 
     @Test
