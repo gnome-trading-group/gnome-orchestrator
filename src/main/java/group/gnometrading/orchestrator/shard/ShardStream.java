@@ -82,6 +82,13 @@ final class ShardStream {
     long sampledRecords;
     long sampledFullWaits;
 
+    // The status writer's own: the records total and its monotonic time at each of its last RATE_WINDOW writes, the
+    // oldest overwritten first, and the rate it worked out from them for the status being written (NaN: none yet).
+    final long[] statusRecords = new long[ShardStatusWriter.RATE_WINDOW];
+    final long[] statusAtNanos = new long[ShardStatusWriter.RATE_WINDOW];
+    int statusReadings;
+    double statusRate = Double.NaN;
+
     ShardStream(
             final int streamId,
             final String name,

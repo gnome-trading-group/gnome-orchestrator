@@ -176,7 +176,7 @@ public final class ShardMarketData implements MarketData {
                 nanoTime);
     }
 
-    /** Its feed thread's runner, once started; for a sampler of the process's threads. */
+    @Override
     public GnomeAgentRunner runner() {
         return runner;
     }

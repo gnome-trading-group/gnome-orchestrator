@@ -40,7 +40,12 @@ final class LoadSessions implements AutoCloseable {
      * What every session trades and how.
      *
      * @param slotBase the first session's slot; the rest follow
+     * @param securityIds the listings sessions trade: session {@code i} takes {@code listingsPerSession} of them in
+     *     turn from {@code i * listingsPerSession}, wrapping, and spreads its orders over them
+     * @param accountCount how many accounts sessions spread over: session {@code i} on {@code accountId + i %
+     *     accountCount}
      * @param maxQueueMs how long each session's new orders may wait for the budget
+     * @param replyHost where the gateway reaches the sessions: this host's address as the gateway sees it
      */
     record Spec(
             String sessionIdPrefix,
@@ -48,20 +53,75 @@ final class LoadSessions implements AutoCloseable {
             int strategyId,
             String gatewayKey,
             int exchangeId,
-            long securityId,
+            long[] securityIds,
+            int listingsPerSession,
             int accountId,
+            int accountCount,
             long price,
             long size,
             int quotes,
             long restNanos,
             int maxQueueMs,
             String gatewayHost,
-            int gatewayPort) {}
+            int gatewayPort,
+            String replyHost) {
+
+        /** Every session on the one listing, on this host. */
+        Spec(
+                final String sessionIdPrefix,
+                final long slotBase,
+                final int strategyId,
+                final String gatewayKey,
+                final int exchangeId,
+                final long securityId,
+                final int accountId,
+                final long price,
+                final long size,
+                final int quotes,
+                final long restNanos,
+                final int maxQueueMs,
+                final String gatewayHost,
+                final int gatewayPort) {
+            this(
+                    sessionIdPrefix,
+                    slotBase,
+                    strategyId,
+                    gatewayKey,
+                    exchangeId,
+                    new long[] {securityId},
+                    1,
+                    accountId,
+                    1,
+                    price,
+                    size,
+                    quotes,
+                    restNanos,
+                    maxQueueMs,
+                    gatewayHost,
+                    gatewayPort,
+                    "127.0.0.1");
+        }
+
+        /** The account session {@code index} trades on. */
+        int accountOf(final int index) {
+            return accountId + index % accountCount;
+        }
+
+        /** The listings session {@code index} trades. */
+        long[] securitiesOf(final int index) {
+            final long[] securities = new long[listingsPerSession];
+            for (int k = 0; k < listingsPerSession; k++) {
+                securities[k] = securityIds[(index * listingsPerSession + k) % securityIds.length];
+            }
+            return securities;
+        }
+    }
 
     /** One session and what it was told. */
     static final class Session {
         final String sessionId;
         final long slot;
+        final long[] securities;
         final GatewayLink link;
         final GatewayClient client;
         final GatewayLinks links;
@@ -84,6 +144,7 @@ final class LoadSessions implements AutoCloseable {
         private Session(
                 final String sessionId,
                 final long slot,
+                final long[] securities,
                 final GatewayLink link,
                 final GatewayClient client,
                 final GatewayLinks links,
@@ -91,6 +152,7 @@ final class LoadSessions implements AutoCloseable {
                 final SequencedPoller omsReader) {
             this.sessionId = sessionId;
             this.slot = slot;
+            this.securities = securities;
             this.link = link;
             this.client = client;
             this.links = links;
@@ -121,6 +183,8 @@ final class LoadSessions implements AutoCloseable {
     // Across every session: from an order's send to its acknowledgement, and from a cancel's send to its confirmation.
     private final LatencyHistogram ackWaits = new LatencyHistogram();
     private final LatencyHistogram cancelWaits = new LatencyHistogram();
+    // Stamps what each session sends as its OMS does, so the gateway measures each order's transit to it.
+    private final SystemEpochNanoClock wallClock = new SystemEpochNanoClock();
 
     LoadSessions(final AeronRuntime aeron, final Spec spec, final int count) {
         this(aeron, spec, count, report -> {});
@@ -132,7 +196,8 @@ final class LoadSessions implements AutoCloseable {
         this.spec = spec;
         this.listener = listener;
         for (int i = 0; i < count; i++) {
-            this.sessions.add(session(aeron, spec.sessionIdPrefix() + i, spec.slotBase() + i));
+            this.sessions.add(session(
+                    aeron, spec.sessionIdPrefix() + i, spec.slotBase() + i, spec.accountOf(i), spec.securitiesOf(i)));
         }
         for (final Session session : this.sessions) {
             this.linkThread.scheduleWithFixedDelay(session.links, 0, 50, TimeUnit.MILLISECONDS);
@@ -210,7 +275,12 @@ final class LoadSessions implements AutoCloseable {
         return this.failure;
     }
 
-    private Session session(final AeronRuntime aeron, final String sessionId, final long slot) {
+    private Session session(
+            final AeronRuntime aeron,
+            final String sessionId,
+            final long slot,
+            final int accountId,
+            final long[] securities) {
         final GlobalSequence sequence = new GlobalSequence();
         final SequencedRingBuffer<Intent> omsOrders = new SequencedRingBuffer<>(Intent::new, sequence);
         final SequencedRingBuffer<OrderExecutionReport> toOms =
@@ -221,12 +291,12 @@ final class LoadSessions implements AutoCloseable {
             report.buffer.putBytes(0, buffer, 0, length);
             onReport(holder[0], report);
         });
-        final GatewayLink link = new GatewayLink(
-                this.spec.gatewayKey(),
-                this.spec.exchangeId(),
-                this.spec.accountId(),
-                List.<long[]>of(new long[] {this.spec.exchangeId(), this.spec.securityId()}),
-                1024);
+        final List<long[]> listings = new ArrayList<>();
+        for (final long securityId : securities) {
+            listings.add(new long[] {this.spec.exchangeId(), securityId});
+        }
+        final GatewayLink link =
+                new GatewayLink(this.spec.gatewayKey(), this.spec.exchangeId(), accountId, listings, 1024);
         final GatewayClient client = new GatewayClient(
                 List.of(link),
                 omsOrders,
@@ -238,11 +308,11 @@ final class LoadSessions implements AutoCloseable {
         final GatewayLinks links = new GatewayLinks(
                 new NullLogger(),
                 aeron.aeron(),
-                "127.0.0.1",
+                this.spec.replyHost(),
                 List.of(link),
                 key -> new GatewayLinks.Endpoint(this.spec.gatewayHost(), this.spec.gatewayPort()),
                 System::nanoTime);
-        holder[0] = new Session(sessionId, slot, link, client, links, omsOrders, reader);
+        holder[0] = new Session(sessionId, slot, securities, link, client, links, omsOrders, reader);
         return holder[0];
     }
 
@@ -343,20 +413,28 @@ final class LoadSessions implements AutoCloseable {
         final Order order = new Order();
         order.encoder
                 .exchangeId(this.spec.exchangeId())
-                .securityId(this.spec.securityId())
+                .securityId(securityOf(session, counter))
                 .price(this.spec.price())
                 .size(this.spec.size())
                 .side(Side.Bid)
                 .orderType(OrderType.LIMIT)
-                .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
+                .timeInForce(TimeInForce.GOOD_TILL_CANCELED)
+                .timestampSend(this.wallClock.nanoTime());
         order.encoder.flags().postOnly(true);
         order.encodeClientOid(counter, this.spec.strategyId());
         session.omsOrders.publishRaw(order.buffer, OrderDecoder.TEMPLATE_ID, order.totalMessageSize());
     }
 
+    private static long securityOf(final Session session, final long counter) {
+        return session.securities[(int) (counter % session.securities.length)];
+    }
+
     private void cancel(final Session session, final long counter) {
         final CancelOrder cancel = new CancelOrder();
-        cancel.encoder.exchangeId(this.spec.exchangeId()).securityId(this.spec.securityId());
+        cancel.encoder
+                .exchangeId(this.spec.exchangeId())
+                .securityId(securityOf(session, counter))
+                .timestampSend(this.wallClock.nanoTime());
         cancel.encodeClientOid(counter, this.spec.strategyId());
         session.omsOrders.publishRaw(cancel.buffer, CancelOrderDecoder.TEMPLATE_ID, cancel.totalMessageSize());
     }

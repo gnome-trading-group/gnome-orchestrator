@@ -30,4 +30,25 @@ public interface GatewayHealth {
     default long refusedRecords() {
         return -1;
     }
+
+    /**
+     * Records that found the ring full and waited for room, each counted once however long it waited; -1 where it
+     * doesn't count them.
+     */
+    default long ringHeldRecords() {
+        return -1;
+    }
+
+    /** How long, in nanoseconds, its records waited for room in the ring; -1 where it doesn't count it. */
+    default long ringHeldNanos() {
+        return -1;
+    }
+
+    /**
+     * Times it fell behind its shard's publication and was subscribed again at the live position, skipping what it
+     * hadn't read; -1 where it doesn't count them.
+     */
+    default long stallResubscribes() {
+        return -1;
+    }
 }

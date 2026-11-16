@@ -247,6 +247,7 @@ public final class ShardFeedAgent implements AeronPathAgent {
             return;
         }
         feed.active = false;
+        feed.released(now);
         feeds.remove(feed);
         if (metrics != null) {
             reading = feeds.toArray(new StreamFeed[0]);
@@ -309,9 +310,11 @@ public final class ShardFeedAgent implements AeronPathAgent {
         }
         final int templateId = buffer.getShort(offset + TEMPLATE_ID_OFFSET, ByteOrder.LITTLE_ENDIAN) & 0xFFFF;
         if (!ring.tryPublishRaw(buffer, offset, templateId, length)) {
+            feed.heldBack(now);
             ringRefused();
             return false;
         }
+        feed.released(now);
         feed.passedOn(length);
         measure(sink.link(), header, buffer, offset);
         feed.last.putBytes(0, buffer, offset, length);
@@ -491,6 +494,8 @@ public final class ShardFeedAgent implements AeronPathAgent {
             return;
         }
         feed.resubscribing = true;
+        feed.resubscribedAfterStall();
+        feed.released(now);
         if (metrics != null) {
             metrics.resubscribed();
         }

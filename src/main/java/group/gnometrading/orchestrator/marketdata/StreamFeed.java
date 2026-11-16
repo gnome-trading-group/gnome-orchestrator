@@ -77,8 +77,14 @@ public final class StreamFeed implements GatewayHealth {
     private final AtomicLong records = new AtomicLong();
     private final AtomicLong bytes = new AtomicLong();
     private final AtomicLong resentRepeats = new AtomicLong();
+    private final AtomicLong ringHeld = new AtomicLong();
+    private final AtomicLong ringHeldNanos = new AtomicLong();
+    private final AtomicLong stallResubscribes = new AtomicLong();
     // The most bytes it trailed its shard's publication since the sampler last took it.
     private final AtomicLong behindPeakBytes = new AtomicLong();
+    // Feed agent only: whether a record waits in Aeron for room in the ring, and since when.
+    private boolean held;
+    private long heldSinceNanos;
 
     public StreamFeed(final int streamId, final String name) {
         this.streamId = streamId;
@@ -147,6 +153,28 @@ public final class StreamFeed implements GatewayHealth {
         return behindPeakBytes.getAndSet(0);
     }
 
+    /** Feed agent: the ring had no room for the stream's next record at {@code nowNanos}, so it waits in Aeron. */
+    void heldBack(final long nowNanos) {
+        if (!held) {
+            held = true;
+            heldSinceNanos = nowNanos;
+            ringHeld.lazySet(ringHeld.get() + 1);
+        }
+    }
+
+    /** Feed agent: whatever waited for room went in, or never will (its subscription was let go). */
+    void released(final long nowNanos) {
+        if (held) {
+            held = false;
+            ringHeldNanos.lazySet(ringHeldNanos.get() + nowNanos - heldSinceNanos);
+        }
+    }
+
+    /** Feed agent: subscribed again after stalling. */
+    void resubscribedAfterStall() {
+        stallResubscribes.lazySet(stallResubscribes.get() + 1);
+    }
+
     /** A shard's re-send of the last record, dropped. */
     void droppedRepeat() {
         resentRepeats.lazySet(resentRepeats.get() + 1);
@@ -170,6 +198,21 @@ public final class StreamFeed implements GatewayHealth {
     @Override
     public long refusedRecords() {
         return refused.get();
+    }
+
+    @Override
+    public long ringHeldRecords() {
+        return ringHeld.get();
+    }
+
+    @Override
+    public long ringHeldNanos() {
+        return ringHeldNanos.get();
+    }
+
+    @Override
+    public long stallResubscribes() {
+        return stallResubscribes.get();
     }
 
     @Override

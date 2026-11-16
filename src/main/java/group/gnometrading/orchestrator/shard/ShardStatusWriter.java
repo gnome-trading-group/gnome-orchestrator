@@ -20,12 +20,19 @@ import software.amazon.awssdk.services.s3.S3Client;
  * overwrites the last word of the one it replaced.
  *
  * <p>Every stream is in it, with wall-clock nanos for its latest event, receive and verification, and the latest
- * {@link StreamTransitions} (each {@code [stream, from, to, at_ns]}). Encoded with gnome-core's {@link JsonEncoder} into
+ * {@link StreamTransitions} (each {@code [stream, from, to, at_ns]}), and its {@code records_per_second} over the last
+ * {@link #RATE_WINDOW} writes. Encoded with gnome-core's {@link JsonEncoder} into
  * a reused buffer and sent from it, so only the upload allocates; the buffer doubles if a status outgrows it.
  */
 final class ShardStatusWriter implements Runnable {
 
     private static final int INITIAL_CAPACITY = 64 * 1024;
+
+    /**
+     * Statuses a stream's {@code records_per_second} spans: four writes {@link CollectorHeartbeat#INTERVAL_SECONDS}
+     * apart make its last minute, long enough to smooth a burst, short enough that the reconciler sees a market heat up.
+     */
+    static final int RATE_WINDOW = 4;
 
     /** Who is writing: fixed for the task's life. */
     record Identity(String shard, String task, String privateIp, String version, long startedAtNanos) {}
@@ -53,6 +60,7 @@ final class ShardStatusWriter implements Runnable {
     private final Shard shard;
     private final StreamTransitions transitions;
     private final LongSupplier wallClock;
+    private final LongSupplier monotonicClock;
     private final JsonEncoder json = new JsonEncoder();
     private ByteBuffer buffer = ByteBuffer.allocate(INITIAL_CAPACITY);
     private final int[] transitionIds = new int[StreamTransitions.CAPACITY];
@@ -67,7 +75,8 @@ final class ShardStatusWriter implements Runnable {
             final Identity identity,
             final Shard shard,
             final StreamTransitions transitions,
-            final LongSupplier wallClock) {
+            final LongSupplier wallClock,
+            final LongSupplier monotonicClock) {
         this.logger = logger;
         this.s3 = s3;
         this.bucket = bucket;
@@ -76,6 +85,7 @@ final class ShardStatusWriter implements Runnable {
         this.shard = shard;
         this.transitions = transitions;
         this.wallClock = wallClock;
+        this.monotonicClock = monotonicClock;
     }
 
     static String keyFor(final String shard, final String task) {
@@ -99,6 +109,8 @@ final class ShardStatusWriter implements Runnable {
 
     /** Encodes the status at the start of {@link #bytes()}; returns its length. */
     int build() {
+        // Before encoding, which runs again whenever the buffer grows: each write must take one reading per stream.
+        sampleRates(monotonicClock.getAsLong());
         while (true) {
             buffer.clear();
             json.wrap(buffer);
@@ -110,6 +122,31 @@ final class ShardStatusWriter implements Runnable {
                 buffer = ByteBuffer.allocate(buffer.capacity() * 2);
             }
         }
+    }
+
+    private void sampleRates(final long nowNanos) {
+        final List<ShardStream> streams = shard.streams();
+        for (int i = 0; i < streams.size(); i++) {
+            sampleRate(streams.get(i), nowNanos);
+        }
+    }
+
+    /** Records since the oldest of the stream's last {@link #RATE_WINDOW} readings, per second; then takes a reading. */
+    private static void sampleRate(final ShardStream stream, final long nowNanos) {
+        final long records = stream.records();
+        final int readings = stream.statusReadings;
+        final int slot = readings % RATE_WINDOW;
+        stream.statusRate = Double.NaN;
+        if (readings > 0) {
+            final int oldest = readings >= RATE_WINDOW ? slot : 0;
+            final long elapsed = nowNanos - stream.statusAtNanos[oldest];
+            if (elapsed > 0) {
+                stream.statusRate = (records - stream.statusRecords[oldest]) * 1e9 / elapsed;
+            }
+        }
+        stream.statusRecords[slot] = records;
+        stream.statusAtNanos[slot] = nowNanos;
+        stream.statusReadings = readings + 1;
     }
 
     byte[] bytes() {
@@ -186,6 +223,11 @@ final class ShardStatusWriter implements Runnable {
             json.writeObjectEntry("resyncs", subject == null ? 0 : subject.resyncs())
                     .writeComma();
             json.writeObjectEntry("records", stream.records()).writeComma();
+            // Left out until a second reading: the reconciler treats a missing rate as unknown, not as zero.
+            if (!Double.isNaN(stream.statusRate)) {
+                json.writeObjectEntry("records_per_second", stream.statusRate, 2)
+                        .writeComma();
+            }
             // Whether a session leases it, and what reached or missed its Aeron publication.
             json.writeObjectEntry("published", stream.publication() != null).writeComma();
             json.writeObjectEntry("offered", stream.offered()).writeComma();

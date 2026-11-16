@@ -34,6 +34,9 @@ class SessionStateSamplerTest {
     private final PriceSlotRegistry slots = new PriceSlotRegistry(1);
     private final LedgerRing ledgerRing = new LedgerRing(16, 4, Long.MAX_VALUE, positions);
     private long resyncs;
+    private long held;
+    private long heldNanos;
+    private long stalls;
 
     private final OrderGatewayLinkStatus link = new OrderGatewayLinkStatus() {
         @Override
@@ -66,6 +69,21 @@ class SessionStateSamplerTest {
         @Override
         public long bookResyncs() {
             return resyncs;
+        }
+
+        @Override
+        public long ringHeldRecords() {
+            return held;
+        }
+
+        @Override
+        public long ringHeldNanos() {
+            return heldNanos;
+        }
+
+        @Override
+        public long stallResubscribes() {
+            return stalls;
         }
     };
 
@@ -107,6 +125,9 @@ class SessionStateSamplerTest {
         sampler.sampleIfDue(0);
         Map<String, JsonNode> first = sent();
         resyncs = 2;
+        held = 3;
+        heldNanos = 4_500_000;
+        stalls = 1;
         sampler.sampleIfDue(60_000);
         Map<String, JsonNode> second = sent();
 
@@ -121,13 +142,11 @@ class SessionStateSamplerTest {
         assertEquals("paper:kalshi:main", gateway.get("key").asText());
         assertEquals(3, gateway.get("workingOrders").asInt());
         assertTrue(!first.get("session.marketdata").get("feeds").get(0).has("resyncs"), "no change to report yet");
-        assertEquals(
-                2,
-                second.get("session.marketdata")
-                        .get("feeds")
-                        .get(0)
-                        .get("resyncs")
-                        .asLong());
+        JsonNode feedSample = second.get("session.marketdata").get("feeds").get(0);
+        assertEquals(2, feedSample.get("resyncs").asLong());
+        assertEquals(3, feedSample.get("ringHeld").asLong());
+        assertEquals(4_500, feedSample.get("ringHeldMicros").asLong());
+        assertEquals(1, feedSample.get("stalls").asLong());
         assertTrue(!first.containsKey("session.journal"), "the journal is off");
     }
 

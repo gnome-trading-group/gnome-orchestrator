@@ -447,6 +447,7 @@ class ShardMarketDataTest {
             after(ShardFeedAgent.STALLED_NANOS + ShardFeedAgent.CHECK_EVERY_NANOS);
             assertTrue(feed.isReconnecting(), "stalled behind the shard");
             assertEquals(StreamFeed.BadReason.STALLED, feed.badReason());
+            assertEquals(1, feed.stallResubscribes());
 
             pump(() -> !feed.resubscribing && feed.current != null, "a new subscription");
             status(statusA, streamA, streamA.position(), 0, false);
@@ -456,6 +457,40 @@ class ShardMarketDataTest {
             reading.set(false);
             fastReader.join();
         }
+    }
+
+    @Test
+    void aRecordThatFindsTheRingFullWaitsInAeronAndIsCountedOnceWithHowLongItWaited() throws Exception {
+        join();
+        record.encoder.streamId(STREAM_ID).sequence(0);
+        final int templateId = record.buffer.getShort(MessageHeaderEncoder.templateIdEncodingOffset()) & 0xFFFF;
+        int filler = 0;
+        while (ring.tryPublishRaw(record.buffer, 0, templateId, record.totalMessageSize())) {
+            filler++;
+        }
+
+        // The strategy reads nothing until the end, so the ring stays full.
+        pump(() -> offer(streamA, 1, 10, 1) > 0, "offer 1");
+        final long deadline = System.nanoTime() + 10 * SECOND;
+        while (feed.ringHeldRecords() == 0) {
+            assertTrue(System.nanoTime() < deadline, "timed out waiting for the record to find the ring full");
+            agent.doWork();
+            Thread.sleep(1);
+        }
+        for (int i = 0; i < 3; i++) {
+            clock.addAndGet(SECOND);
+            agent.doWork();
+        }
+        assertEquals(1, feed.ringHeldRecords(), "one record, however many passes it waited");
+        assertEquals(0, feed.ringHeldNanos(), "still waiting");
+
+        strategy.poll();
+        agent.doWork();
+        assertEquals(1, feed.records());
+        assertEquals(3 * SECOND, feed.ringHeldNanos());
+        strategy.poll();
+        assertEquals(filler + 1, seen.size());
+        assertEquals(1L, last(0));
     }
 
     @Test

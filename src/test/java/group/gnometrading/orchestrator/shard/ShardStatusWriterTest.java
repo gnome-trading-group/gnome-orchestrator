@@ -24,6 +24,7 @@ class ShardStatusWriterTest {
     private List<CollectorHeartbeat.Connection> connections = List.of();
     private String processLine;
     private ShardErrors.Reading errors = new ShardErrors.Reading(0, 0, null, 0);
+    private long monotonicNanos;
 
     private final ShardStatusWriter writer = new ShardStatusWriter(
             new NullLogger(),
@@ -57,7 +58,8 @@ class ShardStatusWriterTest {
                 }
             },
             transitions,
-            () -> 99);
+            () -> 99,
+            () -> monotonicNanos);
 
     private JsonNode status() throws Exception {
         int length = writer.build();
@@ -161,6 +163,47 @@ class ShardStatusWriterTest {
         assertEquals(
                 StreamTransitions.CAPACITY + 1,
                 kept.get(StreamTransitions.CAPACITY - 1).get(0).asInt());
+    }
+
+    @Test
+    void theRecordRateSpansTheLastFourWritesAndIsLeftOutUntilASecond() throws Exception {
+        ShardStream stream = kit.stream(14);
+        agent.add(stream);
+        streams = List.of(stream);
+
+        assertFalse(status().get("streams").get(0).has("records_per_second"), "one reading isn't a rate");
+
+        long[] published = {30, 60, 15, 45, 90};
+        double[] expected = {
+            30 / 15.0, (30 + 60) / 30.0, (30 + 60 + 15) / 45.0, (30 + 60 + 15 + 45) / 60.0, (60 + 15 + 45 + 90) / 60.0
+        };
+        for (int i = 0; i < published.length; i++) {
+            for (long left = published[i]; left > 0; left -= 30) {
+                StreamTestKit.publish(stream, (int) Math.min(30, left));
+                agent.doWork();
+            }
+            monotonicNanos += 15_000_000_000L;
+
+            JsonNode line = status().get("streams").get(0);
+
+            assertEquals(expected[i], line.get("records_per_second").asDouble(), 0.01, "write " + (i + 2));
+        }
+    }
+
+    @Test
+    void aStatusThatOutgrowsItsBufferTakesOneRateReading() throws Exception {
+        ShardStream stream = kit.stream(15);
+        agent.add(stream);
+        streams = List.of(stream);
+        status();
+        StreamTestKit.publish(stream, 30);
+        agent.doWork();
+        monotonicNanos += 15_000_000_000L;
+        processLine = "{\"padding\":\"" + "x".repeat(100_000) + "\"}";
+
+        assertEquals(
+                2.0, status().get("streams").get(0).get("records_per_second").asDouble(), 0.01);
+        assertEquals(2, stream.statusReadings);
     }
 
     @Test

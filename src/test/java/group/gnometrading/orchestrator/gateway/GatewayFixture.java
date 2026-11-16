@@ -9,6 +9,7 @@ import group.gnometrading.gateways.GatewayConfig;
 import group.gnometrading.gateways.account.lane.AccountLane;
 import group.gnometrading.gateways.account.lane.FakeVenueServer;
 import group.gnometrading.gateways.account.lane.LaneCommand;
+import group.gnometrading.gateways.account.lane.LaneVenue;
 import group.gnometrading.gateways.account.lane.RequestTiming;
 import group.gnometrading.gateways.account.lane.TestLaneVenue;
 import group.gnometrading.gateways.account.reader.AccountConnection;
@@ -55,6 +56,7 @@ import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayIngress;
 import group.gnometrading.orchestrator.gateway.transport.GatewayRejects;
+import group.gnometrading.orchestrator.runtime.SamplePoster;
 import group.gnometrading.schemas.gateway.AdmissionAction;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
@@ -71,6 +73,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.SystemEpochNanoClock;
 
@@ -208,7 +211,8 @@ public final class GatewayFixture implements AutoCloseable {
             boolean journalPaused,
             AccountLane.Admissions tap) {}
 
-    private GatewayFixture(final String name, final int ingressPort, final Setup setup) throws Exception {
+    private GatewayFixture(final String name, final String ingressHost, final int ingressPort, final Setup setup)
+            throws Exception {
         this.aeron = AeronRuntime.launch(name, AeronProfile.GATEWAY, Throwable::printStackTrace);
         this.accounts = setup.accounts();
         this.account = this.accounts.get(0);
@@ -282,7 +286,7 @@ public final class GatewayFixture implements AutoCloseable {
                 this.aeron
                         .aeron()
                         .addSubscription(
-                                AeronChannels.gatewayIngress("127.0.0.1", ingressPort), AeronStreamIds.GATEWAY_INGRESS),
+                                AeronChannels.gatewayIngress(ingressHost, ingressPort), AeronStreamIds.GATEWAY_INGRESS),
                 this.sessions,
                 status,
                 new GatewayRejects(rejects, new SystemEpochNanoClock()),
@@ -420,6 +424,24 @@ public final class GatewayFixture implements AutoCloseable {
             }
 
             @Override
+            public void taken(final RequestClass type, final long waitedNanos) {
+                journaled.taken(type, waitedNanos);
+                tap.taken(type, waitedNanos);
+            }
+
+            @Override
+            public void sent(final RequestClass type, final long writeNanos) {
+                journaled.sent(type, writeNanos);
+                tap.sent(type, writeNanos);
+            }
+
+            @Override
+            public void refusedWithoutConnection() {
+                journaled.refusedWithoutConnection();
+                tap.refusedWithoutConnection();
+            }
+
+            @Override
             public void timed(final RequestTiming timing) {
                 journaled.timed(timing);
                 tap.timed(timing);
@@ -429,7 +451,13 @@ public final class GatewayFixture implements AutoCloseable {
 
     /** Starts a gateway: its account, and then ingress, egress, control and (unless held back) its journal. */
     public static GatewayFixture start(final String name, final int ingressPort, final Setup setup) throws Exception {
-        final GatewayFixture gateway = new GatewayFixture(name, ingressPort, setup);
+        return start(name, "127.0.0.1", ingressPort, setup);
+    }
+
+    /** Starts a gateway taking sessions on {@code ingressHost}, an address other hosts reach this one on. */
+    public static GatewayFixture start(
+            final String name, final String ingressHost, final int ingressPort, final Setup setup) throws Exception {
+        final GatewayFixture gateway = new GatewayFixture(name, ingressHost, ingressPort, setup);
         for (final GatewayAccount account : gateway.accounts) {
             account.start();
         }
@@ -530,8 +558,26 @@ public final class GatewayFixture implements AutoCloseable {
             final int accountId,
             final CrossKeys crossKeys)
             throws Exception {
-        final TestLaneVenue laneVenue = new TestLaneVenue();
-        laneVenue.maxBatch = maxBatch;
+        return account(venue, limits, maxOrders, connections, maxBatch, accountId, crossKeys, plain -> plain);
+    }
+
+    /**
+     * The account under {@code accountId} on the fake venue, publishing into {@code crossKeys}, its requests written by
+     * {@code venueOf} the plain test venue (a wrapper adding what a real venue's requests cost, as signing).
+     */
+    public static GatewayAccount account(
+            final Venue venue,
+            final VenueRateLimits limits,
+            final int maxOrders,
+            final int connections,
+            final int maxBatch,
+            final int accountId,
+            final CrossKeys crossKeys,
+            final Function<TestLaneVenue, LaneVenue<String>> venueOf)
+            throws Exception {
+        final TestLaneVenue plain = new TestLaneVenue();
+        plain.maxBatch = maxBatch;
+        final LaneVenue<String> laneVenue = venueOf.apply(plain);
         final ManyToOneRingBuffer<OrderContext> notices =
                 new ManyToOneRingBuffer<>(OrderContext[]::new, OrderContext::new, 4 * maxOrders);
         final ManyToOneRingBuffer<OrderContext> released =
@@ -639,6 +685,28 @@ public final class GatewayFixture implements AutoCloseable {
         final boolean quiet = this.control.handOver(timeoutNanos);
         kill();
         return quiet;
+    }
+
+    /**
+     * Starts the gateway's samples as a deployed one posts them ({@link GatewaySamples}), sent to {@code sender}: its
+     * order path's latency and counts, and each thread's and the JVM's readings.
+     */
+    public SamplePoster startSamples(
+            final String gatewayKey, final SamplePoster.Sender sender, final long runtimeIntervalMs) {
+        final List<GnomeAgentRunner> threads = new ArrayList<>(this.runners);
+        for (final GatewayAccount gatewayAccount : this.accounts) {
+            threads.addAll(gatewayAccount.runners());
+        }
+        return GatewaySamples.start(
+                new NullLogger(),
+                gatewayKey,
+                sender,
+                runtimeIntervalMs,
+                this.aeron,
+                threads,
+                new GatewaySamples.Live(
+                        this.accounts, this.admissions, this.ingress, this.egress, this.sessions, this.cross),
+                null);
     }
 
     /** Stops every thread as a crash would: nothing is cancelled and no session told. Once; again does nothing. */

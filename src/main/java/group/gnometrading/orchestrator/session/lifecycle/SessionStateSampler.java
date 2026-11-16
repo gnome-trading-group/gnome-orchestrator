@@ -20,8 +20,8 @@ import java.util.List;
  *   <li>{@code session.ledger}: events published and stored, the lag between, whether fenced, failures in a row;
  *   <li>{@code session.gateways}: each order gateway link, linked or not and the orders working through it;
  *   <li>{@code session.marketdata}: each market-data stream, whether its book is trusted, and since the last sample its
- *       resyncs, records and bytes passed on, shard re-sends dropped and messages refused (-1 where a feed doesn't
- *       count one);
+ *       resyncs, records and bytes passed on, shard re-sends dropped, messages refused, records that waited for room
+ *       in the ring and for how long (µs), and resubscribes after stalling (-1 where a feed doesn't count one);
  *   <li>{@code session.journal}: segments waiting to ship and how old the oldest is.
  * </ul>
  * Positions and feeds go out in parts ({@code part}, {@code parts}) a millisecond apart, so a large session's never
@@ -30,7 +30,7 @@ import java.util.List;
  */
 public final class SessionStateSampler {
 
-    // About 230 bytes a listing and 190 a feed: parts of these stay near 10 KB.
+    // About 230 bytes a listing and 240 a feed: parts of these stay near 12 KB.
     static final int LISTINGS_PER_SAMPLE = 40;
     static final int FEEDS_PER_SAMPLE = 50;
 
@@ -50,12 +50,18 @@ public final class SessionStateSampler {
     private final long[] previousBytes;
     private final long[] previousRepeats;
     private final long[] previousRefused;
+    private final long[] previousHeld;
+    private final long[] previousHeldNanos;
+    private final long[] previousStalls;
     // Each feed's counters as read for this sample, so what is written and what the next sample starts from agree.
     private final long[] nowResyncs;
     private final long[] nowRecords;
     private final long[] nowBytes;
     private final long[] nowRepeats;
     private final long[] nowRefused;
+    private final long[] nowHeld;
+    private final long[] nowHeldNanos;
+    private final long[] nowStalls;
     private boolean first = true;
     private long nextAtMs;
 
@@ -95,6 +101,12 @@ public final class SessionStateSampler {
         this.nowBytes = new long[this.feeds.length];
         this.nowRepeats = new long[this.feeds.length];
         this.nowRefused = new long[this.feeds.length];
+        this.previousHeld = new long[this.feeds.length];
+        this.previousHeldNanos = new long[this.feeds.length];
+        this.previousStalls = new long[this.feeds.length];
+        this.nowHeld = new long[this.feeds.length];
+        this.nowHeldNanos = new long[this.feeds.length];
+        this.nowStalls = new long[this.feeds.length];
     }
 
     /**
@@ -259,6 +271,9 @@ public final class SessionStateSampler {
             nowBytes[i] = feeds[i].bytes();
             nowRepeats[i] = feeds[i].resentRepeats();
             nowRefused[i] = feeds[i].refusedRecords();
+            nowHeld[i] = feeds[i].ringHeldRecords();
+            nowHeldNanos[i] = feeds[i].ringHeldNanos();
+            nowStalls[i] = feeds[i].stallResubscribes();
         }
         RuntimeException failure = null;
         try {
@@ -283,7 +298,13 @@ public final class SessionStateSampler {
                             .writeComma()
                             .writeObjectEntry("resentRepeats", delta(nowRepeats[i], previousRepeats[i]))
                             .writeComma()
-                            .writeObjectEntry("refused", delta(nowRefused[i], previousRefused[i]));
+                            .writeObjectEntry("refused", delta(nowRefused[i], previousRefused[i]))
+                            .writeComma()
+                            .writeObjectEntry("ringHeld", delta(nowHeld[i], previousHeld[i]))
+                            .writeComma()
+                            .writeObjectEntry("ringHeldMicros", micros(delta(nowHeldNanos[i], previousHeldNanos[i])))
+                            .writeComma()
+                            .writeObjectEntry("stalls", delta(nowStalls[i], previousStalls[i]));
                 }
                 json.writeObjectEnd();
             }
@@ -299,12 +320,19 @@ public final class SessionStateSampler {
             previousBytes[i] = nowBytes[i];
             previousRepeats[i] = nowRepeats[i];
             previousRefused[i] = nowRefused[i];
+            previousHeld[i] = nowHeld[i];
+            previousHeldNanos[i] = nowHeldNanos[i];
+            previousStalls[i] = nowStalls[i];
         }
         return failure;
     }
 
     private static long delta(final long now, final long before) {
         return now < 0 || before < 0 ? -1 : now - before;
+    }
+
+    private static long micros(final long nanos) {
+        return nanos < 0 ? -1 : nanos / 1_000;
     }
 
     private RuntimeException writeJournal(final long nowMs) {

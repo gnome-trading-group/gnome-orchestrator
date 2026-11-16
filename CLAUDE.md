@@ -112,7 +112,7 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   publication has no room for (one venue message can carry hundreds of fills, past the 128 KB window) waits in the
   ring, with the stream's later records, for the next pass; one the ring laps first is dropped and counted, and
   sessions see the count),
-  `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler), `ShardErrors` (the shard's logger, counting `UNKNOWN_ERROR`s for the status), `ShardIdentity`, `ShardAccounts`,
+  `CollectorHeartbeat` log lines, `ShardStatusWriter` (status for the reconciler; each stream's `records_per_second` over the last four writes, from a fixed ring on `ShardStream`, left out until a second write), `ShardErrors` (the shard's logger, counting `UNKNOWN_ERROR`s for the status), `ShardIdentity`, `ShardAccounts`,
   `CollectorHealth`.
 - `shard/feeds/` - `FeedVenues` (per `md.source.adapter`: the venue's `FEED` from gnome-gateways `venues/`, and its
   protocol built with the credentials this process loads, and its REST probe), `FeedSources` (adds a registry source,

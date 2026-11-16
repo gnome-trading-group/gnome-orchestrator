@@ -616,7 +616,8 @@ public class ShardOrchestrator extends Orchestrator {
                     }
                 },
                 transitions,
-                wallClock::nanoTime);
+                wallClock::nanoTime,
+                System::nanoTime);
     }
 
     /** A source's market-data account label, for the heartbeat; null for a public feed, which signs in with none. */

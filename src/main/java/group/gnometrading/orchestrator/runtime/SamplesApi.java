@@ -5,6 +5,8 @@ import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.http.RetryableHTTPClient;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.ViewString;
+import java.io.FileOutputStream;
+import java.io.IOException;
 
 /**
  * Where an order gateway or shard posts its samples: the samples API ({@code samples.api.url}, the host alone, as
@@ -39,5 +41,28 @@ public final class SamplesApi {
                                 .withWriteBufferSize(SamplePoster.MAX_POST_BYTES + REQUEST_HEADER_BYTES))
                         .build());
         return (body, length) -> connection.tryPost(PATH, body, length);
+    }
+
+    /**
+     * A sender appending each post as one line to {@code path}, for a run with no samples API to read its samples from
+     * (a load test); never fails a post it wrote.
+     */
+    public static SamplePoster.Sender toFile(final String path) {
+        final FileOutputStream out;
+        try {
+            out = new FileOutputStream(path, true);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Samples can't be written to " + path + ": " + e.getMessage(), e);
+        }
+        return (body, length) -> {
+            try {
+                out.write(body, 0, length);
+                out.write('\n');
+                out.flush();
+                return 200;
+            } catch (IOException e) {
+                return RegistryConnection.NO_RESPONSE;
+            }
+        };
     }
 }

@@ -142,6 +142,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
     private static final long REGISTRY_TIMEOUT_MILLIS = 5_000;
     // Set only for a gateway run on a developer's machine beside one session: that session's record, as JSON.
     private static final String LOCAL_SESSION = "gateway.local.session";
+    // A load test's gateway has no samples API to post to; its samples go to this file instead.
+    private static final String SAMPLES_OUT = "samples.out";
     // How long sessions have to come back and claim, through their hellos, orders an earlier process left.
     private static final long SWEEP_WAIT_MILLIS = 30_000;
 
@@ -346,9 +348,11 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         return GatewaySamples.start(
                 getInstance(Logger.class),
                 settings.key(),
-                SamplesApi.sender(
-                        properties.getStringProperty("samples.api.url"),
-                        getInstance(RegistryEndpoint.class).apiKey()),
+                properties.hasProperty(SAMPLES_OUT)
+                        ? SamplesApi.toFile(properties.getStringProperty(SAMPLES_OUT))
+                        : SamplesApi.sender(
+                                properties.getStringProperty("samples.api.url"),
+                                getInstance(RegistryEndpoint.class).apiKey()),
                 properties.getLongProperty("samples.runtime.interval.ms"),
                 aeron,
                 threads,

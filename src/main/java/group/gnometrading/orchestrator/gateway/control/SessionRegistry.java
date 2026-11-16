@@ -10,6 +10,8 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -128,24 +130,51 @@ public final class SessionRegistry {
     }
 
     /**
-     * A local run's only session, whatever its id: a gateway run beside one session without the registry answers every
-     * hello with this record, so the session's slot ({@code session.seq}) and listings must match it.
+     * A local run's sessions, without the registry: one record answers every hello whatever its id, so the session's
+     * slot ({@code session.seq}) and listings must match it; an array of records answers each by its {@code session_id},
+     * each in its own slot, for a load test's many sessions.
      *
-     * @param json {@code session_seq}, {@code strategy_id}, {@code listings} (ids) and {@code simulation} (as a session's
-     *     {@code SIMULATION_JSON}); a paper session, running, bound to no account
+     * @param json a record, or an array of records, or {@code @path} to a file holding either. A record is
+     *     {@code session_seq}, {@code strategy_id}, {@code listings} (ids), {@code simulation} (as a session's
+     *     {@code SIMULATION_JSON}) and, in an array, {@code session_id}; each a paper session, running, bound to no
+     *     account
      */
     public static Source local(final String json) {
         final JsonNode config;
         try {
-            config = new ObjectMapper().readTree(json);
+            config = new ObjectMapper()
+                    .readTree(json.startsWith("@") ? Files.readString(Path.of(json.substring(1))) : json);
         } catch (IOException e) {
-            throw new IllegalArgumentException("A local session's record isn't JSON: " + e.getMessage(), e);
+            throw new IllegalArgumentException("A local session's record isn't readable JSON: " + e.getMessage(), e);
         }
+        if (!config.isArray()) {
+            final SessionRecord record = localRecord(config);
+            return sessionId -> record;
+        }
+        final Map<String, SessionRecord> records = new HashMap<>();
+        final Set<Long> slots = new HashSet<>();
+        for (final JsonNode session : config) {
+            final String sessionId = session.path("session_id").asText("");
+            if (sessionId.isEmpty()) {
+                throw new IllegalArgumentException("Each of several local sessions needs a session_id");
+            }
+            final SessionRecord record = localRecord(session);
+            if (records.put(sessionId, record) != null) {
+                throw new IllegalArgumentException("Local session " + sessionId + " is listed twice");
+            }
+            if (!slots.add(record.sessionSeq())) {
+                throw new IllegalArgumentException("Local sessions share session_seq " + record.sessionSeq());
+            }
+        }
+        return records::get;
+    }
+
+    private static SessionRecord localRecord(final JsonNode config) {
         final Set<Integer> listings = new HashSet<>();
         for (final JsonNode listing : config.path("listings")) {
             listings.add(listing.asInt());
         }
-        final SessionRecord record = new SessionRecord(
+        return new SessionRecord(
                 config.path("session_seq").asLong(),
                 "RUNNING",
                 config.path("strategy_id").asInt(),
@@ -154,7 +183,6 @@ public final class SessionRegistry {
                 Map.of(),
                 1,
                 simulationJson(config.path("simulation")));
-        return sessionId -> record;
     }
 
     /**

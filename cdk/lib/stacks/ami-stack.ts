@@ -28,16 +28,18 @@ interface Variant {
   name: string;
   // Only low-latency variants isolate cores; undefined builds the untuned image for the standard profile.
   isolated?: string;
+  // The image is built and tested on the size it is for: isolation can only be checked on CPUs that exist.
+  instanceType: string;
 }
 
 // `<vcpus>core` for sizes with two hardware threads per core (c7i), `<vcpus>core-nosmt` for one (c7a). The launcher
 // picks the variant by instance type (gnome-registry strategy-session-launcher.ts).
 const VARIANTS: Variant[] = [
-  { name: '8core', isolated: isolatedCpus(8) },
-  { name: '16core', isolated: isolatedCpus(16) },
-  { name: '4core-nosmt', isolated: isolatedCpusNoSmt(4) },
-  { name: '8core-nosmt', isolated: isolatedCpusNoSmt(8) },
-  { name: 'standard' },
+  { name: '8core', isolated: isolatedCpus(8), instanceType: 'c7i.2xlarge' },
+  { name: '16core', isolated: isolatedCpus(16), instanceType: 'c7i.4xlarge' },
+  { name: '4core-nosmt', isolated: isolatedCpusNoSmt(4), instanceType: 'c7a.xlarge' },
+  { name: '8core-nosmt', isolated: isolatedCpusNoSmt(8), instanceType: 'c7a.2xlarge' },
+  { name: 'standard', instanceType: 'c7i.large' },
 ];
 
 /**
@@ -90,16 +92,9 @@ export class AmiStack extends cdk.Stack {
 
     const completions = new sns.Topic(this, 'BuildCompletions');
 
-    const infrastructure = new imagebuilder.CfnInfrastructureConfiguration(this, 'Infrastructure', {
-      name: 'gnome-orchestrator-ami-build',
-      instanceProfileName: instanceProfile.ref,
-      instanceTypes: ['c7i.large'],
-      // Builds run in the platform network (gnome-shared-infra), read from its SSM parameters at deploy time.
-      subnetId: cdk.Fn.select(0, cdk.Fn.split(',', ssm.StringParameter.valueForStringParameter(this, PLATFORM_SSM.subnetIds))),
-      securityGroupIds: [ssm.StringParameter.valueForStringParameter(this, PLATFORM_SSM.securityGroupId)],
-      snsTopicArn: completions.topicArn,
-      terminateInstanceOnFailure: true,
-    });
+    // Builds run in the platform network (gnome-shared-infra), read from its SSM parameters at deploy time.
+    const subnetId = cdk.Fn.select(0, cdk.Fn.split(',', ssm.StringParameter.valueForStringParameter(this, PLATFORM_SSM.subnetIds)));
+    const securityGroupId = ssm.StringParameter.valueForStringParameter(this, PLATFORM_SSM.securityGroupId);
 
     const runtime = this.component('runtime', 'Java 17, Python 3.13, CloudWatch agent and the session bootstrap', [
       ['InstallRuntime', readAmiFile('scripts/install-runtime.sh')],
@@ -224,6 +219,16 @@ export class AmiStack extends cdk.Stack {
           deviceName: '/dev/sda1',
           ebs: { volumeSize: 30, volumeType: 'gp3', deleteOnTermination: true },
         }],
+      });
+
+      const infrastructure = new imagebuilder.CfnInfrastructureConfiguration(this, `Infrastructure-${variant.name}`, {
+        name: `gnome-orchestrator-ami-build-${variant.name}`,
+        instanceProfileName: instanceProfile.ref,
+        instanceTypes: [variant.instanceType],
+        subnetId,
+        securityGroupIds: [securityGroupId],
+        snsTopicArn: completions.topicArn,
+        terminateInstanceOnFailure: true,
       });
 
       const pipeline = new imagebuilder.CfnImagePipeline(this, `Pipeline-${variant.name}`, {
@@ -364,7 +369,8 @@ function checkIsolationScript(isolated: string): string {
     '        out.update(range(int(lo), int(hi or lo) + 1))',
     '    return out',
     'base = Path("/sys/devices/system/cpu")',
-    `expected = cpus("${isolated}") & cpus((base / "possible").read_text())`,
+    // Exact, not limited to the CPUs present: a test run on a smaller size than the variant's must fail.
+    `expected = cpus("${isolated}")`,
     'actual = cpus((base / "isolated").read_text())',
     'assert actual == expected, f"isolated {sorted(actual)}, expected {sorted(expected)}"',
     'PY',

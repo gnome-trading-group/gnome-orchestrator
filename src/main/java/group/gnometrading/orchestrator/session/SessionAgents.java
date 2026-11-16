@@ -169,8 +169,9 @@ record SessionAgents(
         List<GatewayHealth> gateways = new ArrayList<>(marketData.health());
         List<GnomeAgentRunner> watched = new ArrayList<>();
         // A stuck journal holds up market data and every trading buffer once their rings fill.
-        for (GnomeAgentRunner runner :
-                new GnomeAgentRunner[] {strategy, oms, orderEntry, ledger, riskSync, rewards, journal.runner()}) {
+        for (GnomeAgentRunner runner : new GnomeAgentRunner[] {
+            marketData.runner(), strategy, oms, orderEntry, ledger, riskSync, rewards, journal.runner()
+        }) {
             if (runner != null) {
                 watched.add(runner);
             }

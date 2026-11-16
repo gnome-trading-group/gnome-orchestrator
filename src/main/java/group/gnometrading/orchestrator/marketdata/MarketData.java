@@ -1,5 +1,6 @@
 package group.gnometrading.orchestrator.marketdata;
 
+import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.orchestrator.runtime.GatewayHealth;
 import java.util.List;
 import org.agrona.ErrorHandler;
@@ -11,4 +12,7 @@ public interface MarketData extends AutoCloseable {
 
     /** One entry per listing; filled once it has started. */
     List<GatewayHealth> health();
+
+    /** The thread delivering it, once started, for the samplers of the process's threads; null before then. */
+    GnomeAgentRunner runner();
 }

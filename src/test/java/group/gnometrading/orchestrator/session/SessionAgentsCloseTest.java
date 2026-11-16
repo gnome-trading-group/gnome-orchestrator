@@ -48,6 +48,11 @@ class SessionAgentsCloseTest {
             }
 
             @Override
+            public GnomeAgentRunner runner() {
+                return feed;
+            }
+
+            @Override
             public void close() throws Exception {
                 feed.close();
             }
