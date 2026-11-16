@@ -6,6 +6,7 @@ import group.gnometrading.orchestrator.aeron.HostAddress;
 import group.gnometrading.orchestrator.gateway.core.GatewayMessage;
 import group.gnometrading.schemas.gateway.MessageHeaderDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloDecoder;
+import group.gnometrading.schemas.gateway.SessionHelloListingsDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersDecoder;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -16,8 +17,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
- * Reads sessions' hellos, each with its open orders over as many pages as the session needed, into whole
- * {@link Hello}s, one per image at a time. On the gateway's control thread; allocates.
+ * Reads sessions' hellos into whole {@link Hello}s, one per image at a time: each hello is followed by as many pages
+ * as it says, its listings' pages (when they didn't fit in the hello) and then its open orders'. On the gateway's
+ * control thread; allocates.
  */
 final class HelloPages {
 
@@ -29,6 +31,7 @@ final class HelloPages {
     private final MessageHeaderDecoder header = new MessageHeaderDecoder();
     private final SessionHelloDecoder hello = new SessionHelloDecoder();
     private final SessionHelloOrdersDecoder helloOrders = new SessionHelloOrdersDecoder();
+    private final SessionHelloListingsDecoder helloListings = new SessionHelloListingsDecoder();
     // Per image: a hello waiting for its pages of open orders.
     private final Map<Integer, Hello> pending = new HashMap<>();
 
@@ -99,9 +102,35 @@ final class HelloPages {
                             order.size(),
                             order.exchangeOrderId().trim()));
         }
+        return pageSeen(message.image, hello, this.helloOrders.last() == 1);
+    }
+
+    /**
+     * A page of the listings the session trades, sent after its hello when they didn't fit in it.
+     *
+     * @return the whole hello once this was its last page; else null
+     */
+    Hello onListingsPage(final GatewayMessage message) {
+        final Hello hello = this.pending.get(message.image);
+        if (hello == null) {
+            return null;
+        }
+        this.header.wrap(message.buffer, 0);
+        this.helloListings.wrap(
+                message.buffer, MessageHeaderDecoder.ENCODED_LENGTH, this.header.blockLength(), this.header.version());
+        if (this.helloListings.sessionSeq() != hello.sessionSeq()) {
+            return null;
+        }
+        for (final SessionHelloListingsDecoder.ListingsDecoder listing : this.helloListings.listings()) {
+            hello.listings().add(new long[] {listing.exchangeId(), listing.securityId()});
+        }
+        return pageSeen(message.image, hello, this.helloListings.last() == 1);
+    }
+
+    private Hello pageSeen(final int image, final Hello hello, final boolean last) {
         hello.pagesSeen()[0]++;
-        if (this.helloOrders.last() == 1 || hello.pagesSeen()[0] >= hello.pages()) {
-            this.pending.remove(message.image);
+        if (last || hello.pagesSeen()[0] >= hello.pages()) {
+            this.pending.remove(image);
             return hello;
         }
         return null;

@@ -35,6 +35,7 @@ import group.gnometrading.schemas.gateway.ReHelloRequiredEncoder;
 import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
 import group.gnometrading.schemas.gateway.SessionGoodbyeEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloDecoder;
+import group.gnometrading.schemas.gateway.SessionHelloListingsDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersDecoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeEncoder;
 import group.gnometrading.sm.Listing;
@@ -325,6 +326,8 @@ public final class GatewayControl implements GnomeAgent {
                 onHello(message);
             } else if (templateId == SessionHelloOrdersDecoder.TEMPLATE_ID) {
                 onHelloOrders(message);
+            } else if (templateId == SessionHelloListingsDecoder.TEMPLATE_ID) {
+                onHelloListings(message);
             } else if (templateId == SessionGoodbyeDecoder.TEMPLATE_ID) {
                 onGoodbye(message);
             } else if (VenueQueries.handles(templateId)) {
@@ -354,6 +357,13 @@ public final class GatewayControl implements GnomeAgent {
     /** The session's open orders, as it holds them; reconciled with what the gateway recovered after a restart. */
     private void onHelloOrders(final GatewayMessage message) {
         final Hello hello = this.helloPages.onPage(message);
+        if (hello != null) {
+            complete(message.image, hello);
+        }
+    }
+
+    private void onHelloListings(final GatewayMessage message) {
+        final Hello hello = this.helloPages.onListingsPage(message);
         if (hello != null) {
             complete(message.image, hello);
         }

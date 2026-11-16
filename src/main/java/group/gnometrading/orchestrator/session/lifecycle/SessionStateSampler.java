@@ -19,7 +19,8 @@ import java.util.List;
  *       book (bid, ask, last trade, mark, and whether it is flagged bad);
  *   <li>{@code session.ledger}: events published and stored, the lag between, whether fenced, failures in a row;
  *   <li>{@code session.gateways}: each order gateway link, linked or not and the orders working through it;
- *   <li>{@code session.marketdata}: each market-data stream, whether its book is trusted, and since the last sample its
+ *   <li>{@code session.marketdata}: each market-data stream the session reads, its traded listings' and its data-only
+ *       streams', whether its book is trusted, and since the last sample its
  *       resyncs, records and bytes passed on, shard re-sends dropped, messages refused, records that waited for room
  *       in the ring and for how long (µs), and resubscribes after stalling (-1 where a feed doesn't count one);
  *   <li>{@code session.journal}: segments waiting to ship and how old the oldest is.

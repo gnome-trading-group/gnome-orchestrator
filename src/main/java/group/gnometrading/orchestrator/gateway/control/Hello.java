@@ -4,7 +4,7 @@ import group.gnometrading.schemas.gateway.Mode;
 import group.gnometrading.schemas.gateway.OrderState;
 import java.util.List;
 
-/** A session's hello and its open orders, gathered across pages by {@link HelloPages}. */
+/** A session's hello with its listings and open orders, gathered across pages by {@link HelloPages}. */
 record Hello(
         long sessionSeq,
         String sessionId,

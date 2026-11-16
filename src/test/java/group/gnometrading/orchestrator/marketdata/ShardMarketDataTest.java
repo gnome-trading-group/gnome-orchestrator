@@ -220,6 +220,24 @@ class ShardMarketDataTest {
     }
 
     @Test
+    void theSamplesSeeEveryStreamTheSessionReadsAndTheHeartbeatOnlyItsListings() {
+        final StreamFeed dataOnly = new StreamFeed(STREAM_ID + 1, "stream " + (STREAM_ID + 1));
+        final ShardMarketData both = new ShardMarketData(
+                new NullLogger(),
+                session,
+                "localhost",
+                lease::get,
+                List.of(feed, dataOnly),
+                List.<GatewayHealth>of(feed),
+                new ShardFeedAgent(ring, List.of(feed, dataOnly), clock::get),
+                0,
+                clock::get);
+
+        assertEquals(List.of(feed, dataOnly), both.sampled());
+        assertEquals(List.of(feed), both.health());
+    }
+
+    @Test
     void recordsReachTheStrategyAndAShardsResendsDoNot() throws Exception {
         join();
 

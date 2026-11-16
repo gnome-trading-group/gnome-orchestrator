@@ -56,6 +56,7 @@ import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
 import group.gnometrading.schemas.gateway.SessionGoodbyeEncoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloEncoder;
+import group.gnometrading.schemas.gateway.SessionHelloListingsEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersEncoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeDecoder;
 import group.gnometrading.sm.Exchange;
@@ -435,6 +436,29 @@ class GatewayControlTest {
         assertTrue(welcomes().isEmpty(), "not before the last page");
         helloOrders(1, true);
         assertAccepted(awaitWelcome());
+    }
+
+    @Test
+    void listingsSentInPagesAfterTheHelloAreItsListingsOnceEveryPageIsIn() throws Exception {
+        awaitReady();
+        hello(0, 2, false);
+        helloListings(0, false, new long[] {EXCHANGE_ID, SECURITY_ID});
+        runFor(100);
+        assertTrue(welcomes().isEmpty(), "not before the last page");
+        helloOrders(0, true);
+
+        assertAccepted(awaitWelcome());
+        assertEquals(List.of(LISTING_ID), this.account.loads, "the paged listing, as one in the hello would be");
+    }
+
+    @Test
+    void aHelloWhoseListingPagesNeverArriveIsNotAccepted() throws Exception {
+        awaitReady();
+        hello(0, 1, false);
+        runFor(200);
+
+        assertTrue(welcomes().isEmpty());
+        assertTrue(this.account.loads.isEmpty());
     }
 
     @Test
@@ -939,6 +963,12 @@ class GatewayControlTest {
     }
 
     private void hello(final long lastReportSeq, final int pages) throws InterruptedException {
+        hello(lastReportSeq, pages, true);
+    }
+
+    /** With {@code listingInline} false the hello names no listing: it follows in a listing page. */
+    private void hello(final long lastReportSeq, final int pages, final boolean listingInline)
+            throws InterruptedException {
         final UnsafeBuffer buffer = new UnsafeBuffer(new byte[512]);
         final SessionHelloEncoder hello = new SessionHelloEncoder()
                 .wrapAndApplyHeader(buffer, 0, new MessageHeaderEncoder())
@@ -957,8 +987,27 @@ class GatewayControlTest {
                 .openOrderPages(pages)
                 .maxOpenOrders(30)
                 .maxNewPerSecond(5);
-        hello.listingsCount(1).next().exchangeId(EXCHANGE_ID).securityId(SECURITY_ID);
+        if (listingInline) {
+            hello.listingsCount(1).next().exchangeId(EXCHANGE_ID).securityId(SECURITY_ID);
+        } else {
+            hello.listingsCount(0);
+        }
         offer(buffer, MessageHeaderEncoder.ENCODED_LENGTH + hello.encodedLength());
+    }
+
+    private void helloListings(final int page, final boolean last, final long[]... listings)
+            throws InterruptedException {
+        final UnsafeBuffer buffer = new UnsafeBuffer(new byte[1024]);
+        final SessionHelloListingsEncoder pageEncoder = new SessionHelloListingsEncoder()
+                .wrapAndApplyHeader(buffer, 0, new MessageHeaderEncoder())
+                .sessionSeq(SLOT)
+                .page(page)
+                .last((short) (last ? 1 : 0));
+        final SessionHelloListingsEncoder.ListingsEncoder entries = pageEncoder.listingsCount(listings.length);
+        for (final long[] listing : listings) {
+            entries.next().exchangeId((int) listing[0]).securityId(listing[1]);
+        }
+        offer(buffer, MessageHeaderEncoder.ENCODED_LENGTH + pageEncoder.encodedLength());
     }
 
     private void helloOrders(final int page, final boolean last, final long[]... held) throws InterruptedException {

@@ -29,6 +29,7 @@ import group.gnometrading.schemas.SbeMessage;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TriggerKind;
 import group.gnometrading.schemas.gateway.GatewayHeartbeatEncoder;
+import group.gnometrading.schemas.gateway.GatewayMessageLimits;
 import group.gnometrading.schemas.gateway.GatewayState;
 import group.gnometrading.schemas.gateway.GoodbyeReason;
 import group.gnometrading.schemas.gateway.HelloRefusal;
@@ -44,6 +45,7 @@ import group.gnometrading.schemas.gateway.RequestClass;
 import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloDecoder;
+import group.gnometrading.schemas.gateway.SessionHelloListingsDecoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersDecoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeEncoder;
 import group.gnometrading.schemas.gateway.TimingOutcome;
@@ -59,6 +61,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.stream.LongStream;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
@@ -97,23 +100,10 @@ class GatewayClientTest {
         report.buffer.putBytes(0, buffer, 0, length);
         this.omsReports.add(report);
     });
-    private final GatewayLink link = new GatewayLink(
-            "live:kalshi:main", EXCHANGE_ID, 5, List.<long[]>of(new long[] {EXCHANGE_ID, SECURITY_ID}), 64);
-    private final GatewayClient client = new GatewayClient(
-            List.of(this.link),
-            this.omsOrders,
-            this.toOms,
-            new GatewayClient.Identity(SLOT, "0d3c3b4e-5c55-4a3f-9d1c-3a1f2b7c9e10", STRATEGY_ID, 5_000, 2_000),
-            64,
-            System::nanoTime,
-            new SystemEpochNanoClock());
-    private final GatewayLinks links = new GatewayLinks(
-            new NullLogger(),
-            this.sessionAeron.aeron(),
-            "127.0.0.1",
-            List.of(this.link),
-            key -> new GatewayLinks.Endpoint("127.0.0.1", this.resolvedPort),
-            System::nanoTime);
+    // Rebuilt by a test that needs the session to trade other listings (see withListings).
+    private GatewayLink link = newLink(List.<long[]>of(new long[] {EXCHANGE_ID, SECURITY_ID}));
+    private GatewayClient client = newClient();
+    private GatewayLinks links = newLinks();
     private final List<UnsafeBuffer> atGateway = new ArrayList<>();
     private final SystemEpochNanoClock wall = new SystemEpochNanoClock();
     private final List<Long> journaledTimings = new ArrayList<>();
@@ -232,6 +222,43 @@ class GatewayClientTest {
         }
         orders.sort(String::compareTo);
         assertEquals(List.of("1 NEW", "2 PENDING_NEW"), orders);
+    }
+
+    @Test
+    void listingsTooManyForTheHelloFollowItInPagesThatEachFitASlot() throws Exception {
+        withListings(400);
+        connect();
+
+        await(() -> received(SessionHelloListingsDecoder.TEMPLATE_ID).size() == 3, "the listings' pages");
+        final SessionHelloDecoder hello =
+                decode(received(SessionHelloDecoder.TEMPLATE_ID).get(0), new SessionHelloDecoder());
+        assertEquals(0, hello.listings().count(), "named in the pages instead");
+        assertEquals(3, hello.openOrderPages(), "3 pages of listings, no open orders");
+        final List<Long> named = new ArrayList<>();
+        final List<UnsafeBuffer> pages = received(SessionHelloListingsDecoder.TEMPLATE_ID);
+        for (int i = 0; i < pages.size(); i++) {
+            assertTrue(pages.get(i).capacity() <= GatewayMessageLimits.MAX_MESSAGE_SIZE, "fits a ring slot");
+            final SessionHelloListingsDecoder page = decode(pages.get(i), new SessionHelloListingsDecoder());
+            assertEquals(i, page.page());
+            assertEquals(i == pages.size() - 1 ? 1 : 0, page.last());
+            for (final SessionHelloListingsDecoder.ListingsDecoder listing : page.listings()) {
+                assertEquals(EXCHANGE_ID, listing.exchangeId());
+                named.add(listing.securityId());
+            }
+        }
+        assertEquals(LongStream.rangeClosed(1, 400).boxed().toList(), named);
+    }
+
+    @Test
+    void asManyListingsAsTheHelloHoldsStayInIt() throws Exception {
+        withListings(GatewayMessageLimits.MAX_HELLO_LISTINGS);
+        connect();
+
+        final SessionHelloDecoder hello =
+                decode(received(SessionHelloDecoder.TEMPLATE_ID).get(0), new SessionHelloDecoder());
+        assertEquals(GatewayMessageLimits.MAX_HELLO_LISTINGS, hello.listings().count());
+        assertEquals(0, hello.openOrderPages());
+        assertTrue(received(SessionHelloListingsDecoder.TEMPLATE_ID).isEmpty());
     }
 
     @Test
@@ -616,6 +643,43 @@ class GatewayClientTest {
     }
 
     // ----- plumbing -----
+
+    private static GatewayLink newLink(final List<long[]> listings) {
+        return new GatewayLink("live:kalshi:main", EXCHANGE_ID, 5, listings, 64);
+    }
+
+    private GatewayClient newClient() {
+        return new GatewayClient(
+                List.of(this.link),
+                this.omsOrders,
+                this.toOms,
+                new GatewayClient.Identity(SLOT, "0d3c3b4e-5c55-4a3f-9d1c-3a1f2b7c9e10", STRATEGY_ID, 5_000, 2_000),
+                64,
+                System::nanoTime,
+                new SystemEpochNanoClock());
+    }
+
+    private GatewayLinks newLinks() {
+        return new GatewayLinks(
+                new NullLogger(),
+                this.sessionAeron.aeron(),
+                "127.0.0.1",
+                List.of(this.link),
+                key -> new GatewayLinks.Endpoint("127.0.0.1", this.resolvedPort),
+                System::nanoTime);
+    }
+
+    /** The session trades {@code count} listings of the exchange, security ids 1 to {@code count}. */
+    private void withListings(final int count) throws Exception {
+        this.links.close();
+        final List<long[]> listings = new ArrayList<>();
+        for (int i = 1; i <= count; i++) {
+            listings.add(new long[] {EXCHANGE_ID, i});
+        }
+        this.link = newLink(listings);
+        this.client = newClient();
+        this.links = newLinks();
+    }
 
     private List<UnsafeBuffer> received(final int templateId) {
         return this.atGateway.stream()

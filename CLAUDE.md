@@ -160,7 +160,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     through `core/OrderTimings` on one `TimingMessage` ring, egress journals them and holds up to 256 per session, past
     which they are dropped (`gateway.transport`'s `timingsDropped`). Older sessions ignore them;
     `GatewayControl` checks hellos against the registry (`SessionRegistry`, a 10-minute fallback cache), loads the
-    listings they name, opens reply publications, sends the welcome and replay, cancels a silent or deaf session's
+    listings they name (in the hello up to `GatewayMessageLimits.MAX_HELLO_LISTINGS`, 128; past that every listing
+    follows in `SessionHelloListings` pages before the open orders' pages, `HelloPages` gathering both, since every
+    gateway message must fit a 1 KB ring slot and one Aeron frame), opens reply publications, sends the welcome and replay, cancels a silent or deaf session's
     orders (lane `CANCEL_SESSION`) and asks it to hello again, evicts a session that sends something unreadable
     (refused 5 min), keeps the state (STARTING/READY/DEGRADED) and writes `order-gateway#<key>` to `service-endpoints`
     every 15 s and at once on a change of state (sessions link only to one it calls READY or DEGRADED). Once a minute

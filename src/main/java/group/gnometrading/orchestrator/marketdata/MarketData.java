@@ -13,6 +13,14 @@ public interface MarketData extends AutoCloseable {
     /** One entry per listing; filled once it has started. */
     List<GatewayHealth> health();
 
+    /**
+     * Every stream it reads, the traded listings' first, for the process's samples; the heartbeat (and the alerts on
+     * it) keeps to {@link #health}, the listings traded.
+     */
+    default List<GatewayHealth> sampled() {
+        return health();
+    }
+
     /** The thread delivering it, once started, for the samplers of the process's threads; null before then. */
     GnomeAgentRunner runner();
 }

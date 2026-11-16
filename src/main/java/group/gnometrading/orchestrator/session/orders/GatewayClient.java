@@ -39,6 +39,7 @@ import group.gnometrading.schemas.gateway.SessionGoodbyeDecoder;
 import group.gnometrading.schemas.gateway.SessionGoodbyeEncoder;
 import group.gnometrading.schemas.gateway.SessionHeartbeatEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloEncoder;
+import group.gnometrading.schemas.gateway.SessionHelloListingsEncoder;
 import group.gnometrading.schemas.gateway.SessionHelloOrdersEncoder;
 import group.gnometrading.schemas.gateway.SessionWelcomeDecoder;
 import group.gnometrading.schemas.gateway.VenueQueryEncoder;
@@ -176,6 +177,7 @@ public final class GatewayClient implements AeronPathAgent {
     private final MessageHeaderEncoder headerEncoder = new MessageHeaderEncoder();
     private final SessionHelloEncoder hello = new SessionHelloEncoder();
     private final SessionHelloOrdersEncoder helloOrders = new SessionHelloOrdersEncoder();
+    private final SessionHelloListingsEncoder helloListings = new SessionHelloListingsEncoder();
     private final SessionHeartbeatEncoder heartbeat = new SessionHeartbeatEncoder();
     private final SessionGoodbyeEncoder goodbye = new SessionGoodbyeEncoder();
     private final UnsafeBuffer scratch = new UnsafeBuffer(new byte[MAX_MESSAGE]);
@@ -692,10 +694,16 @@ public final class GatewayClient implements AeronPathAgent {
         if (link.helloPage == 0) {
             collectOrders(link);
         }
-        final int pages = pages();
+        final int listingPages = listingPages(link);
+        final int pages = listingPages + orderPages();
         int sent = 0;
         while (link.helloPage <= pages) {
-            final int length = link.helloPage == 0 ? encodeHello(link, pages) : encodePage(link.helloPage - 1, pages);
+            final boolean last = link.helloPage == pages;
+            final int length = link.helloPage == 0
+                    ? encodeHello(link, pages, listingPages == 0)
+                    : link.helloPage <= listingPages
+                            ? encodeListingsPage(link, link.helloPage - 1, last)
+                            : encodePage(link.helloPage - 1 - listingPages, last);
             if (publication.offer(this.scratch, 0, length) < 0) {
                 return sent;
             }
@@ -719,12 +727,27 @@ public final class GatewayClient implements AeronPathAgent {
         }
     }
 
-    private int pages() {
+    private int orderPages() {
         return (this.helloCount + GatewayMessageLimits.HELLO_ORDERS_PER_PAGE - 1)
                 / GatewayMessageLimits.HELLO_ORDERS_PER_PAGE;
     }
 
-    private int encodeHello(final GatewayLink link, final int pages) {
+    /**
+     * Pages of listings after the hello: none when they all fit in it, else every listing goes in pages and the hello
+     * names none, so the gateway never has to merge the two.
+     */
+    static int listingPages(final int listings) {
+        return listings <= GatewayMessageLimits.MAX_HELLO_LISTINGS
+                ? 0
+                : (listings + GatewayMessageLimits.HELLO_LISTINGS_PER_PAGE - 1)
+                        / GatewayMessageLimits.HELLO_LISTINGS_PER_PAGE;
+    }
+
+    private static int listingPages(final GatewayLink link) {
+        return listingPages(link.listings.size());
+    }
+
+    private int encodeHello(final GatewayLink link, final int pages, final boolean listingsInline) {
         this.hello
                 .wrapAndApplyHeader(this.scratch, 0, this.headerEncoder)
                 .sessionSeq(this.identity.sessionSeq())
@@ -742,20 +765,37 @@ public final class GatewayClient implements AeronPathAgent {
                 .openOrderPages(pages)
                 .maxOpenOrders(this.identity.maxOpenOrders())
                 .maxNewPerSecond(this.identity.maxNewPerSecond());
-        final SessionHelloEncoder.ListingsEncoder listings = this.hello.listingsCount(link.listings.size());
-        for (int i = 0; i < link.listings.size(); i++) {
+        final int count = listingsInline ? link.listings.size() : 0;
+        final SessionHelloEncoder.ListingsEncoder listings = this.hello.listingsCount(count);
+        for (int i = 0; i < count; i++) {
             final long[] listing = link.listings.get(i);
             listings.next().exchangeId((int) listing[0]).securityId(listing[1]);
         }
         return MessageHeaderEncoder.ENCODED_LENGTH + this.hello.encodedLength();
     }
 
-    private int encodePage(final int page, final int pages) {
+    private int encodeListingsPage(final GatewayLink link, final int page, final boolean last) {
+        this.helloListings
+                .wrapAndApplyHeader(this.scratch, 0, this.headerEncoder)
+                .sessionSeq(this.identity.sessionSeq())
+                .page(page)
+                .last((short) (last ? 1 : 0));
+        final int first = page * GatewayMessageLimits.HELLO_LISTINGS_PER_PAGE;
+        final int count = Math.min(GatewayMessageLimits.HELLO_LISTINGS_PER_PAGE, link.listings.size() - first);
+        final SessionHelloListingsEncoder.ListingsEncoder entries = this.helloListings.listingsCount(count);
+        for (int i = first; i < first + count; i++) {
+            final long[] listing = link.listings.get(i);
+            entries.next().exchangeId((int) listing[0]).securityId(listing[1]);
+        }
+        return MessageHeaderEncoder.ENCODED_LENGTH + this.helloListings.encodedLength();
+    }
+
+    private int encodePage(final int page, final boolean last) {
         this.helloOrders
                 .wrapAndApplyHeader(this.scratch, 0, this.headerEncoder)
                 .sessionSeq(this.identity.sessionSeq())
                 .page(page)
-                .last((short) (page == pages - 1 ? 1 : 0));
+                .last((short) (last ? 1 : 0));
         final int first = page * GatewayMessageLimits.HELLO_ORDERS_PER_PAGE;
         final int count = Math.min(GatewayMessageLimits.HELLO_ORDERS_PER_PAGE, this.helloCount - first);
         final SessionHelloOrdersEncoder.OrdersEncoder entries = this.helloOrders.ordersCount(count);

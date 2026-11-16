@@ -551,6 +551,12 @@ public final class ShardMarketData implements MarketData {
         return health;
     }
 
+    /** Every stream a session reads, its data-only streams after its listings'; none when shared. */
+    @Override
+    public List<GatewayHealth> sampled() {
+        return session == null ? List.of() : List.copyOf(session.feeds);
+    }
+
     @Override
     public void close() throws Exception {
         if (control != null) {

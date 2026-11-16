@@ -200,7 +200,7 @@ record SessionAgents(
                 ledgerRing,
                 ledgerAgent,
                 orderGateways,
-                gateways,
+                marketData.sampled(),
                 journal.sealer(),
                 ACTIVITY_INTERVAL_MS);
         RingSampler ringSampler = new RingSampler(
