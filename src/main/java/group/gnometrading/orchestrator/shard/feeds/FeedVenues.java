@@ -7,6 +7,7 @@ import group.gnometrading.gateways.feed.probe.BookProbeClient;
 import group.gnometrading.gateways.transport.WebSocketChannel;
 import group.gnometrading.gateways.venues.hyperliquid.HyperliquidProtocol;
 import group.gnometrading.gateways.venues.hyperliquid.HyperliquidVenue;
+import group.gnometrading.gateways.venues.kalshi.KalshiAuthSigner;
 import group.gnometrading.gateways.venues.kalshi.KalshiBookProbe;
 import group.gnometrading.gateways.venues.kalshi.KalshiProtocol;
 import group.gnometrading.gateways.venues.kalshi.KalshiVenue;
@@ -108,8 +109,7 @@ public final class FeedVenues {
                         return new KalshiProtocol(
                                 context.logger(),
                                 table,
-                                credentials.apiKey(),
-                                credentials.privateKey(),
+                                new KalshiAuthSigner(credentials.apiKey(), credentials.privateKey()),
                                 context.clock());
                     },
                     (http, properties) -> new KalshiBookProbe(http, hostOf(properties, "kalshi.api.url"))));

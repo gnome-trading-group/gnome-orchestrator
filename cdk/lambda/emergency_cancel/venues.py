@@ -16,8 +16,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519, padding
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 # Some venues sit behind Cloudflare, which refuses the default Python agent.
 USER_AGENT = "gnome-emergency-cancel/1"
@@ -122,8 +122,8 @@ def _try(cancel_one, seconds_left):
 
 
 class Kalshi:
-    """Kalshi: Ed25519 or RSA-PSS (SHA-256, 32-byte salt), by the key, over timestamp millis + METHOD + path without its
-    query. Kalshi verifies with whichever kind of public key the account registered."""
+    """Kalshi: Ed25519 over timestamp millis + METHOD + path without its query. Accounts hold Ed25519 keys only, as the
+    gateway signs with nothing else."""
 
     ORDERS_PATH = "/trade-api/v2/portfolio/orders"
     CANCEL_PATH = "/trade-api/v2/portfolio/events/orders/"
@@ -132,19 +132,13 @@ class Kalshi:
     def __init__(self, credentials: dict, base_url: str):
         self.api_key = credentials["apiKey"]
         self.private_key = serialization.load_pem_private_key(credentials["privateKey"].encode(), password=None)
+        if not isinstance(self.private_key, ed25519.Ed25519PrivateKey):
+            raise VenueError("Kalshi private key must be Ed25519")
         self.http = Http(base_url)
 
     def headers(self, method: str, path: str) -> dict:
         timestamp = str(int(time.time() * 1000))
-        message = (timestamp + method + path.split("?")[0]).encode()
-        if isinstance(self.private_key, ed25519.Ed25519PrivateKey):
-            signature = self.private_key.sign(message)
-        else:
-            signature = self.private_key.sign(
-                message,
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-                hashes.SHA256(),
-            )
+        signature = self.private_key.sign((timestamp + method + path.split("?")[0]).encode())
         return {
             "KALSHI-ACCESS-KEY": self.api_key,
             "KALSHI-ACCESS-TIMESTAMP": timestamp,

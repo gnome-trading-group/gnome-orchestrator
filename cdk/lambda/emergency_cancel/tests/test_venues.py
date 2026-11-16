@@ -12,8 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -67,11 +67,9 @@ class FakeVenue:
 
 # ----- Kalshi -----
 
-@pytest.fixture(params=["rsa", "ed25519"])
-def kalshi_key(request):
-    if request.param == "ed25519":
-        return ed25519.Ed25519PrivateKey.generate()
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+@pytest.fixture
+def kalshi_key():
+    return ed25519.Ed25519PrivateKey.generate()
 
 
 def kalshi_venue(key, resting):
@@ -79,16 +77,7 @@ def kalshi_venue(key, resting):
 
     def route(method, path, headers, body):
         signed = headers["KALSHI-ACCESS-TIMESTAMP"] + method + urlparse(path).path
-        signature = base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"])
-        if isinstance(public, ed25519.Ed25519PublicKey):
-            public.verify(signature, signed.encode())
-        else:
-            public.verify(
-                signature,
-                signed.encode(),
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
-                hashes.SHA256(),
-            )
+        public.verify(base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"]), signed.encode())
         url = urlparse(path)
         if method == "GET" and url.path == Kalshi.ORDERS_PATH:
             query = parse_qs(url.query)
@@ -121,6 +110,13 @@ def test_kalshi_cancels_every_resting_order_across_pages(kalshi_key):
         assert client.list_open() == []
     finally:
         venue.close()
+
+
+def test_kalshi_refuses_an_rsa_key():
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    with pytest.raises(VenueError):
+        Kalshi({"apiKey": "k", "privateKey": pem(key)}, "http://127.0.0.1:1")
 
 
 def test_kalshi_waits_out_a_rate_limit(kalshi_key):

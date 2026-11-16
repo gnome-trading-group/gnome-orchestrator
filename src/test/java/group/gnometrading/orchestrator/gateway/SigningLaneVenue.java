@@ -21,9 +21,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.function.ToIntFunction;
 
 /**
- * A test venue whose every request is signed as Kalshi's are (RSA-PSS over the timestamp, method and path, on the
+ * A test venue whose every request is signed as Kalshi's are (Ed25519 over the timestamp, method and path, on the
  * lane's thread, its three headers added), so a load test's lane pays a live Kalshi lane's per-request cost. The key is
- * made at start, 2048 bits as Kalshi's are, and thrown away: the venue never checks it.
+ * made at start and thrown away: the venue never checks it.
  */
 public final class SigningLaneVenue implements LaneVenue<String> {
 
@@ -37,8 +37,7 @@ public final class SigningLaneVenue implements LaneVenue<String> {
     public SigningLaneVenue(final LaneVenue<String> venue) {
         this.venue = venue;
         try {
-            final KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-            generator.initialize(2048);
+            final KeyPairGenerator generator = KeyPairGenerator.getInstance("Ed25519");
             this.signer = new KalshiAuthSigner(
                     "load-test-key", generator.generateKeyPair().getPrivate());
         } catch (NoSuchAlgorithmException | IOException e) {

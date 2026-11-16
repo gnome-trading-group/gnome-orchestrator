@@ -6,8 +6,6 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
 import java.security.Signature;
-import java.security.spec.MGF1ParameterSpec;
-import java.security.spec.PSSParameterSpec;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -77,8 +75,7 @@ public final class KalshiConnectionLimitCheck {
     private static WebSocket connect(final HttpClient http, final URI url, final KalshiCredentials key)
             throws Exception {
         final String timestamp = Long.toString(System.currentTimeMillis());
-        final Signature signature = Signature.getInstance("RSASSA-PSS");
-        signature.setParameter(new PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1));
+        final Signature signature = Signature.getInstance("Ed25519");
         signature.initSign(key.privateKey());
         signature.update((timestamp + "GET" + PATH).getBytes(StandardCharsets.UTF_8));
         return http.newWebSocketBuilder()

@@ -82,7 +82,7 @@ class VenueAccountsTest {
 
     private static String kalshiSecret() {
         try {
-            final byte[] key = KeyPairGenerator.getInstance("RSA")
+            final byte[] key = KeyPairGenerator.getInstance("Ed25519")
                     .generateKeyPair()
                     .getPrivate()
                     .getEncoded();
