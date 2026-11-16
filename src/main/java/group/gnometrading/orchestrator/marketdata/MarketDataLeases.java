@@ -2,6 +2,7 @@ package group.gnometrading.orchestrator.marketdata;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import group.gnometrading.resources.Properties;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -51,6 +52,19 @@ public final class MarketDataLeases {
             }
             return null;
         }
+    }
+
+    /**
+     * The one shard {@code market.data.local.shard} names ({@code host:port}), or null when it names none (its default
+     * is empty).
+     */
+    public static String localShard(final Properties properties) {
+        if (!properties.hasProperty("market.data.local.shard")) {
+            return null;
+        }
+        final String shard =
+                properties.getStringProperty("market.data.local.shard").trim();
+        return shard.isEmpty() ? null : shard;
     }
 
     /**

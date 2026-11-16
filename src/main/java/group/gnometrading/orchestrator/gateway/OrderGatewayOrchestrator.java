@@ -474,8 +474,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 }
             };
         }
-        if (properties.hasProperty("market.data.local.shard")) {
-            final String shard = properties.getStringProperty("market.data.local.shard");
+        final String shard = MarketDataLeases.localShard(properties);
+        if (shard != null) {
             return new SimulatedAccount.Streams() {
                 @Override
                 public void addSession(final String sessionId, final int[] streamIds) {

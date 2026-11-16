@@ -51,7 +51,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
   accounts) and `journal/SessionJournal`.
 - `session/marketdata/`: `SessionMarketData` wires the shared `marketdata/` reader for a session. Every session reads its streams from shards, live ones from on-demand PRODUCTION shards,
   paper ones from RESEARCH shards. The launcher leases them (`MARKET_DATA_API_URL` set); a local run names one shard
-  instead (`market.data.local.shard`, `MarketDataLeases.local`); a session with neither fails at start. A shard outage
+  instead (`market.data.local.shard`, `MarketDataLeases.local`; empty by default). When set it wins over the lease,
+  so a launched session can be fed by a load-test shard (`overrides.market.data.local.shard`); a session with
+  neither fails at start. A shard outage
   marks the book bad and the OMS refuses orders on it; the session doesn't exit. `ShardFeedAgent` (HOT_PATH) is the only writer of the journaled strategy buffer and of which subscription
   each stream reads; `ShardMarketData`'s control thread makes and closes subscriptions (they block on the driver),
   waits up to `market.data.start.timeout.seconds` for the lease to be live, polls it every 10 s, follows moves (switch
@@ -408,8 +410,9 @@ registry launcher reads `platform.orchestrator` from gnome-strategies' `strategi
 downloads that jar from GitHub Packages at boot. A release reaches sessions only through a commit that pins it. SSM
 `/gnome/orchestrator/latest-version` (written by StorageStack only for non-SNAPSHOT releases) is for gateways and
 collectors. Property keys and defaults per release are in
-`/gnome/orchestrator/properties/latest` and `/gnome/orchestrator/properties/<version>`. AMIs (`16core`, `32core`,
-`48core`, `standard`) rebuild only when `ami/` content changes; `AmiPublisher` writes `/gnome/orchestrator/ami/<variant>`
+`/gnome/orchestrator/properties/latest` and `/gnome/orchestrator/properties/<version>`. AMIs (`8core`, `16core` for
+c7i; `4core-nosmt`, `8core-nosmt` for c7a, one thread per core; `standard`; the registry
+launcher maps each instance type to its variant) rebuild only when `ami/` content changes; `AmiPublisher` writes `/gnome/orchestrator/ami/<variant>`
 per region after image tests pass. Roll back an AMI by repointing that parameter (images kept 14 days).
 Collectors pull the same jar (latest unless pinned) into the gnome-market-data collector image.
 

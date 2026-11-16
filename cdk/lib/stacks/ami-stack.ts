@@ -27,13 +27,16 @@ const AMI_DIR = join(__dirname, '..', '..', '..', 'ami');
 interface Variant {
   name: string;
   // Only low-latency variants isolate cores; undefined builds the untuned image for the standard profile.
-  vcpus?: number;
+  isolated?: string;
 }
 
+// `<vcpus>core` for sizes with two hardware threads per core (c7i), `<vcpus>core-nosmt` for one (c7a). The launcher
+// picks the variant by instance type (gnome-registry strategy-session-launcher.ts).
 const VARIANTS: Variant[] = [
-  { name: '16core', vcpus: 16 },
-  { name: '32core', vcpus: 32 },
-  { name: '48core', vcpus: 48 },
+  { name: '8core', isolated: isolatedCpus(8) },
+  { name: '16core', isolated: isolatedCpus(16) },
+  { name: '4core-nosmt', isolated: isolatedCpusNoSmt(4) },
+  { name: '8core-nosmt', isolated: isolatedCpusNoSmt(8) },
   { name: 'standard' },
 ];
 
@@ -45,6 +48,16 @@ const VARIANTS: Variant[] = [
 export function isolatedCpus(vcpus: number): string {
   const cores = vcpus / 2;
   return `2-${cores - 1},${cores + 2}-${vcpus - 1}`;
+}
+
+/**
+ * CPUs isolated on a size with one hardware thread per core (c7a), where every vCPU is a physical core. Housekeeping
+ * keeps cores 0 and 1, or only core 0 on a 4-core size, which then has three cores for the four hot agents (the
+ * fourth backs off on core 0).
+ */
+export function isolatedCpusNoSmt(vcpus: number): string {
+  const housekeeping = vcpus <= 4 ? 1 : 2;
+  return `${housekeeping}-${vcpus - 1}`;
 }
 
 interface Props extends cdk.StackProps {
@@ -184,8 +197,8 @@ export class AmiStack extends cdk.Stack {
         { componentArn: runtime.attrArn }, { componentArn: shipper.attrArn }, { componentArn: clock.attrArn },
       ];
       const componentVersions = [runtime.version, shipper.version, clock.version];
-      if (variant.vcpus) {
-        const isolated = isolatedCpus(variant.vcpus);
+      if (variant.isolated) {
+        const isolated = variant.isolated;
         const tuning = this.component(`kernel-tuning-${variant.name}`, `Isolate CPUs ${isolated}`, [
           ['TuneKernel', `ISOLATED='${isolated}'\n${readAmiFile('scripts/tune-kernel.sh')}`],
           ['InstallGovernor', [

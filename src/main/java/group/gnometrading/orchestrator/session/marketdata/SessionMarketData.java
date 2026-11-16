@@ -97,10 +97,17 @@ public final class SessionMarketData {
     }
 
     /**
-     * Where the session's streams are published: its lease from the market-data API (the launcher leased them), or for
-     * a local run, {@code market.data.local.shard} ({@code host:port}), one shard publishing them all.
+     * Where the session's streams are published: {@code market.data.local.shard} ({@code host:port}) when set, one shard
+     * publishing them all, else its lease from the market-data API (the launcher leased them). The local shard wins
+     * over a lease so a launched session can be fed by a load-test shard (a launch override) on a real instance.
      */
     private static ShardMarketData.LeaseSource leaseSource(Properties properties, List<StreamFeed> feeds) {
+        String localShard = MarketDataLeases.localShard(properties);
+        if (localShard != null) {
+            MarketDataLeases.Lease lease = MarketDataLeases.local(
+                    localShard, feeds.stream().mapToInt(feed -> feed.streamId).toArray());
+            return () -> lease;
+        }
         if (properties.hasProperty("session.id") && properties.hasProperty("market.data.api.url")) {
             String sessionId = properties.getStringProperty("session.id");
             MarketDataLeases client = new MarketDataLeases(
@@ -109,12 +116,6 @@ public final class SessionMarketData {
                     MarketDataLeases.ApiKey.fromSecret(properties.getStringProperty("market.data.api.key.secret")),
                     MAPPER);
             return () -> client.get(sessionId);
-        }
-        if (properties.hasProperty("market.data.local.shard")) {
-            MarketDataLeases.Lease lease = MarketDataLeases.local(
-                    properties.getStringProperty("market.data.local.shard"),
-                    feeds.stream().mapToInt(feed -> feed.streamId).toArray());
-            return () -> lease;
         }
         throw new IllegalArgumentException("The session's market data comes from shards: it needs a lease (session.id"
                 + " and market.data.api.url, set by the launcher) or market.data.local.shard for a local run");

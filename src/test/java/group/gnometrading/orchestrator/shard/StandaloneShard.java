@@ -12,6 +12,7 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.md.Source;
 import group.gnometrading.metrics.CounterSampler;
 import group.gnometrading.metrics.SampleBuffer;
+import group.gnometrading.networking.websockets.WebSocketClientBuilder;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
 import group.gnometrading.orchestrator.aeron.AeronPathIdle;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
@@ -43,11 +44,16 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sequencer.StreamRecordEventAdapter;
 import group.gnometrading.utils.CauseChain;
 import group.gnometrading.utils.SampledEpochNanoClock;
+import io.aeron.Aeron;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -80,13 +86,21 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
  *
  * <ul>
  *   <li>{@code --standalone.streams=1,2,3} (required), {@code --standalone.minutes=60}, {@code --standalone.out=<file>}
+ *   <li>{@code --standalone.streams=@<file>} reads the list from a file instead (an ECS override holds 8 KB at most),
+ *       and {@code --standalone.collect=<n>} keeps its first {@code n}
+ *   <li>{@code --standalone.publish=<n>}: publish only the first {@code n} streams, as a shard publishes only those
+ *       sessions lease (default all, so a probe can read every one)
  *   <li>{@code --standalone.account=<label>}: the market-data account every source signs in with (default
  *       {@value MarketDataCredentials#DEFAULT_LABEL})
  *   <li>Unpinned by default, as shards run. {@code --latency.profile=low_latency --cpu.affinity.enabled=true
  *       --cpu.isolated=1 --cpu.housekeeping=0 --market.data.idle.max.park.micros=50} gives hot agents a core of their
  *       own, with the shard's Aeron parks. Readers block either way, as a shard's do.
- *   <li>{@code --standalone.aeron=standard|latency}: the media driver's {@link AeronProfile} (default standard, as
- *       shards run)
+ *   <li>{@code --standalone.aeron=standard|latency|invoker}: the media driver's {@link AeronProfile} (default
+ *       standard, as shards run), or {@code invoker}: no driver threads, the publisher's thread runs it
+ *       ({@link InvokedAeron})
+ *   <li>{@code --kalshi.ws.url=ws://<host>:<port>/trade-api/ws/v2} reads Kalshi from a {@link KalshiTestVenue}. A plain
+ *       {@code ws://} URL gets a plain socket, and the book prober doesn't run: its REST fetches from the real venue
+ *       would find every stand-in book wrong.
  * </ul>
  */
 public final class StandaloneShard extends Orchestrator {
@@ -142,7 +156,10 @@ public final class StandaloneShard extends Orchestrator {
         }
         final SchedulingLatencyProbe latencyProbe = SchedulingLatencyProbe.start(TimeUnit.MILLISECONDS.toNanos(1));
 
-        final int[] streamIds = streamIds(properties.getStringProperty("standalone.streams"));
+        final int[] listed = streamIds(listOrFile(properties.getStringProperty("standalone.streams")));
+        final int[] streamIds = properties.hasProperty("standalone.collect")
+                ? Arrays.copyOf(listed, Math.min(listed.length, properties.getIntProperty("standalone.collect")))
+                : listed;
         final String account = properties.hasProperty("standalone.account")
                 ? properties.getStringProperty("standalone.account")
                 : MarketDataCredentials.DEFAULT_LABEL;
@@ -167,15 +184,19 @@ public final class StandaloneShard extends Orchestrator {
         if (privateIp == null) {
             throw new IllegalStateException("No private IP for the probe to reach this shard on");
         }
-        final AeronRuntime aeron = AeronRuntime.launch(
-                "shard",
-                aeronProfile(properties),
-                AeronPathIdle.forShard(properties),
-                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error)));
+        final ErrorHandler aeronErrors =
+                error -> logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron error: %s", CauseChain.of(error));
+        final InvokedAeron invoked = invokesDriver(properties) ? InvokedAeron.launch("shard", aeronErrors) : null;
+        final AeronRuntime runtimeAeron = invoked != null
+                ? null
+                : AeronRuntime.launch(
+                        "shard", aeronProfile(properties), AeronPathIdle.forShard(properties), aeronErrors);
+        final Aeron aeron = invoked != null ? invoked.aeron() : runtimeAeron.aeron();
+        final AutoCloseable aeronCloser = invoked != null ? invoked : runtimeAeron;
         final AtomicReference<ShardRuntime> runtimeRef = new AtomicReference<>();
         final StreamPublisherAgent publisher = new StreamPublisherAgent(
-                StreamPublication.of(aeron.aeron()
-                        .addPublication(AeronChannels.shardPublication(privateIp), AeronStreamIds.SHARD_STATUS)),
+                StreamPublication.of(
+                        aeron.addPublication(AeronChannels.shardPublication(privateIp), AeronStreamIds.SHARD_STATUS)),
                 () -> {
                     final ShardRuntime started = runtimeRef.get();
                     return started == null ? -1 : started.generation();
@@ -197,13 +218,19 @@ public final class StandaloneShard extends Orchestrator {
 
             @Override
             public StreamPublication open(final int streamId) {
-                return StreamPublication.of(aeron.aeron().addPublication(channel, streamId));
+                return StreamPublication.of(aeron.addPublication(channel, streamId));
             }
         };
         final ShardRuntime runtime = new ShardRuntime(
                 logger,
                 securityMaster,
-                fixedAssignment(streamIds, sourceCodes(securityMaster), account),
+                fixedAssignment(
+                        streamIds,
+                        properties.hasProperty("standalone.publish")
+                                ? properties.getIntProperty("standalone.publish")
+                                : streamIds.length,
+                        sourceCodes(securityMaster),
+                        account),
                 feeds,
                 feedSources::ensure,
                 agent,
@@ -217,10 +244,13 @@ public final class StandaloneShard extends Orchestrator {
 
         final GnomeAgentRunner agentRunner = new GnomeAgentRunner(agent, failed(logger, "Collector"));
         GnomeAgentRunner.startOnThread(agentRunner);
-        final GnomeAgentRunner publisherRunner = new GnomeAgentRunner(publisher, failed(logger, "Publisher"));
+        final GnomeAgentRunner publisherRunner = new GnomeAgentRunner(
+                invoked != null ? invoked.onPublisherThread(publisher) : publisher, failed(logger, "Publisher"));
         GnomeAgentRunner.startOnThread(publisherRunner);
         final GnomeAgentRunner proberRunner = new GnomeAgentRunner(prober, failed(logger, "Book probe"));
-        GnomeAgentRunner.startOnThread(proberRunner);
+        if (!readsTestVenue(properties)) {
+            GnomeAgentRunner.startOnThread(proberRunner);
+        }
         final ScheduledExecutorService runtimeThread = DaemonThreads.scheduler("shard-runtime");
         runtimeThread.scheduleWithFixedDelay(
                 () -> runtime.tick(System.nanoTime()), 0, TICK_MILLIS, TimeUnit.MILLISECONDS);
@@ -233,7 +263,7 @@ public final class StandaloneShard extends Orchestrator {
                 new JvmReadings(),
                 ClockReadings.ofThisHost(SystemEpochClock.INSTANCE),
                 latencyProbe,
-                aeron.aeron().countersReader(),
+                aeron.countersReader(),
                 List.of(agentRunner, publisherRunner, proberRunner, rawRunner),
                 properties.getLongProperty("samples.runtime.interval.ms"));
         final CounterSampler agents = new CounterSampler(
@@ -275,7 +305,11 @@ public final class StandaloneShard extends Orchestrator {
             close(logger, publisherRunner, "publisher");
             close(logger, rawRunner, "raw capture");
             uploader.close();
-            aeron.close();
+            try {
+                aeronCloser.close();
+            } catch (Exception error) {
+                logger.logf(LogMessage.UNKNOWN_ERROR, "Aeron didn't close cleanly: %s", CauseChain.of(error));
+            }
         };
     }
 
@@ -301,11 +335,40 @@ public final class StandaloneShard extends Orchestrator {
         stop.run();
     }
 
+    static boolean invokesDriver(final Properties properties) {
+        return properties.hasProperty("standalone.aeron")
+                && properties.getStringProperty("standalone.aeron").equalsIgnoreCase("invoker");
+    }
+
+    static boolean readsTestVenue(final Properties properties) {
+        return properties.hasProperty("kalshi.ws.url")
+                && properties.getStringProperty("kalshi.ws.url").startsWith("ws://");
+    }
+
+    /** A plain socket for a {@code ws://} URL (a {@link KalshiTestVenue}), TLS otherwise, as shards connect. */
+    static final WebSocketFeedOpener.Clients CLIENTS = (uri, readBufferBytes) -> "ws".equalsIgnoreCase(uri.getScheme())
+            ? new WebSocketClientBuilder()
+                    .withURI(uri)
+                    .withReadBufferSize(readBufferBytes)
+                    .build()
+            : WebSocketFeedOpener.Clients.TLS.create(uri, readBufferBytes);
+
     static AeronProfile aeronProfile(final Properties properties) {
         return properties.hasProperty("standalone.aeron")
                 ? AeronProfile.valueOf(
                         properties.getStringProperty("standalone.aeron").toUpperCase(Locale.ROOT))
                 : AeronProfile.STANDARD;
+    }
+
+    static String listOrFile(final String value) {
+        if (!value.startsWith("@")) {
+            return value;
+        }
+        try {
+            return Files.readString(Path.of(value.substring(1)));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     static int[] streamIds(final String list) {
@@ -321,13 +384,19 @@ public final class StandaloneShard extends Orchestrator {
     }
 
     /** Every stream read and published, every source signed in with {@code account}. */
-    static Assignment fixedAssignment(final int[] streamIds, final List<String> sourceCodes, final String account) {
+    static Assignment fixedAssignment(
+            final int[] streamIds, final int published, final List<String> sourceCodes, final String account) {
         final Map<String, String> accounts = new HashMap<>();
         for (String code : sourceCodes) {
             accounts.put(code, account);
         }
         final Assignment.Streams streams = new Assignment.Streams(
-                1, streamIds.clone(), Map.copyOf(accounts), Map.of(), Map.of(), streamIds.clone());
+                1,
+                streamIds.clone(),
+                Map.copyOf(accounts),
+                Map.of(),
+                Map.of(),
+                Arrays.copyOf(streamIds, Math.min(published, streamIds.length)));
         return () -> streams;
     }
 
@@ -360,7 +429,7 @@ public final class StandaloneShard extends Orchestrator {
                         connection,
                         new RawDataCollector(logger, clock, uploader, pool, source, SHARD_ID, connection, DISCARDED),
                         maxFrameBytes),
-                WebSocketFeedOpener.Clients.TLS);
+                CLIENTS);
     }
 
     private static ShardLatency shardLatency(final EpochNanoClock wallClock, final SecurityMaster securityMaster) {

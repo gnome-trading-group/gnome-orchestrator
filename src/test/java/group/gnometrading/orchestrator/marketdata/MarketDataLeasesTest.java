@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import group.gnometrading.resources.Properties;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -143,5 +144,19 @@ class MarketDataLeasesTest {
         IllegalArgumentException error =
                 assertThrows(IllegalArgumentException.class, () -> MarketDataLeases.local("collector", new int[] {6}));
         assertTrue(error.getMessage().contains("host:port"), error.getMessage());
+    }
+
+    @Test
+    void theStagesNameNoLocalShardSoStreamsComeFromLeases() throws Exception {
+        assertNull(MarketDataLeases.localShard(new Properties("orchestrator.prod.properties")));
+        assertNull(MarketDataLeases.localShard(new Properties("orchestrator.dev.properties")));
+    }
+
+    @Test
+    void aLocalShardOverrideIsReadTrimmed() throws Exception {
+        final Properties properties = new Properties(
+                "orchestrator.prod.properties", new String[] {"--market.data.local.shard= 10.0.0.5:40000 "});
+
+        assertEquals("10.0.0.5:40000", MarketDataLeases.localShard(properties));
     }
 }
