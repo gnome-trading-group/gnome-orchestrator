@@ -23,6 +23,7 @@ import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
+import group.gnometrading.schemas.gateway.HelloRefusal;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
@@ -258,6 +259,49 @@ class PaperGatewayInProcessTest {
         assertEquals(30 * P, session.last(2).decoder.fillPrice());
     }
 
+    @Test
+    void aSessionPastThePaperGatewaysBooksIsRefusedUntilAnotherLeaves() throws Exception {
+        final PaperGatewayFixture.Venue venue = venue(EXCHANGE, 2, "venue");
+        final PaperGatewayFixture gateway =
+                PaperGatewayFixture.startFull("paper-full-books", this.ingressPort, venue, 3, 100);
+        this.closing.add(gateway);
+        final TestSession first = session(venue, "session-a", 42, 3, gateway);
+        assertEquals(2, gateway.load().books());
+
+        final TestSession second = sessionOn(venue, "session-b", 43, 4, venue.book(0), venue.book(1));
+        await(
+                () -> second.refused(HelloRefusal.SESSION_CAP),
+                () -> "refused for the gateway's books; " + second.describe());
+        assertEquals(2, gateway.load().books(), "a refused session's books are never built");
+        assertTrue(gateway.minute().refusedForRoom() > 0, "counted for the gateway's minutes");
+
+        first.close();
+        this.closing.remove(first);
+        await(second::ready, () -> "taken once the first left; " + second.describe());
+        assertEquals(2, gateway.load().books());
+    }
+
+    @Test
+    void aSessionWhoseListingsWouldTakeThePaperGatewayPastItsStreamsIsRefusedButOneSharingThemIsTaken()
+            throws Exception {
+        final PaperGatewayFixture.Venue venue = venue(EXCHANGE, 2, "venue");
+        final PaperGatewayFixture gateway =
+                PaperGatewayFixture.startFull("paper-full-streams", this.ingressPort, venue, 100, 1);
+        this.closing.add(gateway);
+        final TestSession first = sessionOn(venue, "session-a", 42, 3, venue.book(0));
+        await(first::ready, () -> "the first welcomed; " + first.describe());
+
+        final TestSession sharing = sessionOn(venue, "session-b", 43, 4, venue.book(0));
+        final TestSession other = sessionOn(venue, "session-c", 44, 5, venue.book(1));
+
+        await(sharing::ready, () -> "a session on a stream already read is taken; " + sharing.describe());
+        await(
+                () -> other.refused(HelloRefusal.SESSION_CAP),
+                () -> "a session on a new stream past the cap is refused; " + other.describe());
+        assertEquals(1, gateway.load().streams());
+        assertEquals(2, gateway.load().books());
+    }
+
     // ----- harness -----
 
     private PaperGatewayFixture.Venue venue(final int exchangeId, final int listings, final String name) {
@@ -302,6 +346,28 @@ class PaperGatewayInProcessTest {
         final TestSession session = new TestSession(sessionId, slot, strategyId, Map.of(link, this.ingressPort));
         this.closing.add(session);
         await(() -> session.ready() && gateway.linked(slot), () -> "welcomed; " + session.describe());
+        return session;
+    }
+
+    /** A paper session on {@code books}, its hello said but not awaited. */
+    private TestSession sessionOn(
+            final PaperGatewayFixture.Venue venue,
+            final String sessionId,
+            final long slot,
+            final int strategyId,
+            final Book... books) {
+        final Set<Integer> listingIds = new java.util.HashSet<>();
+        final List<long[]> listings = new ArrayList<>();
+        for (final Book book : books) {
+            listingIds.add(book.listing().listingId());
+            listings.add(
+                    new long[] {venue.exchangeId(), book.listing().security().securityId()});
+        }
+        venue.register(sessionId, slot, strategyId, listingIds);
+        final GatewayLink link =
+                new GatewayLink("paper:paper" + venue.exchangeId() + ":main", venue.exchangeId(), 0, listings, 64);
+        final TestSession session = new TestSession(sessionId, slot, strategyId, Map.of(link, this.ingressPort));
+        this.closing.add(session);
         return session;
     }
 
@@ -369,6 +435,10 @@ class PaperGatewayInProcessTest {
 
         boolean ready() {
             return this.links.stream().allMatch(link -> link.state == GatewayLink.READY);
+        }
+
+        boolean refused(final HelloRefusal refusal) {
+            return this.links.stream().anyMatch(link -> link.refusal == refusal);
         }
 
         void order(final Book book, final long counter, final Side side, final long price, final long size) {

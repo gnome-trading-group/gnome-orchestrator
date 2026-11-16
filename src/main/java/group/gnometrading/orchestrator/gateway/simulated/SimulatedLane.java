@@ -27,6 +27,8 @@ import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 import org.agrona.collections.Int2ObjectHashMap;
 import org.agrona.collections.Long2LongHashMap;
@@ -95,6 +97,14 @@ final class SimulatedLane implements GnomeAgent {
     // venue's receipt of it: shard to gateway, then the gateway's own queue.
     private volatile long refusedNotReady;
     private volatile long lagMaxNanos;
+    // Counted on its thread and published once a pass, for the gateway's minute: records new to their stream, those of
+    // them later than LATE_NANOS (over 1% of them, the books' lag p99 is past it), and every record taken.
+    private long laggedCount;
+    private long lateCount;
+    private long recordsCount;
+    private final AtomicLong lagged = new AtomicLong();
+    private final AtomicLong late = new AtomicLong();
+    private final AtomicLong recordsTaken = new AtomicLong();
 
     // Measured on the lane's thread for a sampler on another: a record's wait between the shard reader and the books
     // (paper.queue: from the reader's ring stamp), and its whole lag from the venue's receipt (paper.lag, records new
@@ -122,6 +132,9 @@ final class SimulatedLane implements GnomeAgent {
     static final int QUEUE = 203;
 
     static final int LAG = 204;
+
+    /** How late a record may reach the books, after the venue's receipt, before a paper gateway counts as overloaded. */
+    public static final long LATE_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
     // The live lanes' gw.queue code: the same measure.
     static final int COMMAND_QUEUE = 205;
     static final String LATENCY_KIND = "latency.paper";
@@ -205,6 +218,10 @@ final class SimulatedLane implements GnomeAgent {
         this.lastPassNanos = this.now;
         this.counters.add(this.records, polled);
         this.counters.max(this.recordsPerPassPeak, polled);
+        this.recordsCount += polled;
+        this.recordsTaken.lazySet(this.recordsCount);
+        this.lagged.lazySet(this.laggedCount);
+        this.late.lazySet(this.lateCount);
         this.counters.max(this.busyBooksPeak, this.busy.size());
         this.counters.add(this.commandsTakenCount, this.commandsTaken);
         this.counters.set(this.sessionCount, this.sessions.size());
@@ -236,6 +253,21 @@ final class SimulatedLane implements GnomeAgent {
 
     long refusedNotReady() {
         return this.refusedNotReady;
+    }
+
+    /** Records taken since it started, as of its last pass. */
+    long recordsTaken() {
+        return this.recordsTaken.get();
+    }
+
+    /** Records new to their stream since it started, as of its last pass. */
+    long lagged() {
+        return this.lagged.get();
+    }
+
+    /** Of {@link #lagged()}, those later than {@link #LATE_NANOS}. */
+    long late() {
+        return this.late.get();
     }
 
     /** The most a record waited between the shard and the books since the last call. */
@@ -589,6 +621,10 @@ final class SimulatedLane implements GnomeAgent {
             final long lag = this.wallNow - recv;
             if (newest != NO_RECORD) {
                 this.lagLatency.record(0, 0, 0, lag, this.wallNow);
+                this.laggedCount++;
+                if (lag > LATE_NANOS) {
+                    this.lateCount++;
+                }
                 if (lag > this.lagMaxNanos) {
                     this.lagMaxNanos = lag;
                 }

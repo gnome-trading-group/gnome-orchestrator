@@ -37,6 +37,19 @@ public interface AccountLink {
         }
 
         default void removeSession(final long slot) {}
+
+        /**
+         * Whether a paper session new to the account fits beside those it serves, judged before its books are built: a
+         * simulated venue refuses one that would take it past its caps. True where nothing limits it.
+         */
+        default boolean roomFor(final List<Listing> listings) {
+            return true;
+        }
+
+        /** What it holds against its caps, for a refusal's log line; empty where nothing limits it. */
+        default String describeLoad() {
+            return "";
+        }
     }
 
     int accountId();

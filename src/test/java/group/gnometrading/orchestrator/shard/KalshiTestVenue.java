@@ -4,19 +4,30 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -35,8 +46,21 @@ import java.util.regex.Pattern;
  * market subscribed on every connection, so each connection carries its share.
  *
  * <p>Run: {@code java -cp <jar>:<test-classes> group.gnometrading.orchestrator.shard.KalshiTestVenue --port=9000
- * --rate=5000 --trades=0.02}, where {@code rate} is frames a second over all connections and {@code trades} the share
- * of them that are trades. The shard points {@code kalshi.ws.url} at {@code ws://<host>:<port>/trade-api/ws/v2}.
+ * --rate=5000 --trades=0.02}. The shard points {@code kalshi.ws.url} at {@code ws://<host>:<port>/trade-api/ws/v2}.
+ * What it sends ({@link Load}):
+ *
+ * <ul>
+ *   <li>{@code rate}: frames a second over all connections; {@code trades}: the share of them that are trades.
+ *   <li>{@code hot} (tickers, comma-separated) and {@code hot-share}: that share of the rate goes to the hot markets,
+ *       evenly, and the rest evenly to all others, as a few busy markets among many quiet ones.
+ *   <li>{@code burst-ticker}, {@code burst-frames} and {@code burst-every}: every {@code burst-every} seconds, that
+ *       many deltas on that market in one write, on top of the rate, as a sweep through a book arrives.
+ * </ul>
+ *
+ * <p>{@code --control=<file or http(s) URL>} names a file of the same options, one {@code key=value} a line, read again
+ * whenever it changes (checked every second), so a load test steps through loads without dropping the shard's
+ * connections. Its values replace the command line's. A URL (a presigned S3 object, say) lets a driver elsewhere change
+ * the load of a venue in a container.
  */
 public final class KalshiTestVenue {
 
@@ -51,30 +75,150 @@ public final class KalshiTestVenue {
     private static final Pattern TICKERS = Pattern.compile("\"market_tickers\"\\s*:\\s*\\[([^\\]]*)\\]");
     private static final Pattern QUOTED = Pattern.compile("\"([^\"]+)\"");
 
-    private final double framesPerSecond;
-    private final double tradeShare;
+    private volatile Load load;
+    private final Set<Connection> live = ConcurrentHashMap.newKeySet();
     private final AtomicInteger markets = new AtomicInteger();
     private final AtomicInteger connections = new AtomicInteger();
     private final AtomicLong frames = new AtomicLong();
 
+    /** What the venue sends; see the class comment for each option. */
+    record Load(
+            double rate,
+            double trades,
+            Set<String> hot,
+            double hotShare,
+            String burstTicker,
+            int burstFrames,
+            long burstEveryNanos) {
+
+        static Load of(final Map<String, String> options) {
+            final String hot = options.getOrDefault("hot", "").trim();
+            final String burstTicker = options.getOrDefault("burst-ticker", "").trim();
+            return new Load(
+                    Double.parseDouble(options.getOrDefault("rate", "1000")),
+                    Double.parseDouble(options.getOrDefault("trades", "0.02")),
+                    hot.isEmpty() ? Set.of() : Set.copyOf(Arrays.asList(hot.split("\\s*,\\s*"))),
+                    Double.parseDouble(options.getOrDefault("hot-share", "0")),
+                    burstTicker.isEmpty() ? null : burstTicker,
+                    Integer.parseInt(options.getOrDefault("burst-frames", "0")),
+                    Math.round(Double.parseDouble(options.getOrDefault("burst-every", "0")) * 1e9));
+        }
+
+        boolean bursts() {
+            return burstTicker != null && burstFrames > 0 && burstEveryNanos > 0;
+        }
+
+        @Override
+        public String toString() {
+            return String.format(
+                    Locale.ROOT,
+                    "%.0f frames/s, %.0f%% trades, %d hot markets with %.0f%% of the rate, bursts %s",
+                    rate,
+                    trades * 100,
+                    hot.size(),
+                    hotShare * 100,
+                    bursts()
+                            ? burstFrames + " frames on " + burstTicker + " every " + burstEveryNanos / 1e9 + " s"
+                            : "off");
+        }
+    }
+
     KalshiTestVenue(final double framesPerSecond, final double tradeShare) {
-        this.framesPerSecond = framesPerSecond;
-        this.tradeShare = tradeShare;
+        this(new Load(framesPerSecond, tradeShare, Set.of(), 0, null, 0, 0));
+    }
+
+    KalshiTestVenue(final Load load) {
+        this.load = load;
+    }
+
+    void load(final Load load) {
+        this.load = load;
     }
 
     public static void main(final String[] args) throws Exception {
         final Map<String, String> options = options(args);
         final int port = Integer.parseInt(options.getOrDefault("port", "9000"));
-        final KalshiTestVenue venue = new KalshiTestVenue(
-                Double.parseDouble(options.getOrDefault("rate", "1000")),
-                Double.parseDouble(options.getOrDefault("trades", "0.02")));
+        final KalshiTestVenue venue = new KalshiTestVenue(Load.of(options));
         try (ServerSocket server = new ServerSocket()) {
             server.setReuseAddress(true);
             server.bind(new InetSocketAddress(port));
-            System.out.printf(Locale.ROOT, "Kalshi test venue on :%d at %.0f frames/s%n", port, venue.framesPerSecond);
+            System.out.printf(Locale.ROOT, "Kalshi test venue on :%d: %s%n", port, venue.load);
+            if (options.containsKey("control")) {
+                venue.followControl(options.get("control"), options);
+            }
             venue.reportEvery(TimeUnit.SECONDS.toMillis(10));
             venue.serve(server);
         }
+    }
+
+    /**
+     * Reads {@code control} again every second, applying its options over {@code base}'s whenever its text changes. One
+     * that can't be read or parsed is reported and the load kept.
+     */
+    private void followControl(final String control, final Map<String, String> base) {
+        final HttpClient http = HttpClient.newHttpClient();
+        final Thread follower = new Thread(
+                () -> {
+                    String seen = null;
+                    while (true) {
+                        try {
+                            final String text = read(http, control);
+                            if (text != null && !text.equals(seen)) {
+                                seen = text;
+                                final Map<String, String> options = new HashMap<>(base);
+                                options.putAll(control(List.of(text.split("\\R"))));
+                                load = Load.of(options);
+                                System.out.printf(Locale.ROOT, "Load now: %s%n", load);
+                            }
+                        } catch (IOException | UncheckedIOException | IllegalArgumentException e) {
+                            System.out.printf(Locale.ROOT, "Control %s not applied: %s%n", control, e);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                        try {
+                            Thread.sleep(1_000);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                    }
+                },
+                "venue-control");
+        follower.setDaemon(true);
+        follower.start();
+    }
+
+    /** The control's text, or null while there is none. */
+    private static String read(final HttpClient http, final String control) throws IOException, InterruptedException {
+        if (control.startsWith("http://") || control.startsWith("https://")) {
+            final HttpResponse<String> response = http.send(
+                    HttpRequest.newBuilder(URI.create(control))
+                            .timeout(Duration.ofSeconds(5))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 404) {
+                return null;
+            }
+            if (response.statusCode() != 200) {
+                throw new IOException("HTTP " + response.statusCode());
+            }
+            return response.body();
+        }
+        final Path file = Path.of(control);
+        return Files.exists(file) ? Files.readString(file) : null;
+    }
+
+    static Map<String, String> control(final List<String> lines) {
+        final Map<String, String> options = new HashMap<>();
+        for (String line : lines) {
+            final String trimmed = line.trim();
+            final int equals = trimmed.indexOf('=');
+            if (!trimmed.isEmpty() && !trimmed.startsWith("#") && equals > 0) {
+                options.put(
+                        trimmed.substring(0, equals).trim(),
+                        trimmed.substring(equals + 1).trim());
+            }
+        }
+        return options;
     }
 
     /** Accepts connections until the socket closes, each on threads of its own. */
@@ -137,6 +281,14 @@ public final class KalshiTestVenue {
         private final ConcurrentLinkedQueue<String> commands = new ConcurrentLinkedQueue<>();
         private final List<Market> subscribed = new ArrayList<>();
         private final Map<String, Market> byTicker = new HashMap<>();
+        // The subscribed markets split by the load's hot set, redone when either changes.
+        private final List<Market> hotMarkets = new ArrayList<>();
+        private final List<Market> coldMarkets = new ArrayList<>();
+        private Load classified;
+        private boolean subscriptionsChanged = true;
+        // Its hot markets, for the other connections to count them all.
+        private volatile int hotCount;
+        private long nextBurstNanos;
         private final ByteArrayOutputStream out = new ByteArrayOutputStream(1 << 20);
         private final StringBuilder text = new StringBuilder(4096);
         private volatile boolean open = true;
@@ -150,6 +302,7 @@ public final class KalshiTestVenue {
 
         void run() {
             connections.incrementAndGet();
+            live.add(this);
             try {
                 final InputStream in = socket.getInputStream();
                 final OutputStream output = socket.getOutputStream();
@@ -162,6 +315,7 @@ public final class KalshiTestVenue {
                 // The client went away; nothing to tell anyone.
             } finally {
                 open = false;
+                live.remove(this);
                 markets.addAndGet(-subscribed.size());
                 connections.decrementAndGet();
                 try {
@@ -252,7 +406,8 @@ public final class KalshiTestVenue {
 
         private void write(final OutputStream output) throws IOException {
             long last = System.nanoTime();
-            double owed = 0;
+            double owedHot = 0;
+            double owedCold = 0;
             while (open) {
                 LockSupport.parkNanos(TICK_NANOS);
                 String command;
@@ -264,21 +419,27 @@ public final class KalshiTestVenue {
                     }
                 }
                 final long now = System.nanoTime();
+                final Load current = load;
+                classify(current);
                 final int total = markets.get();
                 if (!subscribed.isEmpty() && total > 0) {
-                    owed += framesPerSecond * subscribed.size() / total * (now - last) / 1e9;
-                    final long nowMs = System.currentTimeMillis();
-                    while (owed >= 1) {
-                        owed -= 1;
-                        final Market market = subscribed.get(random.nextInt(subscribed.size()));
-                        if (random.nextDouble() < tradeShare) {
-                            trade(market, nowMs);
-                        } else {
-                            delta(market, nowMs);
-                        }
+                    final int hotTotal = liveHotMarkets();
+                    double hotWeight = 1.0 / total;
+                    double coldWeight = 1.0 / total;
+                    if (hotTotal > 0 && hotTotal < total && current.hotShare() > 0) {
+                        hotWeight = current.hotShare() / hotTotal;
+                        coldWeight = (1 - current.hotShare()) / (total - hotTotal);
                     }
+                    final double seconds = (now - last) / 1e9;
+                    owedHot += current.rate() * hotMarkets.size() * hotWeight * seconds;
+                    owedCold += current.rate() * coldMarkets.size() * coldWeight * seconds;
+                    final long nowMs = System.currentTimeMillis();
+                    owedHot = emit(hotMarkets, owedHot, current, nowMs);
+                    owedCold = emit(coldMarkets, owedCold, current, nowMs);
+                    burst(current, now, nowMs);
                 } else {
-                    owed = 0;
+                    owedHot = 0;
+                    owedCold = 0;
                 }
                 last = now;
                 if (out.size() > 0) {
@@ -287,6 +448,54 @@ public final class KalshiTestVenue {
                     out.reset();
                 }
             }
+        }
+
+        /** Sends the whole frames owed, spread evenly over {@code pool}; returns what is still owed. */
+        private double emit(final List<Market> pool, final double owed, final Load current, final long nowMs) {
+            if (pool.isEmpty()) {
+                return 0;
+            }
+            double left = owed;
+            while (left >= 1) {
+                left -= 1;
+                final Market market = pool.get(random.nextInt(pool.size()));
+                if (random.nextDouble() < current.trades()) {
+                    trade(market, nowMs);
+                } else {
+                    delta(market, nowMs);
+                }
+            }
+            return left;
+        }
+
+        private void burst(final Load current, final long now, final long nowMs) {
+            final Market market = current.bursts() ? byTicker.get(current.burstTicker()) : null;
+            if (market == null) {
+                nextBurstNanos = 0;
+                return;
+            }
+            if (nextBurstNanos == 0) {
+                nextBurstNanos = now + current.burstEveryNanos();
+            } else if (now >= nextBurstNanos) {
+                nextBurstNanos = now + current.burstEveryNanos();
+                for (int i = 0; i < current.burstFrames(); i++) {
+                    delta(market, nowMs);
+                }
+            }
+        }
+
+        private void classify(final Load current) {
+            if (current == classified && !subscriptionsChanged) {
+                return;
+            }
+            classified = current;
+            subscriptionsChanged = false;
+            hotMarkets.clear();
+            coldMarkets.clear();
+            for (Market market : subscribed) {
+                (current.hot().contains(market.ticker) ? hotMarkets : coldMarkets).add(market);
+            }
+            hotCount = hotMarkets.size();
         }
 
         private void command(final String json) {
@@ -313,6 +522,7 @@ public final class KalshiTestVenue {
                         market = new Market(ticker, random);
                         byTicker.put(ticker, market);
                         subscribed.add(market);
+                        subscriptionsChanged = true;
                         markets.incrementAndGet();
                     }
                     snapshot(market, nowMs);
@@ -337,6 +547,7 @@ public final class KalshiTestVenue {
                         final Market market = byTicker.remove(ticker);
                         if (market != null) {
                             subscribed.remove(market);
+                            subscriptionsChanged = true;
                             markets.decrementAndGet();
                         }
                     }
@@ -479,6 +690,14 @@ public final class KalshiTestVenue {
             }
             out.write(payload, 0, payload.length);
         }
+    }
+
+    private int liveHotMarkets() {
+        int hot = 0;
+        for (Connection connection : live) {
+            hot += connection.hotCount;
+        }
+        return hot;
     }
 
     private static List<String> tickers(final String json) {

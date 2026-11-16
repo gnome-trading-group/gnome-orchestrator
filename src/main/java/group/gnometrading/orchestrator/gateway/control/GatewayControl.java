@@ -138,6 +138,11 @@ public final class GatewayControl implements GnomeAgent {
     static final long UNLINKED_KEEP_NANOS = TimeUnit.MINUTES.toNanos(10);
 
     static final long ADVERTISE_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(15);
+
+    // A full paper gateway refuses a waiting session's hello every second; its alert is raised again at most this
+    // often,
+    // and cleared once nothing has been refused for room this long.
+    static final long FULL_ALERT_NANOS = TimeUnit.MINUTES.toNanos(10);
     static final long EVICTION_NANOS = TimeUnit.MINUTES.toNanos(5);
     // A refused session is answered on a publication of its own, kept this long for the answer to get through.
     static final long REFUSAL_LINGER_NANOS = TimeUnit.SECONDS.toNanos(2);
@@ -154,6 +159,9 @@ public final class GatewayControl implements GnomeAgent {
 
     private final Logger logger;
     private final GatewayAlerts alerts;
+    private boolean fullAlerted;
+    private long fullAlertedNanos;
+    private long lastFullRefusalNanos;
     // Written by this thread alone; volatile for the watchdog.
     private volatile long progress;
     private long settleDeadlineNanos;
@@ -364,11 +372,14 @@ public final class GatewayControl implements GnomeAgent {
             return;
         }
         final boolean known = this.sessions.bySlot(hello.sessionSeq()) != null;
+        final List<Listing> named = this.paper ? named(hello) : null;
+        if (noRoom(hello, account, known, named, now)) {
+            return;
+        }
         this.settleDeadlineNanos = now + SETTLE_BUDGET_NANOS;
         final GatewaySession session = sessionFor(hello, account);
         if (this.paper) {
-            account.markets()
-                    .addPaperSession(session.slot, session.sessionId, named(hello), this.lastRecord.simulationJson());
+            account.markets().addPaperSession(session.slot, session.sessionId, named, this.lastRecord.simulationJson());
         } else {
             account.markets().addSession(session.slot, session.sessionId);
         }
@@ -816,6 +827,55 @@ public final class GatewayControl implements GnomeAgent {
     }
 
     /** Answers a refused hello on a publication of its own: the session may hold none of ours. */
+    /** A paper session new to the gateway that would take it past its caps, refused; a returning one never is. */
+    private boolean noRoom(
+            final Hello hello,
+            final AccountLink account,
+            final boolean known,
+            final List<Listing> named,
+            final long now) {
+        if (!this.paper || known || account.markets().roomFor(named)) {
+            return false;
+        }
+        refuseFull(hello, account, now);
+        return true;
+    }
+
+    /**
+     * A paper session the gateway has no room for: refused as an account with no place left is, so it keeps asking
+     * and is taken once sessions leave, and the gateway raises PAPER_GATEWAY_FULL, at most once per
+     * {@link #FULL_ALERT_NANOS} while it keeps refusing.
+     */
+    private void refuseFull(final Hello hello, final AccountLink account, final long now) {
+        this.logger.logf(
+                LogMessage.UNKNOWN_ERROR,
+                "Gateway full: no room for paper session %s (slot %d, %d listings): %s",
+                hello.sessionId(),
+                hello.sessionSeq(),
+                hello.listings().size(),
+                account.markets().describeLoad());
+        this.lastFullRefusalNanos = now;
+        if (!this.fullAlerted || now - this.fullAlertedNanos >= FULL_ALERT_NANOS) {
+            this.fullAlerted = true;
+            this.fullAlertedNanos = now;
+            this.alerts.firing(
+                    "PAPER_GATEWAY_FULL",
+                    "",
+                    "Paper gateway full: refusing new sessions ("
+                            + account.markets().describeLoad() + ")",
+                    Map.of("load", account.markets().describeLoad()));
+        }
+        refuse(hello, HelloRefusal.SESSION_CAP, now);
+    }
+
+    /** Clears PAPER_GATEWAY_FULL once no session has been refused for room in {@link #FULL_ALERT_NANOS}. */
+    private void clearFull(final long now) {
+        if (this.fullAlerted && now - this.lastFullRefusalNanos >= FULL_ALERT_NANOS) {
+            this.fullAlerted = false;
+            this.alerts.resolved("PAPER_GATEWAY_FULL", "");
+        }
+    }
+
     private void refuse(final Hello hello, final HelloRefusal refusal, final long now) {
         this.logger.logf(
                 LogMessage.UNKNOWN_ERROR,
@@ -887,6 +947,7 @@ public final class GatewayControl implements GnomeAgent {
         this.helloPages.expire(now);
         cancelOrphans(now);
         answerRefusals(now);
+        clearFull(now);
         forgetIdleSessions(now);
         closeLingering(now);
         final GatewayState before = this.status.state();

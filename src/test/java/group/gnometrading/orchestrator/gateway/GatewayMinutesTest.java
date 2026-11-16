@@ -106,10 +106,10 @@ class GatewayMinutesTest {
     }
 
     @Test
-    void aPaperGatewaysMinutesCarryItsBooksLag() throws Exception {
+    void aPaperGatewaysMinutesCarryItsBooksLagAndLoad() throws Exception {
         final GatewayMinutes paper =
                 new GatewayMinutes(new NullLogger(), "paper:kalshi:main", "paper", this.written::add, noClock());
-        paper.paper(new SimulatedAccount.Minute(3, 30, 42, 26), 5_000);
+        paper.paper(new SimulatedAccount.Minute(3, 30, 42, 26, 300, 90, 2_400, 0.004, 7), 5_000);
         paper.publish(6_000);
 
         final JsonNode document = MAPPER.readTree(this.written.get(0));
@@ -119,6 +119,11 @@ class GatewayMinutesTest {
         assertEquals(3, minute.get("workingOrders").asInt());
         assertEquals(42, minute.get("lagMaxMs").asLong());
         assertEquals(26, minute.get("refusedNotReady").asLong());
+        assertEquals(300, minute.get("books").asInt());
+        assertEquals(90, minute.get("streams").asInt());
+        assertEquals(2_400, minute.get("recordsPerSecond").asLong());
+        assertEquals(0.004, minute.get("lateShare").asDouble());
+        assertEquals(7, minute.get("refusedForRoom").asLong());
     }
 
     @Test

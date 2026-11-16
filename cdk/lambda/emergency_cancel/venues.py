@@ -122,7 +122,8 @@ def _try(cancel_one, seconds_left):
 
 
 class Kalshi:
-    """Kalshi: RSA-PSS (SHA-256, 32-byte salt) over timestamp millis + METHOD + path without its query."""
+    """Kalshi: Ed25519 or RSA-PSS (SHA-256, 32-byte salt), by the key, over timestamp millis + METHOD + path without its
+    query. Kalshi verifies with whichever kind of public key the account registered."""
 
     ORDERS_PATH = "/trade-api/v2/portfolio/orders"
     CANCEL_PATH = "/trade-api/v2/portfolio/events/orders/"
@@ -135,11 +136,15 @@ class Kalshi:
 
     def headers(self, method: str, path: str) -> dict:
         timestamp = str(int(time.time() * 1000))
-        signature = self.private_key.sign(
-            (timestamp + method + path.split("?")[0]).encode(),
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-            hashes.SHA256(),
-        )
+        message = (timestamp + method + path.split("?")[0]).encode()
+        if isinstance(self.private_key, ed25519.Ed25519PrivateKey):
+            signature = self.private_key.sign(message)
+        else:
+            signature = self.private_key.sign(
+                message,
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+                hashes.SHA256(),
+            )
         return {
             "KALSHI-ACCESS-KEY": self.api_key,
             "KALSHI-ACCESS-TIMESTAMP": timestamp,

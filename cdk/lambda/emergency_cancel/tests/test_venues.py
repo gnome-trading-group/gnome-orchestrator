@@ -67,8 +67,10 @@ class FakeVenue:
 
 # ----- Kalshi -----
 
-@pytest.fixture
-def kalshi_key():
+@pytest.fixture(params=["rsa", "ed25519"])
+def kalshi_key(request):
+    if request.param == "ed25519":
+        return ed25519.Ed25519PrivateKey.generate()
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
@@ -77,12 +79,16 @@ def kalshi_venue(key, resting):
 
     def route(method, path, headers, body):
         signed = headers["KALSHI-ACCESS-TIMESTAMP"] + method + urlparse(path).path
-        public.verify(
-            base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"]),
-            signed.encode(),
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
-            hashes.SHA256(),
-        )
+        signature = base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"])
+        if isinstance(public, ed25519.Ed25519PublicKey):
+            public.verify(signature, signed.encode())
+        else:
+            public.verify(
+                signature,
+                signed.encode(),
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+                hashes.SHA256(),
+            )
         url = urlparse(path)
         if method == "GET" and url.path == Kalshi.ORDERS_PATH:
             query = parse_qs(url.query)

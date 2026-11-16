@@ -26,8 +26,9 @@ const INSTANCE_TYPES = ['c7a.large', 'c7i.large'];
 const PAPER_INSTANCE_TYPE = 'c7a.medium';
 // More than the gateways a region will hold for a while; the start route can start no more than this many at once.
 const MAX_HOSTS = 4;
-// One paper gateway per venue paper-traded from the region.
-const MAX_PAPER_HOSTS = 4;
+// A venue runs as many paper gateways as its sessions need (the registry's paper-instance route starts the next when
+// every one is full, up to 8 a venue), each on a host of its own: room for a few busy venues in a region.
+const MAX_PAPER_HOSTS = 12;
 // Where a gateway keeps what outlives its process: each account's ownership log and the sessions it accepted.
 const STATE_DIRECTORY = '/var/lib/gnome/gateway';
 

@@ -92,6 +92,43 @@ class ServiceEndpointsTest {
     }
 
     @Test
+    void aPaperGatewaysEndpointCarriesItsLoadAgainstItsCapsAndWhenItsProcessStarted() {
+        final ServiceEndpoint paper = new ServiceEndpoint(
+                ServiceEndpoint.Kind.ORDER_GATEWAY,
+                "paper:kalshi:2",
+                "task-3",
+                "us-east-2",
+                "10.144.1.9",
+                40010,
+                "READY",
+                "2.3.0",
+                WRITTEN,
+                40,
+                7,
+                false,
+                false,
+                1_793_000_000_123L,
+                new ServiceEndpoint.PaperLoad(410, 96, 1_850, 800, 150));
+        this.endpoints.put(paper);
+
+        assertEquals("410", this.stored.get().get(ServiceEndpoints.PAPER_BOOKS).n());
+        assertEquals(
+                "150", this.stored.get().get(ServiceEndpoints.PAPER_MAX_STREAMS).n());
+        assertEquals(paper, this.endpoints.get(ServiceEndpoint.Kind.ORDER_GATEWAY, "paper:kalshi:2", WRITTEN));
+    }
+
+    @Test
+    void anEndpointWithoutALoadOrStartReadsBackWithout() {
+        this.endpoints.put(this.shard);
+
+        assertFalse(this.stored.get().containsKey(ServiceEndpoints.PAPER_BOOKS));
+        assertFalse(this.stored.get().containsKey(ServiceEndpoints.STARTED_AT_MS));
+        final ServiceEndpoint read = this.endpoints.get(ServiceEndpoint.Kind.SHARD, "use1-e89064", WRITTEN);
+        assertEquals(0, read.startedAtMs());
+        assertEquals(null, read.paper());
+    }
+
+    @Test
     void aGatewaysRollItemIsReadByItsOwnKeyOrIsEmpty() {
         assertEquals(Map.of(), this.endpoints.roll("live:kalshi:main", Duration.ofSeconds(2)));
         final Map<String, AttributeValue> roll = Map.of(

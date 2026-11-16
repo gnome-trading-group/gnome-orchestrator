@@ -162,13 +162,17 @@ public final class PaperGatewayFixture implements AutoCloseable {
     /**
      * @param limits the venue's order-entry limits, each session getting them whole; null for none
      * @param caps what one session may hold and send
+     * @param maxBooks the most books (session x listing) the gateway takes
+     * @param maxStreams the most distinct streams the gateway takes
      */
     private PaperGatewayFixture(
             final String name,
             final int ingressPort,
             final Venue venue,
             final VenueRateLimits limits,
-            final AccountLane.Caps caps)
+            final AccountLane.Caps caps,
+            final int maxBooks,
+            final int maxStreams)
             throws Exception {
         this.venue = venue;
         this.aeron = AeronRuntime.launch(name, AeronProfile.GATEWAY, Throwable::printStackTrace);
@@ -198,6 +202,7 @@ public final class PaperGatewayFixture implements AutoCloseable {
                 AccountLane.Timing.defaults().maxQueueDelayNanos(),
                 MAX_ORDERS,
                 (sessionId, listing, simulation) -> new SimulatedAccount.Simulated(exchange(), streamOf(listing)),
+                new SimulatedAccount.Capacity(maxBooks, maxStreams, this::streamOf),
                 this.marketData,
                 new SimulatedAccount.Streams() {
                     @Override
@@ -312,7 +317,27 @@ public final class PaperGatewayFixture implements AutoCloseable {
             final VenueRateLimits limits,
             final AccountLane.Caps caps)
             throws Exception {
-        final PaperGatewayFixture gateway = new PaperGatewayFixture(name, ingressPort, venue, limits, caps);
+        return start(name, ingressPort, venue, limits, caps, Integer.MAX_VALUE, Integer.MAX_VALUE);
+    }
+
+    /** Starts a paper gateway for {@code venue} taking at most {@code maxBooks} books on {@code maxStreams} streams. */
+    public static PaperGatewayFixture startFull(
+            final String name, final int ingressPort, final Venue venue, final int maxBooks, final int maxStreams)
+            throws Exception {
+        return start(name, ingressPort, venue, null, AccountLane.Caps.NONE, maxBooks, maxStreams);
+    }
+
+    private static PaperGatewayFixture start(
+            final String name,
+            final int ingressPort,
+            final Venue venue,
+            final VenueRateLimits limits,
+            final AccountLane.Caps caps,
+            final int maxBooks,
+            final int maxStreams)
+            throws Exception {
+        final PaperGatewayFixture gateway =
+                new PaperGatewayFixture(name, ingressPort, venue, limits, caps, maxBooks, maxStreams);
         gateway.resender.scheduleWithFixedDelay(gateway::resend, 20, 20, TimeUnit.MILLISECONDS);
         gateway.account.start();
         gateway.run(gateway.egress);
@@ -333,6 +358,16 @@ public final class PaperGatewayFixture implements AutoCloseable {
             final long[] top = quote.getValue();
             writeQuote(quote.getKey(), top[0], top[1], top[2], top[3]);
         }
+    }
+
+    /** The simulated venue's minute so far. */
+    public SimulatedAccount.Minute minute() {
+        return this.account.takeMinute();
+    }
+
+    /** The gateway's load against its caps. */
+    public SimulatedAccount.Load load() {
+        return this.account.load();
     }
 
     private int streamOf(final Listing listing) {

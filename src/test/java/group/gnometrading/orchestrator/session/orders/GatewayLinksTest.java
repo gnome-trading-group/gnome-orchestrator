@@ -58,6 +58,85 @@ class GatewayLinksTest {
         assertEquals(2, tries[0]);
     }
 
+    @Test
+    void aPaperLinkMovesToTheGatewayChosenForItAndIsWantedThere() {
+        final GatewayLink paper = new GatewayLink("paper:kalshi:main", 2, 0, List.of(new long[] {2, 11}), 8);
+        final List<String> asked = new ArrayList<>();
+        final List<String> resolved = new ArrayList<>();
+        final GatewayLinks choosing = new GatewayLinks(
+                new NullLogger(),
+                null,
+                "127.0.0.1",
+                List.of(paper),
+                key -> {
+                    resolved.add(key);
+                    return null;
+                },
+                this.wanted::add,
+                (link, linkedKey, linkedStartedAtMs) -> {
+                    asked.add(linkedKey + "@" + linkedStartedAtMs);
+                    return "paper:kalshi:2";
+                },
+                () -> this.now);
+
+        choosing.run();
+        this.now = TimeUnit.SECONDS.toNanos(1);
+        choosing.run();
+
+        assertEquals("paper:kalshi:2", paper.gatewayKey);
+        assertEquals(List.of("null@0"), asked, "asked once: not again within ten seconds");
+        assertEquals(List.of("paper:kalshi:2", "paper:kalshi:2"), resolved);
+        assertEquals(List.of("paper:kalshi:main", "paper:kalshi:2"), this.wanted, "wanted under its new key at once");
+    }
+
+    @Test
+    void aPaperLinkThatGoesDownNamesTheGatewayAndProcessThatLastWelcomedIt() {
+        final GatewayLink paper = new GatewayLink("paper:kalshi:2", 2, 0, List.of(new long[] {2, 11}), 8);
+        paper.connectedStartedAtMs = 1_793_000_000_000L;
+        paper.state = GatewayLink.READY;
+        final List<String> asked = new ArrayList<>();
+        final GatewayLinks choosing = new GatewayLinks(
+                new NullLogger(),
+                null,
+                "127.0.0.1",
+                List.of(paper),
+                key -> null,
+                GatewayLinks.Wanting.NONE,
+                (link, linkedKey, linkedStartedAtMs) -> {
+                    asked.add(linkedKey + "@" + linkedStartedAtMs);
+                    return null;
+                },
+                () -> this.now);
+        choosing.run();
+
+        paper.state = GatewayLink.DOWN;
+        this.now = GatewayLinks.CHOOSE_NANOS;
+        choosing.run();
+
+        assertEquals(List.of("paper:kalshi:2@1793000000000"), asked);
+        assertEquals("paper:kalshi:2", paper.gatewayKey, "kept: the chooser named none");
+    }
+
+    @Test
+    void aFailedChoiceKeepsTheKeyItHas() {
+        final GatewayLink paper = new GatewayLink("paper:kalshi:main", 2, 0, List.of(), 8);
+        final GatewayLinks choosing = new GatewayLinks(
+                new NullLogger(),
+                null,
+                "127.0.0.1",
+                List.of(paper),
+                key -> null,
+                GatewayLinks.Wanting.NONE,
+                (link, linkedKey, linkedStartedAtMs) -> {
+                    throw new IllegalStateException("registry down");
+                },
+                () -> this.now);
+
+        choosing.run();
+
+        assertEquals("paper:kalshi:main", paper.gatewayKey);
+    }
+
     private void at(final long nanos) {
         this.now = nanos;
         this.links.run();

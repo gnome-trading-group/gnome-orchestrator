@@ -28,10 +28,15 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.utils.CauseChain;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
+import java.util.function.ToIntFunction;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
 
@@ -95,6 +100,29 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
         };
     }
 
+    /**
+     * The most a paper gateway takes, from what one host was measured to carry: books (a session's listing each,
+     * which hold the heap) and distinct streams (which its shard reader reads every pass). A session new to it that would
+     * take either past its cap is refused before its books are built, so a full gateway never runs out of memory and
+     * drops every session it holds.
+     *
+     * @param streamOf a listing's book stream, 0 if it has none
+     */
+    public record Capacity(int maxBooks, int maxStreams, ToIntFunction<Listing> streamOf) {
+        public static final Capacity UNLIMITED = new Capacity(Integer.MAX_VALUE, Integer.MAX_VALUE, listing -> 0);
+
+        /** A listing's book stream as the security master has it (cached there once read). */
+        public static ToIntFunction<Listing> streamsFrom(final SecurityMaster securityMaster) {
+            return listing -> {
+                final Stream stream = securityMaster.streamForListing(listing.listingId());
+                return stream == null ? 0 : stream.streamId();
+            };
+        }
+    }
+
+    /** What the gateway carries against its caps, for its endpoint item; read from any thread. */
+    public record Load(int books, int streams, long recordsPerSecond, int maxBooks, int maxStreams) {}
+
     /** Where the gateway reads the streams a session's books need, through the session's own lease. */
     public interface Streams {
         void addSession(String sessionId, int[] streamIds);
@@ -107,6 +135,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
     private final String name;
     private final VenueRateLimits limits;
     private final Simulations simulations;
+    private final Capacity capacity;
     private final Streams streams;
     private final LongSupplier nanoClock;
     private final ManyToOneRingBuffer<LaneCommand> commands;
@@ -115,12 +144,27 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
     private final SimulatedLane lane;
     private final ConcurrentHashMap<Long, String> sessionIds = new ConcurrentHashMap<>();
     private final Markets markets = new SimulatedMarkets();
+    // On the control thread, which adds and removes sessions: each session's book streams, and how many of its books
+    // read each stream. Published for other threads as the two counts below.
+    private final Map<Long, int[]> streamsBySlot = new HashMap<>();
+    private final Map<Integer, Integer> booksByStream = new HashMap<>();
+    private volatile int books;
+    private volatile int distinctStreams;
+    // New sessions refused for room since the gateway started; written on the control thread.
+    private volatile long refusedForRoom;
+    // On the thread taking each minute.
+    private long recordsAtMinute;
+    private long lateAtMinute;
+    private long laggedAtMinute;
+    private long minuteStartedNanos;
+    private volatile long recordsPerSecond;
     private GnomeAgentRunner runner;
 
     /**
      * @param limits the venue's order-entry limits, each session getting them whole; null where the venue has no order
      *     entry of ours, so nothing is limited
      * @param simulations builds each session's books
+     * @param capacity the most books and distinct streams it takes
      * @param marketData where the shard reader writes every stream the books read
      */
     @SuppressWarnings("checkstyle:ParameterNumber")
@@ -133,6 +177,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
             final long defaultMaxQueueNanos,
             final int maxOrders,
             final Simulations simulations,
+            final Capacity capacity,
             final SequencedRingBuffer<?> marketData,
             final Streams streams,
             final LongSupplier nanoClock,
@@ -142,6 +187,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
         this.name = name;
         this.limits = limits;
         this.simulations = simulations;
+        this.capacity = capacity;
         this.streams = streams;
         this.nanoClock = nanoClock;
         this.commands = new ManyToOneRingBuffer<>(LaneCommand[]::new, LaneCommand::new, COMMAND_QUEUE);
@@ -156,6 +202,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
                 defaultMaxQueueNanos,
                 nanoClock,
                 wallClock);
+        this.minuteStartedNanos = nanoClock.getAsLong();
     }
 
     /** Where each paper request's timing goes, for its session; set before {@link #start}. */
@@ -216,24 +263,72 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
      *
      * @param lagMaxMillis the oldest new record any book took, from the venue's receipt
      * @param refusedNotReady new orders refused for a book without data, since the gateway started
+     * @param refusedForRoom new sessions refused because they'd take it past its caps, since the gateway started
+     * @param lateShare the share of records new to their stream that reached the books later than
+     *     {@link SimulatedLane#LATE_NANOS} after the venue's receipt: over 1%, the books' lag p99 is past it
      */
-    public record Minute(int workingOrders, int sessions, long lagMaxMillis, long refusedNotReady) {
+    public record Minute(
+            int workingOrders,
+            int sessions,
+            long lagMaxMillis,
+            long refusedNotReady,
+            int books,
+            int streams,
+            long recordsPerSecond,
+            double lateShare,
+            long refusedForRoom) {
         /** As the gateway's minute line gives it. */
         public String describe() {
             return String.format(
-                    "%d orders working, %d sessions, books' worst lag %d ms, %d new orders refused for a book without"
-                            + " data",
-                    this.workingOrders, this.sessions, this.lagMaxMillis, this.refusedNotReady);
+                    "%d orders working, %d sessions, %d books on %d streams, %d records/s, books' worst lag %d ms"
+                            + " (%.2f%% late), %d new orders refused for a book without data, %d sessions refused for"
+                            + " room",
+                    this.workingOrders,
+                    this.sessions,
+                    this.books,
+                    this.streams,
+                    this.recordsPerSecond,
+                    this.lagMaxMillis,
+                    100 * this.lateShare,
+                    this.refusedNotReady,
+                    this.refusedForRoom);
         }
     }
 
     /** What the minute since the last call looked like; once a minute, from one thread. */
     public Minute takeMinute() {
+        final long now = this.nanoClock.getAsLong();
+        final long records = this.lane.recordsTaken();
+        final long late = this.lane.late();
+        final long lagged = this.lane.lagged();
+        final long elapsedNanos = Math.max(1, now - this.minuteStartedNanos);
+        this.recordsPerSecond = (records - this.recordsAtMinute) * TimeUnit.SECONDS.toNanos(1) / elapsedNanos;
+        final long laggedInMinute = lagged - this.laggedAtMinute;
+        final double lateShare = laggedInMinute == 0 ? 0 : (double) (late - this.lateAtMinute) / laggedInMinute;
+        this.recordsAtMinute = records;
+        this.lateAtMinute = late;
+        this.laggedAtMinute = lagged;
+        this.minuteStartedNanos = now;
         return new Minute(
                 this.lane.workingOrders(),
                 this.sessionIds.size(),
                 this.lane.takeLagMaxNanos() / 1_000_000,
-                this.lane.refusedNotReady());
+                this.lane.refusedNotReady(),
+                this.books,
+                this.distinctStreams,
+                this.recordsPerSecond,
+                lateShare,
+                this.refusedForRoom);
+    }
+
+    /** Its load against its caps, records/s as of the last minute taken. */
+    public Load load() {
+        return new Load(
+                this.books,
+                this.distinctStreams,
+                this.recordsPerSecond,
+                this.capacity.maxBooks(),
+                this.capacity.maxStreams());
     }
 
     @Override
@@ -284,6 +379,35 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
         }
 
         @Override
+        public boolean roomFor(final List<Listing> listings) {
+            int newBooks = 0;
+            final Set<Integer> newStreams = new HashSet<>();
+            for (final Listing listing : listings) {
+                if (listing.exchange().exchangeId() != exchangeId) {
+                    continue;
+                }
+                newBooks++;
+                final int streamId = capacity.streamOf().applyAsInt(listing);
+                if (streamId != 0 && !booksByStream.containsKey(streamId)) {
+                    newStreams.add(streamId);
+                }
+            }
+            final boolean room = books + newBooks <= capacity.maxBooks()
+                    && distinctStreams + newStreams.size() <= capacity.maxStreams();
+            if (!room) {
+                refusedForRoom = refusedForRoom + 1;
+            }
+            return room;
+        }
+
+        @Override
+        public String describeLoad() {
+            return String.format(
+                    "%d of %d books, %d of %d streams",
+                    books, capacity.maxBooks(), distinctStreams, capacity.maxStreams());
+        }
+
+        @Override
         public void addPaperSession(
                 final long slot, final String sessionId, final List<Listing> listings, final String simulationJson) {
             if (sessionIds.containsKey(slot)) {
@@ -322,13 +446,37 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
                     limits == null ? null : new AccountBudget(limits, nanoClock.getAsLong() - FULL_BUDGET_NANOS);
             hand(new SimulatedLane.AddSession(new SimulatedSession(slot, sessionId, budget, books)));
             sessionIds.put(slot, sessionId);
-            streams.addSession(
-                    sessionId, streamIds.stream().mapToInt(Integer::intValue).toArray());
+            final int[] ids = streamIds.stream().mapToInt(Integer::intValue).toArray();
+            count(slot, ids);
+            streams.addSession(sessionId, ids);
+        }
+
+        /** A session's books, one per stream id it reads, now counted against the caps. */
+        private void count(final long slot, final int[] ids) {
+            streamsBySlot.put(slot, ids);
+            for (final int id : ids) {
+                booksByStream.merge(id, 1, Integer::sum);
+            }
+            SimulatedAccount.this.books = SimulatedAccount.this.books + ids.length;
+            distinctStreams = booksByStream.size();
+        }
+
+        private void uncount(final long slot) {
+            final int[] ids = streamsBySlot.remove(slot);
+            if (ids == null) {
+                return;
+            }
+            for (final int id : ids) {
+                booksByStream.computeIfPresent(id, (stream, held) -> held == 1 ? null : held - 1);
+            }
+            SimulatedAccount.this.books = SimulatedAccount.this.books - ids.length;
+            distinctStreams = booksByStream.size();
         }
 
         @Override
         public void removeSession(final long slot) {
             final String sessionId = sessionIds.remove(slot);
+            uncount(slot);
             hand(new SimulatedLane.RemoveSession(slot));
             if (sessionId != null) {
                 streams.removeSession(sessionId);

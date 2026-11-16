@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
@@ -22,6 +23,11 @@ import org.junit.jupiter.api.Test;
 class KalshiTestVenueTest {
 
     private static final Pattern SID_SEQ = Pattern.compile("\"sid\":(\\d+),\"seq\":(\\d+)");
+    private static final Pattern DELTA_TICKER =
+            Pattern.compile("\"type\":\"orderbook_delta\".*\"market_ticker\":\"(\\w+)\"");
+    private static final String SUBSCRIBE_FIVE =
+            "{\"id\":1,\"cmd\":\"subscribe\",\"params\":{\"channels\":[\"orderbook_delta\",\"trade\"],"
+                    + "\"market_tickers\":[\"A\",\"B\",\"C\",\"D\",\"E\"],\"use_yes_price\":true}}";
 
     @Test
     void eachSidNumbersEveryFrameFromOneAsKalshiDoes() throws Exception {
@@ -53,9 +59,61 @@ class KalshiTestVenueTest {
         assertTrue(next.get(1) > 20, "deltas follow at the rate set");
     }
 
+    @Test
+    void hotMarketsTakeTheirShareOfTheRateAndTheRestShareWhatIsLeft() throws Exception {
+        final Map<String, Integer> deltas = deltasByTicker(run(
+                new KalshiTestVenue(
+                        KalshiTestVenue.Load.of(Map.of("rate", "4000", "trades", "0", "hot", "A", "hot-share", "0.8"))),
+                SUBSCRIBE_FIVE));
+
+        final int total = deltas.values().stream().mapToInt(Integer::intValue).sum();
+        assertTrue(total > 500, "deltas at the rate: " + total);
+        final double hot = deltas.get("A") / (double) total;
+        assertTrue(hot > 0.7 && hot < 0.9, "A's share " + hot);
+        for (String cold : List.of("B", "C", "D", "E")) {
+            final double share = deltas.getOrDefault(cold, 0) / (double) total;
+            assertTrue(share > 0.02 && share < 0.09, cold + "'s share " + share);
+        }
+    }
+
+    @Test
+    void aBurstSendsItsFramesOnOneMarketOnTopOfTheRate() throws Exception {
+        final List<String> frames = run(
+                new KalshiTestVenue(KalshiTestVenue.Load.of(
+                        Map.of("rate", "0", "burst-ticker", "C", "burst-frames", "300", "burst-every", "0.2"))),
+                SUBSCRIBE_FIVE);
+
+        final Map<String, Integer> deltas = deltasByTicker(frames);
+        assertEquals(Set.of("C"), deltas.keySet(), "nothing but the bursts at rate 0");
+        assertTrue(deltas.get("C") >= 300, "at least one whole burst of 300: " + deltas.get("C"));
+    }
+
+    @Test
+    void theControlFileSkipsBlanksAndComments() {
+        final Map<String, String> options =
+                KalshiTestVenue.control(List.of("# step 3", "", "rate = 4000", "hot=A, B", "nonsense"));
+
+        assertEquals(Map.of("rate", "4000", "hot", "A, B"), options);
+        assertEquals(Set.of("A", "B"), KalshiTestVenue.Load.of(options).hot());
+    }
+
+    private static Map<String, Integer> deltasByTicker(final List<String> frames) {
+        final Map<String, Integer> deltas = new HashMap<>();
+        for (String frame : frames) {
+            final Matcher m = DELTA_TICKER.matcher(frame);
+            if (m.find()) {
+                deltas.merge(m.group(1), 1, Integer::sum);
+            }
+        }
+        return deltas;
+    }
+
     /** Subscribes, sends {@code commands}, and returns the text frames heard in the next half second. */
     private static List<String> run(final double rate, final String... commands) throws Exception {
-        final KalshiTestVenue venue = new KalshiTestVenue(rate, 0.1);
+        return run(new KalshiTestVenue(rate, 0.1), commands);
+    }
+
+    private static List<String> run(final KalshiTestVenue venue, final String... commands) throws Exception {
         try (ServerSocket server = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
             final Thread serving = new Thread(() -> {
                 try {

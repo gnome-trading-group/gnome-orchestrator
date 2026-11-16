@@ -53,6 +53,10 @@ public final class SessionOrders {
     private static final long RECOVERY_QUERY_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
     // A paper session is bound to no venue account: it trades on its paper gateway's one simulated account.
     private static final int PAPER_ACCOUNT_ID = 0;
+    // Published true by releases whose paper sessions ask which of a venue's paper gateways to use (the launcher reads
+    // it
+    // from the release's property list too).
+    private static final String PAPER_RESOLVE = "order.gateway.paper.resolve";
 
     private final Logger logger;
     private final Properties properties;
@@ -126,6 +130,9 @@ public final class SessionOrders {
                 local.isEmpty() ? endpointsResolver() : localResolver(local),
                 // A local run names its gateway, which nothing starts for it.
                 local.isEmpty() ? this::want : GatewayLinks.Wanting.NONE,
+                local.isEmpty() && !live && choosesPaperGateways()
+                        ? this::choosePaperGateway
+                        : GatewayLinks.Chooser.NONE,
                 System::nanoTime);
         this.gatewayControl = DaemonThreads.scheduler("gateway-links");
         this.gatewayControl.scheduleWithFixedDelay(gatewayLinks, 0, 100, TimeUnit.MILLISECONDS);
@@ -154,6 +161,38 @@ public final class SessionOrders {
                     properties.getIntProperty("order.gateway.pending.messages")));
         }
         return links;
+    }
+
+    /** Whether this release's paper sessions ask which of a venue's paper gateways to link to, rather than its main. */
+    private boolean choosesPaperGateways() {
+        return properties.hasProperty(PAPER_RESOLVE)
+                && Boolean.parseBoolean(
+                        properties.getStringProperty(PAPER_RESOLVE).trim());
+    }
+
+    /**
+     * Asks the registry which of the venue's paper gateways the link should go to, naming the one that last welcomed it
+     * (and that process's start), so it stays while that process holds its books; the registry asks for the one it
+     * names, as {@link #want} does.
+     */
+    private String choosePaperGateway(GatewayLink link, String linkedKey, long linkedStartedAtMs) throws IOException {
+        StringBuilder path = new StringBuilder("/api/gateways/paper-instance?sessionId=")
+                .append(URLEncoder.encode(properties.getStringProperty("session.id"), StandardCharsets.UTF_8))
+                .append("&exchange=")
+                .append(URLEncoder.encode(link.gatewayKey.split(":")[1], StandardCharsets.UTF_8))
+                .append("&listings=")
+                .append(link.listings.size());
+        if (linkedKey != null) {
+            path.append("&currentKey=").append(URLEncoder.encode(linkedKey, StandardCharsets.UTF_8));
+            if (linkedStartedAtMs > 0) {
+                path.append("&currentStartedAtMs=").append(linkedStartedAtMs);
+            }
+        }
+        ByteBuffer body = registry.get().get(new ViewString(path.toString()));
+        byte[] bytes = new byte[body.remaining()];
+        body.get(bytes);
+        String chosen = new ObjectMapper().readTree(bytes).path("gatewayKey").asText("");
+        return chosen.startsWith("paper:") ? chosen : null;
     }
 
     /** Tells the registry the session wants the gateway: it starts one that isn't running and keeps it running. */
@@ -206,7 +245,7 @@ public final class SessionOrders {
                     ServiceEndpoint.Kind.ORDER_GATEWAY, key, TimeUnit.MILLISECONDS.toNanos(System.currentTimeMillis()));
             return endpoint == null || !("READY".equals(endpoint.state()) || "DEGRADED".equals(endpoint.state()))
                     ? null
-                    : new GatewayLinks.Endpoint(endpoint.privateIp(), endpoint.port());
+                    : new GatewayLinks.Endpoint(endpoint.privateIp(), endpoint.port(), endpoint.startedAtMs());
         };
     }
 

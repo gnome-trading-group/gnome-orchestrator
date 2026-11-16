@@ -28,8 +28,24 @@ import java.util.function.LongSupplier;
  */
 public final class GatewayLinks implements Runnable, AutoCloseable {
 
-    /** Where a gateway takes sessions. */
-    record Endpoint(String ip, int port) {}
+    /** Where a gateway takes sessions, and when its process started (epoch ms; 0 if it doesn't say). */
+    record Endpoint(String ip, int port, long startedAtMs) {
+        Endpoint(final String ip, final int port) {
+            this(ip, port, 0);
+        }
+    }
+
+    /**
+     * Which of its venue's paper gateways a paper link goes to, asked before it says hello after going down: the gateway
+     * and process it was last welcomed by (null and 0 if never), whose books it keeps while that process runs. Returns
+     * the key to link to, or null to keep the one it has.
+     */
+    @FunctionalInterface
+    interface Chooser {
+        Chooser NONE = (link, linkedKey, linkedStartedAtMs) -> null;
+
+        String choose(GatewayLink link, String linkedKey, long linkedStartedAtMs) throws Exception;
+    }
 
     /** Tells the registry the session wants the gateway; a failure is the caller's to log, and is said again. */
     @FunctionalInterface
@@ -46,6 +62,9 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
     }
 
     static final long RETRY_NANOS = TimeUnit.SECONDS.toNanos(1);
+    // A link waiting for a gateway (refused for room, or one not up yet) asks the chooser again no more often, so many
+    // waiting sessions don't ask the registry every second.
+    static final long CHOOSE_NANOS = TimeUnit.SECONDS.toNanos(10);
     // While a link waits for its gateway, which may be starting from nothing.
     static final long WANT_WAITING_NANOS = TimeUnit.SECONDS.toNanos(10);
     // Once linked: well inside the time the registry keeps a gateway nobody has asked for.
@@ -61,7 +80,9 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
     private final Resolver resolver;
     private final LongSupplier nanoClock;
     private final Wanting wanting;
+    private final Chooser chooser;
     private final Map<GatewayLink, Long> retryAt = new HashMap<>();
+    private final Map<GatewayLink, Long> chooseAt = new HashMap<>();
     private final Map<GatewayLink, Long> wantAt = new HashMap<>();
     // Tests make a session deaf by advertising a reply port nothing listens on.
     volatile IntUnaryOperator advertisedReplyPort = IntUnaryOperator.identity();
@@ -84,7 +105,20 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
             final Resolver resolver,
             final Wanting wanting,
             final LongSupplier nanoClock) {
+        this(logger, aeron, localIp, links, resolver, wanting, Chooser.NONE, nanoClock);
+    }
+
+    GatewayLinks(
+            final Logger logger,
+            final Aeron aeron,
+            final String localIp,
+            final List<GatewayLink> links,
+            final Resolver resolver,
+            final Wanting wanting,
+            final Chooser chooser,
+            final LongSupplier nanoClock) {
         this.wanting = wanting;
+        this.chooser = chooser;
         this.logger = logger;
         this.aeron = aeron;
         this.localIp = localIp;
@@ -96,6 +130,10 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
     @Override
     public void run() {
         for (final GatewayLink link : this.links) {
+            if (link.state == GatewayLink.READY) {
+                link.linkedKey = link.gatewayKey;
+                link.linkedStartedAtMs = link.connectedStartedAtMs;
+            }
             want(link);
             try {
                 tend(link);
@@ -152,10 +190,12 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
             link.refusal = HelloRefusal.NONE;
         }
         retire(link);
+        choose(link, now);
         final Endpoint endpoint = this.resolver.resolve(link.gatewayKey);
         if (endpoint == null) {
             return;
         }
+        link.connectedStartedAtMs = endpoint.startedAtMs();
         final Subscription replies = this.aeron.addSubscription(
                 AeronChannels.gatewayReplySubscription(this.localIp), AeronStreamIds.GATEWAY_REPLY);
         final int port = boundPort(replies);
@@ -182,6 +222,38 @@ public final class GatewayLinks implements Runnable, AutoCloseable {
                 endpoint.port(),
                 this.localIp,
                 port);
+    }
+
+    /**
+     * Moves the link to the gateway the chooser names, at most every {@link #CHOOSE_NANOS} while it waits; a failed ask
+     * keeps the key it has.
+     */
+    private void choose(final GatewayLink link, final long now) {
+        if (this.chooser == Chooser.NONE) {
+            return;
+        }
+        final Long due = this.chooseAt.get(link);
+        if (due != null && now - due < 0) {
+            return;
+        }
+        this.chooseAt.put(link, now + CHOOSE_NANOS);
+        final String chosen;
+        try {
+            chosen = this.chooser.choose(link, link.linkedKey, link.linkedStartedAtMs);
+        } catch (Exception e) {
+            this.logger.logf(
+                    LogMessage.UNKNOWN_ERROR,
+                    "Gateway %s: couldn't ask which paper gateway to link to; trying it again: %s",
+                    link.gatewayKey,
+                    CauseChain.of(e));
+            return;
+        }
+        if (chosen != null && !chosen.equals(link.gatewayKey)) {
+            this.logger.logf(LogMessage.DEBUG, "Gateway %s: linking to %s instead", link.gatewayKey, chosen);
+            link.gatewayKey = chosen;
+            // Wanted at once under its new key; the choice already asked for it, so this only keeps it running.
+            this.wantAt.remove(link);
+        }
     }
 
     /** Takes the link's publication and subscription from the client, then closes them (which blocks). */

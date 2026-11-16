@@ -120,7 +120,12 @@ final class GatewayMinutes {
                         .put("sessions", minute.sessions())
                         .put("workingOrders", minute.workingOrders())
                         .put("lagMaxMs", minute.lagMaxMillis())
-                        .put("refusedNotReady", minute.refusedNotReady()));
+                        .put("refusedNotReady", minute.refusedNotReady())
+                        .put("books", minute.books())
+                        .put("streams", minute.streams())
+                        .put("recordsPerSecond", minute.recordsPerSecond())
+                        .put("lateShare", minute.lateShare())
+                        .put("refusedForRoom", minute.refusedForRoom()));
     }
 
     /** The document as it stands. */

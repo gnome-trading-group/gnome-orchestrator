@@ -37,6 +37,12 @@ public final class ServiceEndpoints {
     static final String MINUTES = "minutes_json";
     static final String CAN_HAND_OVER = "can_hand_over";
     static final String HANDOVER = "handover";
+    static final String STARTED_AT_MS = "started_at_ms";
+    static final String PAPER_BOOKS = "paper_books";
+    static final String PAPER_STREAMS = "paper_streams";
+    static final String PAPER_RECORDS_PER_SECOND = "paper_records_per_second";
+    static final String PAPER_MAX_BOOKS = "paper_max_books";
+    static final String PAPER_MAX_STREAMS = "paper_max_streams";
     /** An order gateway's minutes outlive a stop by this long, so its last numbers can still be read. */
     public static final long MINUTES_TTL_SECONDS = TimeUnit.MINUTES.toSeconds(10);
 
@@ -69,6 +75,17 @@ public final class ServiceEndpoints {
         if (endpoint.kind() == ServiceEndpoint.Kind.ORDER_GATEWAY) {
             item.put(CAN_HAND_OVER, AttributeValue.fromBool(endpoint.canHandOver()));
             item.put(HANDOVER, AttributeValue.fromBool(endpoint.handover()));
+            if (endpoint.startedAtMs() > 0) {
+                item.put(STARTED_AT_MS, AttributeValue.fromN(Long.toString(endpoint.startedAtMs())));
+            }
+        }
+        final ServiceEndpoint.PaperLoad paper = endpoint.paper();
+        if (paper != null) {
+            item.put(PAPER_BOOKS, AttributeValue.fromN(Integer.toString(paper.books())));
+            item.put(PAPER_STREAMS, AttributeValue.fromN(Integer.toString(paper.streams())));
+            item.put(PAPER_RECORDS_PER_SECOND, AttributeValue.fromN(Long.toString(paper.recordsPerSecond())));
+            item.put(PAPER_MAX_BOOKS, AttributeValue.fromN(Integer.toString(paper.maxBooks())));
+            item.put(PAPER_MAX_STREAMS, AttributeValue.fromN(Integer.toString(paper.maxStreams())));
         }
         final long writtenAtSeconds = TimeUnit.NANOSECONDS.toSeconds(endpoint.writtenAtNanos());
         item.put(EXPIRES_AT, AttributeValue.fromN(Long.toString(writtenAtSeconds + TTL_SECONDS)));
@@ -128,7 +145,16 @@ public final class ServiceEndpoints {
                 (int) number(item, LINKED_SESSIONS),
                 number(item, WORKING_ORDERS),
                 flag(item, CAN_HAND_OVER),
-                flag(item, HANDOVER));
+                flag(item, HANDOVER),
+                number(item, STARTED_AT_MS),
+                item.containsKey(PAPER_MAX_BOOKS)
+                        ? new ServiceEndpoint.PaperLoad(
+                                (int) number(item, PAPER_BOOKS),
+                                (int) number(item, PAPER_STREAMS),
+                                number(item, PAPER_RECORDS_PER_SECOND),
+                                (int) number(item, PAPER_MAX_BOOKS),
+                                (int) number(item, PAPER_MAX_STREAMS))
+                        : null);
     }
 
     /** A flag the item may lack, as a shard's or one written by an older release does: false. */

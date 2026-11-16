@@ -31,7 +31,14 @@ public final class GatewayLink implements OrderGatewayLinkStatus {
     /** The session said goodbye on it while closing: it is never opened again. */
     static final int GONE = 4;
 
-    final String gatewayKey;
+    // Fixed for a live link. A paper one may move to another of its venue's paper gateways when it links again (the
+    // links thread's choice, read by the heartbeat); the instance never changes its kind or venue.
+    volatile String gatewayKey;
+    // The links thread's: the process its publication goes to (when that gateway started, from its endpoint item; 0 if
+    // it doesn't say), and the gateway and process it was last welcomed by, which hold its paper books.
+    long connectedStartedAtMs;
+    String linkedKey;
+    long linkedStartedAtMs;
     // A gateway's key says which kind it is, and its hellos must say the same.
     final Mode mode;
     final int exchangeId;

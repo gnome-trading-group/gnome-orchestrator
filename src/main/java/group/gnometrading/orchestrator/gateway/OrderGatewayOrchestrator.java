@@ -52,6 +52,7 @@ import group.gnometrading.orchestrator.gateway.core.SessionTable;
 import group.gnometrading.orchestrator.gateway.core.TimingMessage;
 import group.gnometrading.orchestrator.gateway.journal.GatewayJournal;
 import group.gnometrading.orchestrator.gateway.journal.OwnershipLog;
+import group.gnometrading.orchestrator.gateway.simulated.PaperOverload;
 import group.gnometrading.orchestrator.gateway.simulated.SimulatedAccount;
 import group.gnometrading.orchestrator.gateway.transport.CrossIndex;
 import group.gnometrading.orchestrator.gateway.transport.GatewayEgress;
@@ -264,7 +265,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 registry,
                 listings,
                 GatewayControl.Replies.over(aeron.aeron()),
-                advertiser(logger, settings, properties, status, ip, port),
+                advertiser(logger, settings, properties, status, ip, port, paper),
                 System::nanoTime,
                 properties.getIntProperty("gateway.replay.reports"),
                 System::currentTimeMillis,
@@ -274,7 +275,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         GatewayControl.Restart.HELLO_GRACE_NANOS,
                         restart.loaded()));
         final GatewayMinutes minutes = minutes(logger, properties, settings);
-        startPaper(logger, exit, settings, control, paper, minutes);
+        startPaper(logger, exit, settings, control, paper, minutes, alerts);
 
         for (final GatewayAccount account : accounts) {
             account.start();
@@ -398,7 +399,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final GatewaySettings settings,
             final GatewayControl control,
             final PaperVenue paper,
-            final GatewayMinutes minutes) {
+            final GatewayMinutes minutes,
+            final GatewayAlerts alerts) {
         if (paper == null) {
             return;
         }
@@ -406,7 +408,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         paper.marketData().start(fatal(logger, exit, "market data"));
         paper.account().start();
         logger.logf(LogMessage.DEBUG, "Gateway %s: simulating %s", settings.key(), settings.exchangeCode());
-        reportPaperMinutes(logger, paper.account(), minutes);
+        reportPaperMinutes(logger, paper.account(), minutes, alerts);
     }
 
     /** A paper gateway's venue: the account every paper session trades on, and the shard reader feeding its books. */
@@ -450,6 +452,10 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                         securityMaster,
                         logger,
                         "paper-" + settings.exchangeCode().toLowerCase(Locale.ROOT)),
+                new SimulatedAccount.Capacity(
+                        properties.getIntProperty("gateway.paper.max.books"),
+                        properties.getIntProperty("gateway.paper.max.streams"),
+                        SimulatedAccount.Capacity.streamsFrom(securityMaster)),
                 ring,
                 streams,
                 System::nanoTime,
@@ -499,12 +505,17 @@ public class OrderGatewayOrchestrator extends Orchestrator {
 
     /** Every minute, how the simulated venue kept up. */
     private static void reportPaperMinutes(
-            final Logger logger, final SimulatedAccount account, final GatewayMinutes minutes) {
+            final Logger logger,
+            final SimulatedAccount account,
+            final GatewayMinutes minutes,
+            final GatewayAlerts alerts) {
+        final PaperOverload overload = new PaperOverload(alerts, account.name());
         DaemonThreads.scheduler("gateway-paper-minutes")
                 .scheduleAtFixedRate(
                         () -> {
                             final SimulatedAccount.Minute minute = account.takeMinute();
                             logger.logf(LogMessage.DEBUG, "Gateway %s: %s", account.name(), minute.describe());
+                            overload.minute(minute);
                             final long now = System.currentTimeMillis();
                             minutes.paper(minute, now);
                             minutes.publish(now);
@@ -1038,7 +1049,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final Properties properties,
             final GatewayStatus status,
             final String ip,
-            final int port) {
+            final int port,
+            final PaperVenue paper) {
         if (localRun(properties)) {
             return (state, linkedSessions, workingOrders) -> {};
         }
@@ -1049,6 +1061,7 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final String region = System.getenv().getOrDefault("AWS_REGION", "unknown");
         final String instance = instance();
         final String version = properties.getStringProperty("orchestrator.version");
+        final long startedAtMs = System.currentTimeMillis();
         return new EndpointWriter(
                         logger,
                         (state, linkedSessions, workingOrders) -> endpoints.put(new ServiceEndpoint(
@@ -1064,8 +1077,15 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                 linkedSessions,
                                 workingOrders,
                                 canHandOver,
-                                status.handingOver())))
+                                status.handingOver(),
+                                startedAtMs,
+                                paper == null ? null : paperLoad(paper.account().load()))))
                 .start();
+    }
+
+    private static ServiceEndpoint.PaperLoad paperLoad(final SimulatedAccount.Load load) {
+        return new ServiceEndpoint.PaperLoad(
+                load.books(), load.streams(), load.recordsPerSecond(), load.maxBooks(), load.maxStreams());
     }
 
     private static String privateIp() {

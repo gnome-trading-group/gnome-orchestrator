@@ -16,6 +16,9 @@ package group.gnometrading.orchestrator.aeron;
  * @param workingOrders an order gateway's orders working; 0 for a shard
  * @param canHandOver whether an order gateway's release stops without cancelling when its reconciler rolls it
  * @param handover an order gateway stopping for a roll, its orders left resting for the next process on its host
+ * @param startedAtMs when an order gateway's process started, epoch milliseconds, so a restart is told apart from a
+ *     process still running; 0 for a shard
+ * @param paper a paper gateway's load against its caps; null for any other
  */
 public record ServiceEndpoint(
         Kind kind,
@@ -30,7 +33,44 @@ public record ServiceEndpoint(
         int linkedSessions,
         long workingOrders,
         boolean canHandOver,
-        boolean handover) {
+        boolean handover,
+        long startedAtMs,
+        PaperLoad paper) {
+
+    /** What a paper gateway carries against its caps: books (session x listing), distinct streams, records/s. */
+    public record PaperLoad(int books, int streams, long recordsPerSecond, int maxBooks, int maxStreams) {}
+
+    public ServiceEndpoint(
+            final Kind kind,
+            final String id,
+            final String instance,
+            final String region,
+            final String privateIp,
+            final int port,
+            final String state,
+            final String version,
+            final long writtenAtNanos,
+            final int linkedSessions,
+            final long workingOrders,
+            final boolean canHandOver,
+            final boolean handover) {
+        this(
+                kind,
+                id,
+                instance,
+                region,
+                privateIp,
+                port,
+                state,
+                version,
+                writtenAtNanos,
+                linkedSessions,
+                workingOrders,
+                canHandOver,
+                handover,
+                0,
+                null);
+    }
 
     public ServiceEndpoint(
             final Kind kind,
