@@ -98,6 +98,14 @@ class AgentRuntimeInstallerTest {
     }
 
     @Test
+    @DisabledOnOs(OS.LINUX)
+    void aC7i2xlargesFourIsolatedCpusHoldEveryAgentItPins() throws Exception {
+        AgentRuntimeInstaller.install(new Properties("agent-runtime/affinity-c7i-2xlarge.properties"), logger);
+
+        verify(logger, never()).logf(eq(LogMessage.UNKNOWN_ERROR), contains("undersized"), any(Object[].class));
+    }
+
+    @Test
     void testRejectsUnknownProfile() {
         assertThrows(
                 IllegalArgumentException.class,

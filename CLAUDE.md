@@ -413,7 +413,7 @@ downloads that jar from GitHub Packages at boot. A release reaches sessions only
 `/gnome/orchestrator/latest-version` (written by StorageStack only for non-SNAPSHOT releases) is for gateways and
 collectors. Property keys and defaults per release are in
 `/gnome/orchestrator/properties/latest` and `/gnome/orchestrator/properties/<version>`. AMIs (`8core`, `16core` for
-c7i; `4core-nosmt`, `8core-nosmt` for c7a, one thread per core; `standard`; the registry
+c7i; `8core-nosmt` for c7a, one thread per core; `standard`; the registry
 launcher maps each instance type to its variant) rebuild only when `ami/` content changes; `AmiPublisher` writes `/gnome/orchestrator/ami/<variant>`
 per region after image tests pass. Roll back an AMI by repointing that parameter (images kept 14 days).
 Collectors pull the same jar (latest unless pinned) into the gnome-market-data collector image.

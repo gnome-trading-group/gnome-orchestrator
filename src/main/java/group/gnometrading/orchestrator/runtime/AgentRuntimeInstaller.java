@@ -36,10 +36,11 @@ public final class AgentRuntimeInstaller {
     private static final String DEFAULT_HOUSEKEEPING = "0-1";
 
     /**
-     * Hot agents per session, however many listings it trades, live or paper: the gateway client (every listing's
-     * order entry), the strategy, the OMS, the shard ingress agent and the media driver's network thread.
+     * Hot agents a session pins, however many listings it trades, live or paper: the gateway client (every listing's
+     * order entry), the strategy, the OMS and the shard ingress agent. The media driver's network thread spins too,
+     * but on the housekeeping cores, never an isolated one.
      */
-    static final int EXPECTED_HOT_THREADS = 5;
+    static final int PINNED_HOT_AGENTS = 4;
 
     private AgentRuntimeInstaller() {}
 
@@ -91,12 +92,12 @@ public final class AgentRuntimeInstaller {
                 Arrays.toString(housekeeping),
                 pinner == ThreadPinner.NONE ? "unavailable" : "loaded");
 
-        if (EXPECTED_HOT_THREADS > isolated.length) {
+        if (PINNED_HOT_AGENTS > isolated.length) {
             logger.logf(
                     LogMessage.UNKNOWN_ERROR,
-                    "Instance undersized: ~%d hot threads expected but only %d isolated cores;"
+                    "Instance undersized: %d hot agents to pin but only %d isolated cores;"
                             + " the overflow will back off on housekeeping cores",
-                    EXPECTED_HOT_THREADS,
+                    PINNED_HOT_AGENTS,
                     isolated.length);
         }
     }

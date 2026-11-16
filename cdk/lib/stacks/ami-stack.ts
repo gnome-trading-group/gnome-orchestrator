@@ -37,7 +37,6 @@ interface Variant {
 const VARIANTS: Variant[] = [
   { name: '8core', isolated: isolatedCpus(8), instanceType: 'c7i.2xlarge' },
   { name: '16core', isolated: isolatedCpus(16), instanceType: 'c7i.4xlarge' },
-  { name: '4core-nosmt', isolated: isolatedCpusNoSmt(4), instanceType: 'c7a.xlarge' },
   { name: '8core-nosmt', isolated: isolatedCpusNoSmt(8), instanceType: 'c7a.2xlarge' },
   { name: 'standard', instanceType: 'c7i.large' },
 ];
@@ -54,12 +53,11 @@ export function isolatedCpus(vcpus: number): string {
 
 /**
  * CPUs isolated on a size with one hardware thread per core (c7a), where every vCPU is a physical core. Housekeeping
- * keeps cores 0 and 1, or only core 0 on a 4-core size, which then has three cores for the four hot agents (the
- * fourth backs off on core 0).
+ * keeps cores 0 and 1: on fewer cores the media driver's spinner, the journal and the ledger share one and starve, so
+ * no smaller c7a size has a variant.
  */
 export function isolatedCpusNoSmt(vcpus: number): string {
-  const housekeeping = vcpus <= 4 ? 1 : 2;
-  return `${housekeeping}-${vcpus - 1}`;
+  return `2-${vcpus - 1}`;
 }
 
 interface Props extends cdk.StackProps {
