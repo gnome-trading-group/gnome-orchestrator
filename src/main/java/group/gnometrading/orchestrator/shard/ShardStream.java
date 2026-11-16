@@ -175,13 +175,15 @@ final class ShardStream {
         }
         if (latency != null) {
             final long eventNanos = StreamHeader.timestampEvent(buffer, 0);
+            final int flags = StreamHeader.flags(buffer, 0);
             latency.received(
                     sourceId,
                     eventNanos,
                     sentNanos(templateId, buffer),
                     StreamHeader.timestampRecv(buffer, 0),
                     poller.timestampNanos(),
-                    fresh(eventNanos, StreamHeader.flags(buffer, 0)));
+                    fresh(eventNanos, flags),
+                    StreamHeader.isSet(flags, StreamHeader.REPLAYED_BIT));
         }
         try {
             record.onSequencedEvent(sequence, templateId, buffer, length);
@@ -191,11 +193,6 @@ final class ShardStream {
         }
     }
 
-    /**
-     * Whether a record brings a venue event the stream hasn't had. A snapshot that doesn't advance the venue's time is
-     * a book published again (a stream joining a market already read, a connection roll), as is a stream's first
-     * snapshot, which may be either; a bad-data record repeats the last book.
-     */
     /** When the venue sent the record's message, where the record says (book records; 0 for none). */
     private static long sentNanos(final int templateId, final UnsafeBuffer buffer) {
         if (templateId != Mbp10Decoder.TEMPLATE_ID) {
@@ -205,6 +202,13 @@ final class ShardStream {
                 SbeMessage.HEADER_LENGTH + Mbp10Decoder.timestampSentEncodingOffset(), Statics.BYTE_ORDER);
     }
 
+    /**
+     * Whether a record brings a venue event the stream hasn't had. A snapshot that doesn't advance the venue's time is
+     * a book published again (a stream joining a market already read, a connection roll), as is a stream's first
+     * snapshot, which may be either; a bad-data record repeats the last book. A snapshot a roll replayed is its
+     * stand-in's subscribe book, whose venue time some venues stamp with an older change (Polymarket US), so it never
+     * counts; a replayed update or trade does, its times being the venue's own.
+     */
     private boolean fresh(final long eventNanos, final int flags) {
         final long newest = newestEventNanos;
         if (eventNanos > newest) {
@@ -213,7 +217,10 @@ final class ShardStream {
         if (StreamHeader.isSet(flags, StreamHeader.BAD_DATA_BIT)) {
             return false;
         }
-        return !StreamHeader.isSet(flags, StreamHeader.SNAPSHOT_BIT) || (newest != 0 && eventNanos > newest);
+        if (!StreamHeader.isSet(flags, StreamHeader.SNAPSHOT_BIT)) {
+            return true;
+        }
+        return !StreamHeader.isSet(flags, StreamHeader.REPLAYED_BIT) && newest != 0 && eventNanos > newest;
     }
 
     int streamId() {

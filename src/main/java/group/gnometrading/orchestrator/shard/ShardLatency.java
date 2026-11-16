@@ -26,6 +26,10 @@ import org.agrona.concurrent.EpochNanoClock;
  *       held it. Kalshi's is one clock; Lighter's crosses its API server's and its sequencer's.
  *   <li>{@code shard.venue_network} (collector): the receipt minus the venue's send time: the network from the venue.
  *       Crosses clocks, the venue's to the millisecond.
+ *   <li>{@code shard.roll_hold} (collector): for a record a connection roll published late (flagged replayed), its
+ *       ring publish minus its receipt: how long the roll held it. Counted here instead of {@code shard.decode}, which
+ *       it would otherwise swamp; a replayed snapshot is the stand-in's subscribe book, so it isn't a new venue event
+ *       either.
  * </ul>
  *
  * <p>Where the venue says when it sent, {@code venue_to_recv} = {@code venue_hold} + {@code venue_network}.
@@ -41,6 +45,7 @@ final class ShardLatency {
     static final int SEND = 104;
     static final int VENUE_HOLD = 105;
     static final int VENUE_NETWORK = 106;
+    static final int ROLL_HOLD = 107;
     static final String COLLECTOR_KIND = "latency.shard.collector";
     static final String PUBLISHER_KIND = "latency.shard.publisher";
 
@@ -53,6 +58,7 @@ final class ShardLatency {
     private final LatencyGrid decode;
     private final LatencyGrid venueHold;
     private final LatencyGrid venueNetwork;
+    private final LatencyGrid rollHold;
     private final LatencyGrid wait;
     private final LatencyGrid send;
 
@@ -63,12 +69,13 @@ final class ShardLatency {
     ShardLatency(final EpochNanoClock clock, final int[] sourceIds, final String[] sourceCodes) {
         this.clock = clock;
         final int keys = LatencyGrid.size(sourceIds.length, 1, 1);
-        this.collector = new MinuteHistograms(4 * keys);
+        this.collector = new MinuteHistograms(5 * keys);
         this.publisher = new MinuteHistograms(2 * keys);
         this.venueToRecv = grid(collector, VENUE_TO_RECV, "shard.venue_to_recv", sourceIds, sourceCodes);
         this.decode = grid(collector, DECODE, "shard.decode", sourceIds, sourceCodes);
         this.venueHold = grid(collector, VENUE_HOLD, "shard.venue_hold", sourceIds, sourceCodes);
         this.venueNetwork = grid(collector, VENUE_NETWORK, "shard.venue_network", sourceIds, sourceCodes);
+        this.rollHold = grid(collector, ROLL_HOLD, "shard.roll_hold", sourceIds, sourceCodes);
         this.wait = grid(publisher, WAIT, "shard.wait", sourceIds, sourceCodes);
         this.send = grid(publisher, SEND, "shard.send", sourceIds, sourceCodes);
     }
@@ -84,6 +91,7 @@ final class ShardLatency {
      * say).
      *
      * @param fresh whether the record carries a new venue event, so its venue time means something
+     * @param replayed whether a connection roll published it late, so its time to the ring is the roll's
      */
     void received(
             final int sourceId,
@@ -91,7 +99,8 @@ final class ShardLatency {
             final long sentNanos,
             final long recvNanos,
             final long ringNanos,
-            final boolean fresh) {
+            final boolean fresh,
+            final boolean replayed) {
         if (recvNanos <= 0) {
             return;
         }
@@ -106,7 +115,7 @@ final class ShardLatency {
             venueNetwork.record(sourceId, 0, 0, recvNanos - sentNanos, recvNanos);
         }
         if (ringNanos > 0) {
-            decode.record(sourceId, 0, 0, ringNanos - recvNanos, recvNanos);
+            (replayed ? rollHold : decode).record(sourceId, 0, 0, ringNanos - recvNanos, recvNanos);
         }
     }
 

@@ -275,7 +275,9 @@ uses the other and the shared layers use neither. `LayoutTest` (ArchUnit) enforc
     row's `roll_requested_at`; the reconciler preflights (running, up, `can_hand_over`, one task, target = pin else
     latest, at least `MIN_ROLL_VERSION`), writes the roll item, moves the service onto the target's revision at zero
     pinned to the task's host (`memberOf ec2InstanceId == <id>`), polls within the tick (2 s, up to about a minute) for
-    the old task to go and raises it to one. Done once the endpoint is up on the target and written after the raise;
+    the old task to stop and raises it to one. It waits for the task itself to be `STOPPED`: ECS drops it from the
+    service's counts as soon as it is told to stop, before its process has read the roll item, and a roll already
+    `starting` by then makes the gateway cancel. Done once the endpoint is up on the target and written after the raise;
     not up in 5 minutes or 3 task stops rolls back once to the old revision the same way (`stops_version` then the
     target, so its process hands over), then `rolled_back` or `failed`. While one is under way the gateway runs
     whatever its row or endpoint says. The pin stays until the gateway's next start (moved at zero with no
@@ -498,7 +500,7 @@ earlier sessions). A session already stopped before startup exits 0 without repo
     back), worst collector backlog, the 10 streams that waited longest and the 10 held most), and
     `latency.shard.collector` (`shard.venue_to_recv`, receipt minus the venue's event time, only for records bringing
     a new venue event: not a stream's first snapshot, a snapshot that doesn't advance its venue time (a republish or
-    roll) or bad data; `shard.decode`, ring publish minus receipt: raw capture, decode, book and encode on the reader;
+    roll) or bad data; `shard.decode`, ring publish minus receipt: copying the raw frame, decode, book and encode on the reader; `shard.roll_hold` instead for a record a connection roll published late (flagged `replayed` by gnome-gateways), whose receipt-to-ring is the roll's hold, and a replayed snapshot (the stand-in's subscribe book) never counts for the venue times;
     where the venue says when it sent the message (Kalshi; Lighter's books), `shard.venue_hold`, send minus event, and
     `shard.venue_network`, receipt minus send, which add up to `venue_to_recv`) /
     `latency.shard.publisher` (`shard.wait`, the publisher's pass minus ring publish, held records included;

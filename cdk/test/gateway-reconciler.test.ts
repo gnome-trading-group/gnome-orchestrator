@@ -41,7 +41,7 @@ class FakeRegion {
   stoppedTasks: {
     taskArn: string; stoppedAt: string; stoppedReason: string; containers: { exitCode?: number }[]; createdAt?: string;
   }[] = [];
-  runningTasks: { taskArn: string; containerInstanceArn: string }[] = [];
+  runningTasks: { taskArn: string; containerInstanceArn: string; lastStatus?: string }[] = [];
   // The cluster's hosts, by container instance ARN.
   hostsInCluster: { containerInstanceArn: string; ec2InstanceId: string; status: string }[] = [];
   // The live and the paper capacity providers' Auto Scaling groups.
@@ -632,7 +632,9 @@ describe('rolling a gateway', () => {
     region.services.push({
       ...service(key, 1), taskDefinition, runningCount: 1, pendingCount: 0, deployments: [{ taskDefinition }],
     });
-    region.runningTasks = [{ taskArn: `arn:aws:ecs:us-east-1:1:task/${CLUSTER}/task-1`, containerInstanceArn: 'arn:ci-1' }];
+    region.runningTasks = [{
+      taskArn: `arn:aws:ecs:us-east-1:1:task/${CLUSTER}/task-1`, containerInstanceArn: 'arn:ci-1', lastStatus: 'RUNNING',
+    }];
     region.hostsInCluster = [{ containerInstanceArn: 'arn:ci-1', ec2InstanceId: 'i-0abc', status: 'ACTIVE' }];
   }
   const upOn = (version: string, writtenAtMs = NOW - 5_000): Activity => ({
@@ -642,10 +644,13 @@ describe('rolling a gateway', () => {
     ({ ...row(key, 'us-east-1', 5_000, version), roll_requested_at: ago(ASKED_AGO) });
   // ECS stopping the old task once it is told to, by the reconciler's first wait in the tick.
   const stopsOnWait = (region: FakeRegion) => {
-    onSleep = () => {
-      region.services[0].runningCount = 0;
-      region.drain();
-    };
+    onSleep = () => stopTask(region);
+  };
+  // ECS once the old task's container has exited: the service's counts drop and the task is STOPPED.
+  const stopTask = (region: FakeRegion) => {
+    region.services[0].runningCount = 0;
+    region.drain();
+    for (const task of region.runningTasks) task.lastStatus = 'STOPPED';
   };
   const updates = (region: FakeRegion) => region.sent.filter((s) => s.command === 'UpdateServiceCommand').map((s) => s.input);
   const underWay = (phase: Roll['phase'], extra: Partial<Roll> = {}): Roll => ({
@@ -704,6 +709,24 @@ describe('rolling a gateway', () => {
     east.sent = [];
     await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(TO, NOW - 1_000) }));
     expect(updates(east)).toEqual([]);
+  });
+
+  it('waits for the old task itself to stop, not only for the service to stop counting it', async () => {
+    const east = new FakeRegion();
+    running(east);
+    // As ECS does at once when told to stop: the counts drop while the task's process still runs its stop.
+    onSleep = () => {
+      east.services[0].runningCount = 0;
+      east.drain();
+    };
+
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: upOn(FROM) }));
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'stopping', stoppingTasks: ['task-1'] });
+    expect(updates(east).map((u) => u.desiredCount)).toEqual([0]);
+
+    east.runningTasks[0].lastStatus = 'STOPPED';
+    await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: null }));
+    expect(rolls.get(KALSHI)).toMatchObject({ phase: 'starting', raisedAtMs: NOW });
   });
 
   it('rolls onto the release it already runs, as a restart in place', async () => {
@@ -765,8 +788,7 @@ describe('rolling a gateway', () => {
     expect(rolls.get(KALSHI)!.raisedAtMs).toBeUndefined();
     expect(updates(east).map((u) => u.desiredCount)).toEqual([0]);
 
-    east.services[0].runningCount = 0;
-    east.drain();
+    stopTask(east);
     east.sent = [];
     await reconcile(deps([asked()], { 'us-east-1': east }, { [KALSHI]: null }));
     expect(updates(east)).toEqual([{ cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 1 }]);
@@ -862,8 +884,7 @@ describe('rolling a gateway', () => {
     running(east);
     const activity: Record<string, Activity | null> = { [KALSHI]: upOn(FROM) };
     onSleep = () => {
-      east.services[0].runningCount = 0;
-      east.drain();
+      stopTask(east);
       activity[KALSHI] = { ...upOn(FROM), state: 'STOPPING', workingOrders: 0, handover: false };
     };
     await reconcile(deps([asked()], { 'us-east-1': east }, activity));

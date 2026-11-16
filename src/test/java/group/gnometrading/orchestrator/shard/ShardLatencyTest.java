@@ -21,14 +21,29 @@ class ShardLatencyTest {
     private final ShardStream stream = kit.publishingStream(10, latency);
 
     private void record(final long eventNanos, final boolean snapshot, final boolean badData) {
-        final long recv = SampledEpochNanoClock.INSTANCE.nanoTime() - READER_TIME;
+        record(eventNanos, snapshot, badData, false, READER_TIME);
+    }
+
+    /** As {@link #record(long, boolean, boolean)}, received {@code heldNanos} before it reaches the ring. */
+    private void record(
+            final long eventNanos,
+            final boolean snapshot,
+            final boolean badData,
+            final boolean replayed,
+            final long heldNanos) {
+        final long recv = SampledEpochNanoClock.INSTANCE.nanoTime() - heldNanos;
         final Mbp10Schema slot = stream.ring().claim();
         final Mbp10Encoder encoder = slot.encoder;
         encoder.streamId(stream.streamId());
         encoder.timestampEvent(eventNanos == 0 ? recv - VENUE_LAG : eventNanos);
         encoder.timestampSent(Mbp10Encoder.timestampSentNullValue());
         encoder.timestampRecv(recv);
-        encoder.flags().clear().marketByPrice(true).snapshot(snapshot).badData(badData);
+        encoder.flags()
+                .clear()
+                .marketByPrice(true)
+                .snapshot(snapshot)
+                .badData(badData)
+                .replayed(replayed);
         stream.ring().publish();
     }
 
@@ -116,5 +131,37 @@ class ShardLatencyTest {
         assertEquals(hold, minute.max(held), 0.05 * hold, "send minus event");
         assertEquals(network, minute.max(wire), 0.05 * network, "receipt minus send");
         assertEquals(3, minute.count(key(collector, "shard.venue_to_recv", StreamTestKit.SOURCE_CODE)));
+    }
+
+    @Test
+    void aRollsReplayedRecordsCountAsTheRollsHoldNotTheReadersTime() throws Exception {
+        final long rollHeld = TimeUnit.MILLISECONDS.toNanos(400);
+        record(0, true, false);
+        record(0, false, false, true, rollHeld);
+        record(0, false, false, true, rollHeld);
+        record(0, false, false);
+
+        final MinuteSummary minute = collectorMinute();
+        final MinuteHistograms collector = latency.sets().get(0);
+        final int decode = key(collector, "shard.decode", StreamTestKit.SOURCE_CODE);
+        final int held = key(collector, "shard.roll_hold", StreamTestKit.SOURCE_CODE);
+        assertEquals(2, minute.count(decode));
+        assertTrue(minute.max(decode) < rollHeld, "the reader's time stays the reader's: " + minute.max(decode));
+        assertEquals(2, minute.count(held));
+        assertTrue(minute.p50(held) >= rollHeld, "receipt to ring for the replayed: " + minute.p50(held));
+    }
+
+    @Test
+    void aReplayedSnapshotIsNeverANewVenueEventButAReplayedUpdateIs() throws Exception {
+        record(0, true, false);
+        final long later = SampledEpochNanoClock.INSTANCE.nanoTime();
+        record(later, true, false, true, READER_TIME);
+        record(0, false, false, true, READER_TIME);
+
+        final MinuteSummary minute = collectorMinute();
+        assertEquals(
+                1,
+                minute.count(key(latency.sets().get(0), "shard.venue_to_recv", StreamTestKit.SOURCE_CODE)),
+                "the replayed update; not the stand-in's subscribe book, though its time advanced");
     }
 }

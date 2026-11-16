@@ -16,7 +16,9 @@ import {
 // by themselves and get their orders as order statuses. A roll that doesn't come up is rolled back once the same way.
 //
 //   stopping      the roll item written, the service moved onto the new revision at zero and pinned to the host; once
-//                 the old task has gone (polled within the tick), raised to one
+//                 the old task has stopped (polled within the tick), raised to one. The service's counts drop the
+//                 task as soon as it is told to stop, before its process has read the roll item, so the task itself
+//                 is waited for: raised sooner, the roll would say `starting` and the gateway would cancel.
 //   starting      raised; done once the gateway is up on the new release, rolled back if it isn't in ROLL_READY_MS or
 //                 its task stopped ROLL_TASK_STOPS times
 //   rolling_back  the same onto the revision it ran before; rolled_back once up on it, failed if it isn't either
@@ -53,6 +55,8 @@ export interface Roll {
   fromTaskDefinition?: string;
   // The release whose process the current stop is for: the gateway hands over only if it runs it.
   stopsVersion?: string;
+  // The tasks the current stop is for, which must have stopped before the service is raised again.
+  stoppingTasks?: string[];
   startedAtMs?: number;
   // When the service was raised again in this phase; unset while the old task is still being stopped.
   raisedAtMs?: number;
@@ -155,6 +159,7 @@ async function begin(ctx: RollContext, requestedAtMs: number): Promise<Roll> {
     toVersion,
     fromTaskDefinition: current.taskDefinition,
     stopsVersion: up.version,
+    stoppingTasks: tasks,
     startedAtMs: now,
     untilMs: now + ROLL_MARKER_MS,
   });
@@ -198,7 +203,7 @@ async function proceed(ctx: RollContext, roll: Roll): Promise<Roll> {
   // Its process, if one runs, is on the release it was rolled to: that is the stop the gateway hands over at.
   const back = await save(ctx, {
     ...roll, phase: 'rolling_back', reason: why, raisedAtMs: undefined, stopsVersion: roll.toVersion,
-    untilMs: ctx.now + ROLL_MARKER_MS,
+    stoppingTasks: await runningTasks(ecs, deps.names, ctx.service), untilMs: ctx.now + ROLL_MARKER_MS,
   });
   await ecs.send(new UpdateServiceCommand({
     cluster: deps.names.cluster, service: ctx.service, taskDefinition: roll.fromTaskDefinition, desiredCount: 0,
@@ -216,7 +221,8 @@ async function raiseOnceStopped(ctx: RollContext, roll: Roll): Promise<Roll> {
   for (;;) {
     const found = await activeService(ecs, deps.names, service);
     const drained = found && (found.deployments ?? []).length <= 1
-      && (found.runningCount ?? 0) === 0 && (found.pendingCount ?? 0) === 0;
+      && (found.runningCount ?? 0) === 0 && (found.pendingCount ?? 0) === 0
+      && await allStopped(ecs, deps.names, roll.stoppingTasks ?? []);
     if (drained) break;
     if (ctx.tick.pollsLeft <= 0) return roll;
     ctx.tick.pollsLeft--;
@@ -233,6 +239,13 @@ async function raiseOnceStopped(ctx: RollContext, roll: Roll): Promise<Roll> {
     raisedAtMs: deps.nowMs(),
     cancelled: roll.cancelled || cancelled,
   });
+}
+
+/** Whether every one of the tasks has stopped: its container exited. One ECS no longer knows of stopped long ago. */
+async function allStopped(ecs: Client, names: GatewayNames, taskIds: string[]): Promise<boolean> {
+  if (taskIds.length === 0) return true;
+  const tasks = (await ecs.send(new DescribeTasksCommand({ cluster: names.cluster, tasks: taskIds }))).tasks ?? [];
+  return tasks.every((t: any) => t.lastStatus === 'STOPPED');
 }
 
 /** The EC2 instance the task runs on. */
@@ -274,6 +287,7 @@ export function rollItem(serviceId: string, roll: Roll, nowMs: number): Item {
     to_version: s(roll.toVersion),
     from_task_definition: s(roll.fromTaskDefinition),
     stops_version: s(roll.stopsVersion),
+    stopping_tasks: roll.stoppingTasks?.length ? { S: roll.stoppingTasks.join(',') } : undefined,
     started_at_ms: n(roll.startedAtMs),
     raised_at_ms: n(roll.raisedAtMs),
     ended_at_ms: n(roll.endedAtMs),
@@ -296,6 +310,7 @@ export function readRoll(item: Item): Roll | null {
     toVersion: item.to_version?.S,
     fromTaskDefinition: item.from_task_definition?.S,
     stopsVersion: item.stops_version?.S,
+    stoppingTasks: item.stopping_tasks?.S ? item.stopping_tasks.S.split(',') : undefined,
     startedAtMs: num('started_at_ms'),
     raisedAtMs: num('raised_at_ms'),
     endedAtMs: num('ended_at_ms'),
