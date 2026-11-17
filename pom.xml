@@ -68,7 +68,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-oms</artifactId>
-            <version>1.15.0</version>
+            <version>1.15.1</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
