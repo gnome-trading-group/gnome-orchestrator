@@ -19,6 +19,7 @@ import group.gnometrading.orchestrator.gateway.core.AccountLink;
 import group.gnometrading.orchestrator.gateway.core.CrossKey;
 import group.gnometrading.orchestrator.gateway.core.OrderTimings;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.simulation.book.venues.Complements;
 import group.gnometrading.simulation.config.ExchangeSimulationConfig;
 import group.gnometrading.simulation.config.SessionSimulationConfig;
 import group.gnometrading.simulation.config.SimulationResolver;
@@ -367,6 +368,19 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
         return null;
     }
 
+    /**
+     * Pairs the books of each market's two outcomes, so a print on either also trades against the other; a market the
+     * session trades only one outcome of reads only its own prints.
+     */
+    static void pairComplements(final Map<String, List<SimulatedBook>> byMarket) {
+        for (final List<SimulatedBook> market : byMarket.values()) {
+            if (market.size() == 2) {
+                market.get(0).complement = market.get(1);
+                market.get(1).complement = market.get(0);
+            }
+        }
+    }
+
     static long listingKey(final int exchangeId, final long securityId) {
         return ((long) exchangeId << 32) | (securityId & 0xFFFF_FFFFL);
     }
@@ -416,6 +430,7 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
             }
             final List<SimulatedBook> books = new ArrayList<>();
             final List<Integer> streamIds = new ArrayList<>();
+            final Map<String, List<SimulatedBook>> byMarket = new HashMap<>();
             try {
                 final SessionSimulationConfig simulation = SessionSimulationConfig.fromJson(simulationJson);
                 for (final Listing listing : listings) {
@@ -423,15 +438,22 @@ public final class SimulatedAccount implements AccountLink, AutoCloseable {
                         continue;
                     }
                     final Simulated simulated = simulations.simulate(sessionId, listing, simulation);
-                    books.add(new SimulatedBook(
+                    final SimulatedBook book = new SimulatedBook(
                             slot,
                             listingKey(exchangeId, listing.security().securityId()),
                             listing.listingId(),
                             simulated.streamId(),
                             simulated.exchange(),
-                            sessionId));
+                            sessionId);
+                    books.add(book);
                     streamIds.add(simulated.streamId());
+                    final String market = Complements.pairKey(listing);
+                    if (market != null) {
+                        byMarket.computeIfAbsent(market, key -> new ArrayList<>())
+                                .add(book);
+                    }
                 }
+                pairComplements(byMarket);
             } catch (Exception e) {
                 // Its new orders are refused for want of a book: nothing it sends can trade on a venue never built.
                 logger.logf(

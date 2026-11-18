@@ -22,6 +22,7 @@ import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportEncoder;
 import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.RejectReason;
+import group.gnometrading.schemas.book.Action;
 import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
@@ -630,10 +631,20 @@ final class SimulatedLane implements GnomeAgent {
                 }
             }
         }
+        feed(onStream);
+    }
+
+    /** The record to each book reading its stream, and a print also to each one's other-outcome book. */
+    private void feed(final List<SimulatedBook> onStream) {
+        final boolean trade = this.record.decoder.action() == Action.Trade;
         for (int i = 0; i < onStream.size(); i++) {
             final SimulatedBook book = onStream.get(i);
             book.onMarketData(this.record, this.wallNow);
             wake(book);
+            if (trade && book.complement != null) {
+                book.complement.onComplementTrade(this.record, this.wallNow);
+                wake(book.complement);
+            }
         }
     }
 

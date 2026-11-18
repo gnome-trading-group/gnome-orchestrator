@@ -35,6 +35,7 @@ import group.gnometrading.simulation.queues.QueueModel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
@@ -348,6 +349,74 @@ class SimulatedLaneTest {
                 },
                 64);
         return read;
+    }
+
+    /**
+     * A session trading both outcomes of a market on a venue that matches their orders against each other and prints the
+     * trade once: its book of the other outcome reads stream {@code otherStream}.
+     */
+    private void joinBothOutcomes(
+            final long slot, final String sessionId, final boolean paired, final int otherStream) {
+        final SimulatedBook ours = new SimulatedBook(
+                slot, SimulatedAccount.listingKey(EXCHANGE, SECURITY), LISTING, STREAM, venue(0), sessionId);
+        final SimulatedBook other = new SimulatedBook(
+                slot,
+                SimulatedAccount.listingKey(EXCHANGE, SECURITY + 1),
+                LISTING + 1,
+                otherStream,
+                venue(0),
+                sessionId);
+        if (paired) {
+            SimulatedAccount.pairComplements(Map.of("0xmarket", List.of(ours, other)));
+        }
+        this.handoffs.offer(
+                new SimulatedLane.AddSession(new SimulatedSession(slot, sessionId, null, List.of(ours, other))));
+        pass();
+    }
+
+    /** A print on {@code stream} of 20 bought at 60c. */
+    private void boughtAtSixtyOn(final int stream) {
+        final Mbp10Schema record = new Mbp10Schema();
+        record.encoder.action(Action.Trade);
+        record.encoder.side(group.gnometrading.schemas.book.Side.Bid);
+        record.encoder.price(60 * P / 100);
+        record.encoder.size(20 * S);
+        record.encoder.bidPrice0(Mbp10Decoder.priceNullValue()).bidSize0(Mbp10Decoder.sizeNullValue());
+        record.encoder.askPrice0(Mbp10Decoder.priceNullValue()).askSize0(Mbp10Decoder.sizeNullValue());
+        emptyBelowTop(record);
+        final int header = SbeMessage.HEADER_LENGTH;
+        record.buffer.putInt(header + StreamHeader.STREAM_ID_OFFSET, stream);
+        record.buffer.putLong(header + StreamHeader.TIMESTAMP_RECV_OFFSET, this.wallNanos.get());
+        record.buffer.putByte(header + StreamHeader.FLAGS_OFFSET, (byte) 0);
+        this.marketData.publishRaw(record.buffer, Mbp10Decoder.TEMPLATE_ID, record.totalMessageSize());
+        pass();
+    }
+
+    @Test
+    void aPrintOnTheOtherOutcomesStreamFillsOurBidWhenTheBooksArePaired() {
+        final int otherStream = STREAM + 1;
+        joinBothOutcomes(A, "session-a", true, otherStream);
+        book(40 * P / 100, 10 * S, 42 * P / 100, 40 * S);
+        command(LaneCommand.NEW, A, 1, Side.Bid, 40 * P / 100);
+        assertEquals(1, of(A, ExecType.NEW).size());
+
+        boughtAtSixtyOn(otherStream);
+
+        assertEquals(1, of(A, ExecType.FILL).size(), "20 bought on the other outcome took the 10 ahead and our 5");
+        assertEquals(5 * S, of(A, ExecType.FILL).get(0).filled());
+    }
+
+    @Test
+    void unpairedTheOtherOutcomesPrintLeavesOurBidResting() {
+        final int otherStream = STREAM + 1;
+        joinBothOutcomes(A, "session-a", false, otherStream);
+        book(40 * P / 100, 10 * S, 42 * P / 100, 40 * S);
+        command(LaneCommand.NEW, A, 1, Side.Bid, 40 * P / 100);
+
+        boughtAtSixtyOn(otherStream);
+
+        assertTrue(of(A, ExecType.FILL).isEmpty());
+        assertTrue(of(A, ExecType.PARTIAL_FILL).isEmpty());
     }
 
     @Test

@@ -5,7 +5,7 @@
     <parent>
         <groupId>group.gnometrading</groupId>
         <artifactId>gnome-parent</artifactId>
-        <version>1.6.0</version>
+        <version>1.7.0</version>
     </parent>
 
     <artifactId>gnome-orchestrator</artifactId>
@@ -63,7 +63,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-registry</artifactId>
-            <version>1.71.0</version>
+            <version>1.83.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -83,18 +83,18 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-simulation</artifactId>
-            <version>1.9.0</version>
+            <version>1.10.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>4.8.0</version>
+            <version>4.8.1</version>
         </dependency>
         <!-- The account path's fakes, for the order gateway's in-process tests. -->
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-gateways</artifactId>
-            <version>4.8.0</version>
+            <version>4.8.1</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>
@@ -130,7 +130,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-market-data-core</artifactId>
-            <version>3.0.0</version>
+            <version>3.11.2</version>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

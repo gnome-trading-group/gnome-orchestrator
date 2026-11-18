@@ -53,6 +53,9 @@ final class SimulatedBook {
     boolean clean;
     // On the lane's list of books with something to do; the lane's alone.
     boolean busy;
+    // The same session's book of the other outcome of this listing's market, on a venue that matches the two outcomes'
+    // orders against each other but prints the trade once; null otherwise. Set before the lane sees either book.
+    SimulatedBook complement;
 
     private final byte[] orderIdPrefix;
     private final byte[] orderIdBytes = new byte[OrderExecutionReportEncoder.exchangeOrderIdLength()];
@@ -163,6 +166,14 @@ final class SimulatedBook {
             this.exchange.processDue(nowNanos);
         }
         schedule(this.exchange.onMarketData(record), nowNanos);
+    }
+
+    /** A print of the other outcome's stream, which trades against this book at {@code 1 - price}. */
+    void onComplementTrade(final Mbp10Schema record, final long nowNanos) {
+        if (this.exchange.nextDueNanos() == Long.MAX_VALUE) {
+            this.exchange.processDue(nowNanos);
+        }
+        schedule(this.exchange.onComplementTrade(record), nowNanos);
     }
 
     /**
