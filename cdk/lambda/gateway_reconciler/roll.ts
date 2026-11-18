@@ -3,8 +3,8 @@ import {
   DescribeContainerInstancesCommand, DescribeTasksCommand, ListTasksCommand, PlacementConstraint, UpdateServiceCommand,
 } from '@aws-sdk/client-ecs';
 import {
-  activeService, Activity, Client, gatewayEnvironment, GatewayNames, GatewayRow, hostActive, ModeNames, ReconcileDeps,
-  revision, runningTasks, UP_STATES,
+  activeService, Activity, capacityProviderFor, Client, gatewayEnvironment, GatewayNames, GatewayRow, hostActive,
+  ModeNames, ReconcileDeps, revision, runningTasks, serviceProvider, UP_STATES,
 } from './reconciler';
 
 // Rolling a running gateway onto the release a fresh start would run (its pin, else the latest) without cancelling its
@@ -167,9 +167,14 @@ async function begin(ctx: RollContext, requestedAtMs: number): Promise<Roll> {
     + (instanceId ? ` on ${instanceId}` : ' (paper: a plain restart)'));
   const taskDefinition = await revision(
     ecs, deps.names, ctx.mode, row.gateway_key, toVersion, await gatewayEnvironment(row, deps));
-  // The roll item is written before the stop: it is what makes the gateway hand over rather than cancel.
+  // The roll item is written before the stop: it is what makes the gateway hand over rather than cancel. A paper roll
+  // is a plain restart, so it may land on other hosts: its exchange's home zone's, when it isn't on them already. A
+  // live roll stays on its host, where its orders are.
+  const home = capacityProviderFor(ctx.mode, row);
+  const rehome = paper && serviceProvider(current) !== home
+    ? { capacityProviderStrategy: [{ capacityProvider: home, weight: 1 }], forceNewDeployment: true } : {};
   await ecs.send(new UpdateServiceCommand({
-    cluster: deps.names.cluster, service: ctx.service, taskDefinition, desiredCount: 0, ...pin(instanceId),
+    cluster: deps.names.cluster, service: ctx.service, taskDefinition, desiredCount: 0, ...pin(instanceId), ...rehome,
   }));
   return raiseOnceStopped(ctx, roll);
 }

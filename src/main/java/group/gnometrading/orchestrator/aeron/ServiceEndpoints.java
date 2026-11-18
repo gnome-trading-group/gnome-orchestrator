@@ -43,6 +43,8 @@ public final class ServiceEndpoints {
     static final String PAPER_RECORDS_PER_SECOND = "paper_records_per_second";
     static final String PAPER_MAX_BOOKS = "paper_max_books";
     static final String PAPER_MAX_STREAMS = "paper_max_streams";
+    static final String AVAILABILITY_ZONE = "availability_zone";
+    static final String AVAILABILITY_ZONE_ID = "availability_zone_id";
     /** An order gateway's minutes outlive a stop by this long, so its last numbers can still be read. */
     public static final long MINUTES_TTL_SECONDS = TimeUnit.MINUTES.toSeconds(10);
 
@@ -86,6 +88,11 @@ public final class ServiceEndpoints {
             item.put(PAPER_RECORDS_PER_SECOND, AttributeValue.fromN(Long.toString(paper.recordsPerSecond())));
             item.put(PAPER_MAX_BOOKS, AttributeValue.fromN(Integer.toString(paper.maxBooks())));
             item.put(PAPER_MAX_STREAMS, AttributeValue.fromN(Integer.toString(paper.maxStreams())));
+        }
+        final HostZone zone = endpoint.zone();
+        if (zone != null) {
+            item.put(AVAILABILITY_ZONE, AttributeValue.fromS(zone.name()));
+            item.put(AVAILABILITY_ZONE_ID, AttributeValue.fromS(zone.id()));
         }
         final long writtenAtSeconds = TimeUnit.NANOSECONDS.toSeconds(endpoint.writtenAtNanos());
         item.put(EXPIRES_AT, AttributeValue.fromN(Long.toString(writtenAtSeconds + TTL_SECONDS)));
@@ -154,6 +161,11 @@ public final class ServiceEndpoints {
                                 number(item, PAPER_RECORDS_PER_SECOND),
                                 (int) number(item, PAPER_MAX_BOOKS),
                                 (int) number(item, PAPER_MAX_STREAMS))
+                        : null,
+                item.containsKey(AVAILABILITY_ZONE) && item.containsKey(AVAILABILITY_ZONE_ID)
+                        ? new HostZone(
+                                item.get(AVAILABILITY_ZONE).s(),
+                                item.get(AVAILABILITY_ZONE_ID).s())
                         : null);
     }
 

@@ -1,5 +1,7 @@
 import { GnomeAccount, platformRegions, Stage } from '@gnome-trading-group/gnome-shared-cdk';
 
+export { zoneCapacityProvider } from './zone-names';
+
 export const GITHUB_REPO = 'gnome-trading-group/gnome-orchestrator';
 export const GITHUB_BRANCH = 'release';
 
@@ -31,7 +33,9 @@ export const CONFIGS: { [stage in Stage]?: OrchestratorConfig } = {
  */
 export const ORDER_GATEWAYS = {
   cluster: 'order-gateways',
-  // A gateway row's mode picks the base task definition its revision is copied from and the hosts it runs on.
+  // A gateway row's mode picks the base task definition its revision is copied from and the hosts it runs on: the
+  // hosts of its exchange's home zone (`<capacityProvider>-<zone ID>`), or, for an exchange with no home zone, the
+  // region's hosts in any zone (`capacityProvider`).
   modes: {
     live: { baseFamily: 'order-gateway', capacityProvider: 'order-gateway-hosts' },
     paper: { baseFamily: 'order-gateway-paper', capacityProvider: 'order-gateway-paper-hosts' },

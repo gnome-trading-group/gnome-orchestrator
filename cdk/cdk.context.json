@@ -196,5 +196,65 @@
   "security-group:account=241533121172:region=ap-northeast-1:securityGroupName=gnome-platform-sg:vpcId=vpc-0338689097e741afe": {
     "securityGroupId": "sg-0a27e823e13bdb6fd",
     "allowAllOutbound": false
+  },
+  "vpc-provider:account=443370708724:filter.tag:gnome:network=platform:region=us-east-2:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-0e68eab88dc4ae743",
+    "vpcCidrBlock": "10.147.0.0/16",
+    "ownerAccountId": "443370708724",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-00890df2d8020d875",
+            "cidr": "10.147.0.0/20",
+            "availabilityZone": "us-east-2a",
+            "routeTableId": "rtb-0ef3f0454ba2b7419"
+          },
+          {
+            "subnetId": "subnet-0d14169ccb90ba93f",
+            "cidr": "10.147.16.0/20",
+            "availabilityZone": "us-east-2b",
+            "routeTableId": "rtb-08c048a3bf7bed129"
+          }
+        ]
+      }
+    ]
+  },
+  "security-group:account=443370708724:region=us-east-2:securityGroupName=gnome-platform-sg:vpcId=vpc-0e68eab88dc4ae743": {
+    "securityGroupId": "sg-022f6e5d4f1eda5bc",
+    "allowAllOutbound": false
+  },
+  "vpc-provider:account=241533121172:filter.tag:gnome:network=platform:region=us-east-2:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-024038de172729550",
+    "vpcCidrBlock": "10.131.0.0/16",
+    "ownerAccountId": "241533121172",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-08c9445d167273a11",
+            "cidr": "10.131.0.0/20",
+            "availabilityZone": "us-east-2a",
+            "routeTableId": "rtb-0c520b477ae48a575"
+          },
+          {
+            "subnetId": "subnet-0adafa6e9b0c5b3b8",
+            "cidr": "10.131.16.0/20",
+            "availabilityZone": "us-east-2b",
+            "routeTableId": "rtb-09f6780e4c14a7421"
+          }
+        ]
+      }
+    ]
+  },
+  "security-group:account=241533121172:region=us-east-2:securityGroupName=gnome-platform-sg:vpcId=vpc-024038de172729550": {
+    "securityGroupId": "sg-0b0b5a0552b2871b9",
+    "allowAllOutbound": false
   }
 }

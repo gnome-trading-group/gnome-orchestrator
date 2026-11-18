@@ -19,6 +19,7 @@ package group.gnometrading.orchestrator.aeron;
  * @param startedAtMs when an order gateway's process started, epoch milliseconds, so a restart is told apart from a
  *     process still running; 0 for a shard
  * @param paper a paper gateway's load against its caps; null for any other
+ * @param zone the availability zone it runs in; null off EC2 or from a release that didn't say
  */
 public record ServiceEndpoint(
         Kind kind,
@@ -35,7 +36,8 @@ public record ServiceEndpoint(
         boolean canHandOver,
         boolean handover,
         long startedAtMs,
-        PaperLoad paper) {
+        PaperLoad paper,
+        HostZone zone) {
 
     /** What a paper gateway carries against its caps: books (session x listing), distinct streams, records/s. */
     public record PaperLoad(int books, int streams, long recordsPerSecond, int maxBooks, int maxStreams) {}
@@ -69,6 +71,7 @@ public record ServiceEndpoint(
                 canHandOver,
                 handover,
                 0,
+                null,
                 null);
     }
 

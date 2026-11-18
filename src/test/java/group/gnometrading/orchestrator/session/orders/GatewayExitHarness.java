@@ -48,17 +48,21 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
 import org.agrona.concurrent.SystemEpochClock;
@@ -230,11 +234,13 @@ public final class GatewayExitHarness {
         scenarios.put("kill", this::kill);
         scenarios.put("load", this::load);
         scenarios.put("emergency", this::emergency);
+        scenarios.put("cancelrace", this::cancelRace);
         final Set<String> wanted = Set.of(scenario.split(","));
         for (final Map.Entry<String, Scenario> entry : scenarios.entrySet()) {
             final boolean inAll = wanted.contains("all")
                     && !entry.getKey().equals("load")
-                    && !entry.getKey().equals("emergency");
+                    && !entry.getKey().equals("emergency")
+                    && !entry.getKey().equals("cancelrace");
             if (!inAll && !wanted.contains(entry.getKey())) {
                 continue;
             }
@@ -342,6 +348,118 @@ public final class GatewayExitHarness {
             System.out.printf("   journal: %d in, %d out, %d gaps%n", counts[0], counts[1], counts[2]);
             check(counts[2] > 0, "the gap is in the journal");
         }
+    }
+
+    /**
+     * A quote cancelled before, while and after the venue answers it: each order is sent, then its cancel that long
+     * after, for every delay in {@code -Drace.delays.ms} (0,2,5,10,20,50,100,200), {@code -Drace.rounds} (5) times
+     * each, {@code -Drace.pause.ms} (500) apart. Each order must end with one terminal report, with no refused cancel
+     * reaching the session and no NEW after its end, and none may rest at the venue afterwards. Prints how each delay's
+     * orders ended, and the cancel requests the lane sent (each cancel goes as more than one copy).
+     */
+    private void cancelRace() throws Exception {
+        final long[] delays = Arrays.stream(System.getProperty("race.delays.ms", "0,2,5,10,20,50,100,200")
+                        .split(","))
+                .mapToLong(Long::parseLong)
+                .toArray();
+        final int rounds = Integer.getInteger("race.rounds", 5);
+        final long pauseMs = Long.getLong("race.pause.ms", 500);
+        final AtomicLongArray sent = new AtomicLongArray(RequestClass.values().length);
+        final AccountLane.Admissions tap = new AccountLane.Admissions() {
+            @Override
+            public void decided(
+                    final long sessionSlot,
+                    final long clientOidCounter,
+                    final RequestClass type,
+                    final AdmissionAction action,
+                    final long queuedNanos,
+                    final long tokensLeft) {
+                if (action == AdmissionAction.SENT) {
+                    sent.incrementAndGet(type.ordinal());
+                }
+            }
+        };
+        final Map<Long, String> outcomes = new LinkedHashMap<>();
+        final Map<Long, Long> delayOf = new HashMap<>();
+        final List<String> problems = new ArrayList<>();
+        try (Gateway gateway = new Gateway(buildAccount(new GatewaySettings("live:exit:main", 4096, 8)), tap);
+                TestSession session = gateway.session("race")) {
+            long counter = 0;
+            for (final long delay : delays) {
+                for (int round = 0; round < rounds; round++) {
+                    final long order = ++counter;
+                    delayOf.put(order, delay);
+                    session.order(order);
+                    if (delay > 0) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(delay));
+                    }
+                    session.cancel(order);
+                    if (!awaitFor(() -> ended(session, order), TimeUnit.SECONDS.toNanos(15))) {
+                        problems.add("order " + order + " (" + delay + " ms) never ended: " + sequence(session, order));
+                    }
+                    Thread.sleep(pauseMs);
+                }
+            }
+            // Past the gateway's checks on a cancel that found nothing (600 ms, 3 s): anything late shows up now.
+            Thread.sleep(4_000);
+            for (long order = 1; order <= counter; order++) {
+                final String seq = sequence(session, order);
+                outcomes.put(order, seq);
+                if (seq.contains("CANCEL_REJECT")) {
+                    problems.add("order " + order + " (" + delayOf.get(order) + " ms): a refused cancel reached the "
+                            + "session: " + seq);
+                }
+                if (terminalCount(session, order) != 1) {
+                    problems.add("order " + order + " (" + delayOf.get(order) + " ms) ended "
+                            + terminalCount(session, order) + " times: " + seq);
+                }
+                if (seq.matches(".*(CANCEL|REJECT|FILL|EXPIRE)\\b.*\\bNEW\\b.*")) {
+                    problems.add("order " + order + ": a NEW after its end: " + seq);
+                }
+            }
+            System.out.printf("   %-8s %s%n", "delay", "how the orders ended (reports each order got)");
+            for (final long delay : delays) {
+                final Map<String, Long> byOutcome = new TreeMap<>();
+                outcomes.forEach((order, seq) -> {
+                    if (delayOf.get(order) == delay) {
+                        byOutcome.merge(seq, 1L, Long::sum);
+                    }
+                });
+                System.out.printf("   %-8s %s%n", delay + " ms", byOutcome);
+            }
+            System.out.printf(
+                    "   requests sent: %d new, %d cancel (%d cancels asked)%n",
+                    sent.get(RequestClass.NEW.ordinal()), sent.get(RequestClass.CANCEL.ordinal()), counter);
+            final List<String> ids = new ArrayList<>(placed);
+            problems.forEach(problem -> System.out.println("   " + problem));
+            check(problems.isEmpty(), "every order ended once, with no refused cancel and no NEW after its end");
+            check(awaitGone(ids, TimeUnit.SECONDS.toNanos(10)), "nothing rests at the venue");
+        }
+    }
+
+    private static boolean ended(final TestSession session, final long counter) {
+        return terminalCount(session, counter) > 0;
+    }
+
+    private static long terminalCount(final TestSession session, final long counter) {
+        return session.reports().stream()
+                .filter(r -> r.getClientOidCounter() == counter)
+                .map(r -> r.decoder.execType())
+                .filter(type -> type == ExecType.CANCEL
+                        || type == ExecType.REJECT
+                        || type == ExecType.FILL
+                        || type == ExecType.EXPIRE)
+                .count();
+    }
+
+    private static String sequence(final TestSession session, final long counter) {
+        return session.reports().stream()
+                .filter(r -> r.getClientOidCounter() == counter)
+                .map(r -> r.decoder.execType() == ExecType.REJECT || r.decoder.execType() == ExecType.CANCEL_REJECT
+                        ? r.decoder.execType() + "(" + r.decoder.rejectReason() + ")"
+                        : String.valueOf(r.decoder.execType()))
+                .reduce((a, b) -> a + " " + b)
+                .orElse("nothing");
     }
 
     /** Session and gateway both killed: the restarted gateway cancels the orders once the hello grace has passed. */

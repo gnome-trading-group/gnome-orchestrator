@@ -1,11 +1,25 @@
 import * as cdk from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { OrderGatewayStack } from '../lib/stacks/order-gateway-stack';
-import { ORDER_GATEWAYS } from '../lib/config';
+import { ORDER_GATEWAYS, zoneCapacityProvider } from '../lib/config';
+
+// The platform network's lookup as the account would answer it: a public subnet in each of eu-west-1's platform zones.
+const PLATFORM_CONTEXT = {
+  'vpc-provider:account=123456789012:filter.tag:gnome:network=platform:region=eu-west-1:returnAsymmetricSubnets=true': {
+    vpcId: 'vpc-0platform', vpcCidrBlock: '10.144.0.0/16', ownerAccountId: '123456789012', availabilityZones: [],
+    subnetGroups: [{ name: 'public', type: 'Public', subnets: [
+      { subnetId: 'subnet-a', cidr: '10.144.0.0/20', availabilityZone: 'eu-west-1a', routeTableId: 'rtb-a' },
+      { subnetId: 'subnet-b', cidr: '10.144.16.0/20', availabilityZone: 'eu-west-1b', routeTableId: 'rtb-b' },
+    ] }],
+  },
+  'security-group:account=123456789012:region=eu-west-1:securityGroupName=gnome-platform-sg:vpcId=vpc-0platform': {
+    securityGroupId: 'sg-0platform', allowAllOutbound: false,
+  },
+};
 
 describe('the order gateway stack', () => {
-  const app = new cdk.App();
+  const app = new cdk.App({ context: PLATFORM_CONTEXT });
   const stack = new OrderGatewayStack(app, 'Gateways', {
     env: { account: '123456789012', region: 'eu-west-1' },
     stage: Stage.DEV,
@@ -29,7 +43,7 @@ describe('the order gateway stack', () => {
   };
 
   it('has a live and a paper host group, each scaling from zero on its own instance type', () => {
-    template.resourceCountIs('AWS::AutoScaling::AutoScalingGroup', 2);
+    template.resourceCountIs('AWS::AutoScaling::AutoScalingGroup', 6);
     template.hasResourceProperties('AWS::ECS::CapacityProvider', Match.objectLike({ Name: live.capacityProvider }));
     template.hasResourceProperties('AWS::ECS::CapacityProvider', Match.objectLike({
       Name: paper.capacityProvider,
@@ -48,6 +62,64 @@ describe('the order gateway stack', () => {
       expect(group.Properties.MinSize).toBe('0');
       expect(group.Properties.NewInstancesProtectedFromScaleIn).toBe(true);
     }
+  });
+
+  it('has a live and a paper host group in each platform zone, held to that zone, named by its zone ID', () => {
+    const groups = template.findResources('AWS::AutoScaling::AutoScalingGroup');
+    const providers = Object.values(template.findResources('AWS::ECS::CapacityProvider')) as any[];
+    for (const [zoneId, subnet] of [['euw1-az2', 'subnet-a'], ['euw1-az3', 'subnet-b']]) {
+      for (const regional of [live.capacityProvider, paper.capacityProvider]) {
+        const provider = providers.find((p) => p.Properties.Name === zoneCapacityProvider(regional, zoneId));
+        expect(provider).toBeDefined();
+        const group = groups[provider.Properties.AutoScalingGroupProvider.AutoScalingGroupArn.Ref];
+        expect(group.Properties.VPCZoneIdentifier).toEqual([subnet]);
+        expect(group.Properties.MinSize).toBe('0');
+      }
+    }
+    const regionalGroup = groups[providers.find((p) => p.Properties.Name === live.capacityProvider)
+      .Properties.AutoScalingGroupProvider.AutoScalingGroupArn.Ref];
+    expect(regionalGroup.Properties.VPCZoneIdentifier).toEqual(['subnet-a', 'subnet-b']);
+  });
+
+  it('tries the next instance type in the same zone: four live, three paper', () => {
+    const overrides = (Object.values(template.findResources('AWS::AutoScaling::AutoScalingGroup')) as any[])
+      .map((g) => g.Properties.MixedInstancesPolicy?.LaunchTemplate.Overrides?.map((o: any) => o.InstanceType))
+      .filter(Boolean);
+    expect(overrides).toContainEqual(['c7a.large', 'c7i.large', 'm7a.large', 'm7i.large']);
+    expect(overrides).toContainEqual(['c7a.medium', 'm7a.medium', 'c7i.large']);
+    const zoneLive = (Object.values(template.findResources('AWS::EC2::LaunchTemplate')) as any[])
+      .filter((t) => t.Properties.LaunchTemplateData.Placement);
+    expect(zoneLive).toHaveLength(3);
+  });
+
+  it('reserves the health port on its host, so ECS never places two gateways on one host', () => {
+    for (const family of [live.baseFamily, paper.baseFamily]) {
+      expect(taskDefinition(family).ContainerDefinitions[0].PortMappings)
+        .toEqual([{ ContainerPort: 8080, HostPort: 8080, Protocol: 'tcp' }]);
+    }
+  });
+
+  it('refuses a zone the platform network has no subnet in', () => {
+    const app = new cdk.App({ context: {
+      ...PLATFORM_CONTEXT,
+      'vpc-provider:account=123456789012:filter.tag:gnome:network=platform:region=eu-west-1:returnAsymmetricSubnets=true': {
+        ...(PLATFORM_CONTEXT as any)['vpc-provider:account=123456789012:filter.tag:gnome:network=platform:region=eu-west-1:returnAsymmetricSubnets=true'],
+        subnetGroups: [{ name: 'public', type: 'Public', subnets: [
+          { subnetId: 'subnet-a', cidr: '10.144.0.0/20', availabilityZone: 'eu-west-1a', routeTableId: 'rtb-a' },
+        ] }],
+      },
+    } });
+    const stack = new OrderGatewayStack(app, 'Gateways', {
+      env: { account: '123456789012', region: 'eu-west-1' }, stage: Stage.DEV, registryApiKeyId: 'key-id',
+    });
+    Annotations.fromStack(stack).hasError('*', Match.stringLikeRegexp('no public subnet in eu-west-1b'));
+  });
+
+  it('still builds against the placeholder network of an uncached lookup, so the lookup can run', () => {
+    const uncached = new cdk.App();
+    expect(() => new OrderGatewayStack(uncached, 'Gateways', {
+      env: { account: '123456789012', region: 'us-east-2' }, stage: Stage.DEV, registryApiKeyId: 'key-id',
+    })).not.toThrow();
   });
 
   it('launches live hosts into the precision-time group, c7a first and c7i when c7a can\'t launch', () => {

@@ -20,6 +20,7 @@ import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
 import group.gnometrading.orchestrator.aeron.HostAddress;
+import group.gnometrading.orchestrator.aeron.HostZone;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.AwsModule;
@@ -1079,7 +1080,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                                 canHandOver,
                                 status.handingOver(),
                                 startedAtMs,
-                                paper == null ? null : paperLoad(paper.account().load()))))
+                                paper == null ? null : paperLoad(paper.account().load()),
+                                HostZone.current())))
                 .start();
     }
 

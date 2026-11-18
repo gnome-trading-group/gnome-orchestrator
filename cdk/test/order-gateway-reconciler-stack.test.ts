@@ -55,11 +55,14 @@ describe('the gateway reconciler\'s access', () => {
     expect(statements).toContain('parameter/gnome/market-data/api-url');
   });
 
-  it('may raise the live and the paper host groups in every region', () => {
+  it('may raise the live and the paper host groups in every region, the regional ones and each zone\'s', () => {
     for (const region of ['us-east-1', 'eu-west-1', 'ap-northeast-1']) {
       expect(statements).toContain(`autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-GatewayHosts*`);
       expect(statements).toContain(`autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-GatewayPaperHosts*`);
     }
+    expect(statements).toContain('autoScalingGroupName/*-OrchestratorOrderGatewayStack-us-east-2-Gatewayuse2az2Hosts*');
+    expect(statements).toContain(
+      'autoScalingGroupName/*-OrchestratorOrderGatewayStack-us-east-2-GatewayPaperuse2az2Hosts*');
   });
 
   it('may pass both gateway task roles', () => {

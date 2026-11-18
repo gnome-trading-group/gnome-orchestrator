@@ -9,7 +9,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 import {
-  API_KEY_SECRET_NAMES, platformRegions, PRIMARY_REGION, SERVICE_ENDPOINTS,
+  API_KEY_SECRET_NAMES, platformRegions, platformZoneIds, PRIMARY_REGION, SERVICE_ENDPOINTS,
 } from '@gnome-trading-group/gnome-shared-cdk';
 import { join } from 'path';
 import { ORDER_GATEWAYS } from '../config';
@@ -159,8 +159,9 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
     }));
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['autoscaling:SetDesiredCapacity'],
-      // OrderGatewayStack's live and paper groups, named by CloudFormation after its stack.
-      resources: platformRegions().flatMap(region => ['GatewayHosts', 'GatewayPaperHosts'].map(group =>
+      // OrderGatewayStack's live and paper groups, the region's and each zone's, named by CloudFormation after its
+      // stack and their ids (a zone's id with its hyphens dropped).
+      resources: platformRegions().flatMap(region => gatewayHostGroups(region).map(group =>
         `arn:aws:autoscaling:${region}:${this.account}:autoScalingGroup:*:`
         + `autoScalingGroupName/*-OrchestratorOrderGatewayStack-${region}-${group}*`)),
     }));
@@ -215,4 +216,11 @@ export class OrderGatewayReconcilerStack extends cdk.Stack {
       datapointsToAlarm: 3,
     });
   }
+}
+
+/** The id prefixes OrderGatewayStack gives a region's host groups: live and paper, regional and per zone. */
+export function gatewayHostGroups(region: string): string[] {
+  const zones = platformZoneIds(region).map(zone => zone.id.replace(/-/g, ''));
+  return ['GatewayHosts', 'GatewayPaperHosts',
+    ...zones.flatMap(zone => [`Gateway${zone}Hosts`, `GatewayPaper${zone}Hosts`])];
 }

@@ -8,11 +8,11 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import {
-  API_KEY_SECRET_NAMES, CLOCK_STATUS_DIR, hostClockUserData, lookupPlatformNetwork, PLATFORM_SSM, PRIMARY_REGION,
-  SERVICE_ENDPOINTS, Stage,
+  API_KEY_SECRET_NAMES, CLOCK_STATUS_DIR, hostClockUserData, lookupPlatformNetwork, PLATFORM_SSM, platformZoneIds,
+  PRIMARY_REGION, SERVICE_ENDPOINTS, Stage,
 } from '@gnome-trading-group/gnome-shared-cdk';
 import { join } from 'path';
-import { ORDER_GATEWAYS } from '../config';
+import { ORDER_GATEWAYS, zoneCapacityProvider } from '../config';
 
 
 // Provisional until the gateways are sized under load: two cores and 4 GiB, as a gateway's ingress, egress, Aeron driver,
@@ -24,6 +24,12 @@ const INSTANCE_TYPES = ['c7a.large', 'c7i.large'];
 // A paper gateway simulates its venue for paper sessions and holds nothing anyone would lose: one core and 2 GiB, not
 // burstable for the same reason as live.
 const PAPER_INSTANCE_TYPE = 'c7a.medium';
+// A zone's hosts: a gateway starts only in its exchange's home zone, so a shortage of the first type there falls to
+// the next type in the same zone rather than to another zone. Every live type can join the precision-time group; the
+// m7 types have more memory for a little more, used only when the c7 pools are empty. A paper host past c7a.medium
+// takes the next size up on Intel, the same size being absent.
+const ZONE_INSTANCE_TYPES = ['c7a.large', 'c7i.large', 'm7a.large', 'm7i.large'];
+const ZONE_PAPER_INSTANCE_TYPES = ['c7a.medium', 'm7a.medium', 'c7i.large'];
 // More than the gateways a region will hold for a while; the start route can start no more than this many at once.
 const MAX_HOSTS = 4;
 // A venue runs as many paper gateways as its sessions need (the registry's paper-instance route starts the next when
@@ -75,6 +81,14 @@ export class OrderGatewayStack extends cdk.Stack {
       ORDER_GATEWAYS.modes.live.capacityProvider, precisionTimeGroup);
     this.hosts(cluster, vpc, securityGroup, hostRole, 'GatewayPaper', [PAPER_INSTANCE_TYPE], MAX_PAPER_HOSTS,
       ORDER_GATEWAYS.modes.paper.capacityProvider);
+    // A group per zone for each mode, so the reconciler can start a gateway in its exchange's home zone. Each holds
+    // the region's whole limit: the venues whose home is that zone may be all the region has.
+    for (const zone of platformZoneIds(this.region)) {
+      this.hosts(cluster, vpc, securityGroup, hostRole, `Gateway-${zone.id}`, ZONE_INSTANCE_TYPES, MAX_HOSTS,
+        zoneCapacityProvider(ORDER_GATEWAYS.modes.live.capacityProvider, zone.id), precisionTimeGroup, zone.name);
+      this.hosts(cluster, vpc, securityGroup, hostRole, `GatewayPaper-${zone.id}`, ZONE_PAPER_INSTANCE_TYPES,
+        MAX_PAPER_HOSTS, zoneCapacityProvider(ORDER_GATEWAYS.modes.paper.capacityProvider, zone.id), undefined, zone.name);
+    }
 
     // Named, so the gateway reconciler may pass them to the services it creates.
     const taskRole = new iam.Role(this, 'GatewayTaskRole', {
@@ -140,12 +154,13 @@ export class OrderGatewayStack extends cdk.Stack {
   }
 
   /**
-   * A group of gateway hosts that scales from zero, and its capacity provider in the cluster. With more than one type,
-   * the first is used whenever it launches and the rest only when it can't.
+   * A group of gateway hosts that scales from zero, and its capacity provider in the cluster: in one zone when `zone`
+   * names one, else in every platform zone. With more than one type, the first is used whenever it launches and the
+   * rest only when it can't.
    */
   private hosts(
     cluster: ecs.Cluster, vpc: ec2.IVpc, securityGroup: ec2.ISecurityGroup, hostRole: iam.IRole, id: string,
-    instanceTypes: string[], maxHosts: number, capacityProviderName: string, placementGroup?: string,
+    instanceTypes: string[], maxHosts: number, capacityProviderName: string, placementGroup?: string, zone?: string,
   ) {
     const userData = ec2.UserData.forLinux();
     userData.addCommands(...hostClockUserData());
@@ -164,9 +179,15 @@ export class OrderGatewayStack extends cdk.Stack {
       (launchTemplate.node.defaultChild as ec2.CfnLaunchTemplate)
         .addPropertyOverride('LaunchTemplateData.Placement.GroupName', placementGroup);
     }
+    const vpcSubnets = { subnetType: ec2.SubnetType.PUBLIC, ...(zone ? { availabilityZones: [zone] } : {}) };
+    // An error the synth reports once the network is looked up, not a throw: the first pass of a synth whose lookup
+    // isn't cached sees a placeholder network with no real zones, and a throw would stop the lookup itself.
+    if (zone && vpc.selectSubnets(vpcSubnets).subnetIds.length === 0) {
+      cdk.Annotations.of(this).addError(`The platform network has no public subnet in ${zone} for ${id}`);
+    }
     const hosts = new autoscaling.AutoScalingGroup(this, `${id}Hosts`, {
       vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      vpcSubnets,
       ...(instanceTypes.length === 1 ? { launchTemplate } : {
         mixedInstancesPolicy: {
           launchTemplate,
@@ -257,6 +278,9 @@ export class OrderGatewayStack extends cdk.Stack {
       }),
       // The planned stop cancels every session's orders and says goodbye before anything closes.
       stopTimeout: cdk.Duration.seconds(120),
+      // Declared so ECS reserves it on the host: it then never places a second gateway there, whatever the host's
+      // size (a zone's fallback types have room for two by memory). The gateway listens on it for its health check.
+      portMappings: [{ containerPort: 8080, hostPort: 8080, protocol: ecs.Protocol.TCP }],
     });
     container.addMountPoints(
       { sourceVolume: 'state', containerPath: STATE_DIRECTORY, readOnly: false },

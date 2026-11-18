@@ -108,13 +108,55 @@ class ServiceEndpointsTest {
                 false,
                 false,
                 1_793_000_000_123L,
-                new ServiceEndpoint.PaperLoad(410, 96, 1_850, 800, 150));
+                new ServiceEndpoint.PaperLoad(410, 96, 1_850, 800, 150),
+                null);
         this.endpoints.put(paper);
 
         assertEquals("410", this.stored.get().get(ServiceEndpoints.PAPER_BOOKS).n());
         assertEquals(
                 "150", this.stored.get().get(ServiceEndpoints.PAPER_MAX_STREAMS).n());
         assertEquals(paper, this.endpoints.get(ServiceEndpoint.Kind.ORDER_GATEWAY, "paper:kalshi:2", WRITTEN));
+    }
+
+    @Test
+    void anEndpointCarriesTheZoneItsHostRunsInByNameAndId() {
+        final ServiceEndpoint gateway = new ServiceEndpoint(
+                ServiceEndpoint.Kind.ORDER_GATEWAY,
+                "live:kalshi:main",
+                "task-4",
+                "us-east-2",
+                "10.144.48.12",
+                40010,
+                "READY",
+                "2.4.0",
+                WRITTEN,
+                2,
+                5,
+                true,
+                false,
+                1_793_000_000_123L,
+                null,
+                new HostZone("us-east-2b", "use2-az2"));
+        this.endpoints.put(gateway);
+
+        assertEquals(
+                "us-east-2b",
+                this.stored.get().get(ServiceEndpoints.AVAILABILITY_ZONE).s());
+        assertEquals(
+                "use2-az2",
+                this.stored.get().get(ServiceEndpoints.AVAILABILITY_ZONE_ID).s());
+        assertEquals(gateway, this.endpoints.get(ServiceEndpoint.Kind.ORDER_GATEWAY, "live:kalshi:main", WRITTEN));
+    }
+
+    @Test
+    void anEndpointWithoutAZoneWritesNoneAndReadsBackWithout() {
+        this.endpoints.put(this.shard);
+
+        assertFalse(this.stored.get().containsKey(ServiceEndpoints.AVAILABILITY_ZONE));
+        assertFalse(this.stored.get().containsKey(ServiceEndpoints.AVAILABILITY_ZONE_ID));
+        assertNull(this.endpoints
+                .get(ServiceEndpoint.Kind.SHARD, "use1-e89064", WRITTEN)
+                .zone());
     }
 
     @Test

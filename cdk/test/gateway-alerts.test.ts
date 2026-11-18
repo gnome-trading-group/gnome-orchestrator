@@ -1,5 +1,5 @@
 import {
-  AlertState, EMPTY_STATE, evaluate, firingMode, Observation, RESTARTED_HOLD_MS, START_STUCK_MS,
+  AlertState, EMPTY_STATE, evaluate, firingMode, Observation, RESTARTED_HOLD_MS, START_STUCK_MS, UNPLACED_MS,
 } from '../lambda/gateway_reconciler/alerts';
 import { Activity, Outcome } from '../lambda/gateway_reconciler/reconciler';
 import { Roll } from '../lambda/gateway_reconciler/roll';
@@ -301,3 +301,60 @@ describe('a gateway being rolled', () => {
     expect(ticks([{ ...seen('running', ready()), roll: rolled('done', 0) }])).toEqual([[]]);
   });
 });
+
+describe('a gateway with no host in its home zone', () => {
+  const UNPLACED = '(service order-gateway-live-kalshi-main) was unable to place a task because no container instance'
+    + ' met all of its requirements.';
+  const homed = (outcome: Outcome, activity: Activity | null, serviceEvent?: string, taskId?: string): Observation => ({
+    ...seen(outcome, activity, serviceEvent), homeZoneId: 'use2-az2',
+    capacityProvider: 'order-gateway-hosts-use2-az2', taskId,
+  });
+
+  it('is short of capacity there once ECS can\'t place it for 5 minutes, and clears once a task runs', () => {
+    const minutes = UNPLACED_MS / MINUTE;
+    const types = ticks([
+      homed('created', null, UNPLACED),
+      ...Array.from({ length: minutes }, () => homed('running', null, UNPLACED)),
+      homed('running', starting, undefined, 't1'),
+    ]);
+
+    expect(types.slice(0, minutes)).toEqual(Array(minutes).fill([]));
+    expect(types[minutes]).toContain('HOME_ZONE_NO_CAPACITY');
+    expect(types[minutes + 1]).not.toContain('HOME_ZONE_NO_CAPACITY');
+  });
+
+  it('is short of capacity once its task has waited PROVISIONING for 5 minutes, counted from the task\'s creation', () => {
+    const waiting = (createdAgoMs: number, at: number): Observation => ({
+      ...homed('running', starting, 'has started 1 tasks', 't1'), provisioningSinceMs: at - createdAgoMs,
+    });
+    const first = evaluate([waiting(4 * MINUTE, T0)], EMPTY_STATE, T0);
+    expect(first.firing.has(`HOME_ZONE_NO_CAPACITY:${KEY}`)).toBe(false);
+    const later = evaluate([waiting(4 * MINUTE + MINUTE, T0 + MINUTE)], first.state, T0 + MINUTE);
+    expect(later.firing.has(`HOME_ZONE_NO_CAPACITY:${KEY}`)).toBe(true);
+    const placed = evaluate([homed('running', starting, 'has started 1 tasks', 't1')], later.state, T0 + 2 * MINUTE);
+    expect(placed.firing.has(`HOME_ZONE_NO_CAPACITY:${KEY}`)).toBe(false);
+  });
+
+  it('says which zone and hosts, in the gateway\'s mode', () => {
+    const first = evaluate([homed('created', null, UNPLACED)], EMPTY_STATE, T0).state;
+    const late = evaluate([homed('running', null, UNPLACED)], first, T0 + UNPLACED_MS);
+    const alert = late.firing.get(`HOME_ZONE_NO_CAPACITY:${KEY}`)!;
+    expect(alert.title).toContain('use2-az2');
+    expect(alert.labels).toMatchObject({ zoneId: 'use2-az2', capacityProvider: 'order-gateway-hosts-use2-az2' });
+    expect(alert.mode).toBe('live');
+  });
+
+  it('is nothing for a gateway with no home zone, or one that is merely slow to come up', () => {
+    const minutes = UNPLACED_MS / MINUTE;
+    const plain = ticks(Array.from({ length: minutes + 1 }, () => seen('running', null, UNPLACED)));
+    expect(plain.flat()).not.toContain('HOME_ZONE_NO_CAPACITY');
+    const slow = ticks(Array.from({ length: minutes + 1 }, () => homed('running', starting, 'has started 1 tasks')));
+    expect(slow.flat()).not.toContain('HOME_ZONE_NO_CAPACITY');
+  });
+
+  it('is no outage when stopped to start in its home zone', () => {
+    const types = ticks([seen('running', ready()), seen('rehoming', ready()), seen('started', null)]);
+    expect(types.flat()).not.toContain('GATEWAY_DOWN');
+  });
+});
+

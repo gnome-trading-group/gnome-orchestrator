@@ -12,6 +12,7 @@ import {
 } from '@aws-sdk/client-ecs';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { platformRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
+import { zoneCapacityProvider } from '../../lib/zone-names';
 import { Alert, AlertState, EMPTY_STATE, evaluate, firingMode, Observation } from './alerts';
 import { readRoll, Roll, rollItem, RollTick, rollTick, rollUnderWay, stepRoll } from './roll';
 
@@ -29,6 +30,12 @@ import { readRoll, Roll, rollItem, RollTick, rollTick, rollUnderWay, stepRoll } 
 // cluster and, for each mode, the hosts that scale from zero and the base task definition each gateway's own revision
 // is copied from. A paper gateway simulates its venue: it runs on the paper hosts, reads its sessions' market-data
 // leases, and has no Elastic IP.
+//
+// A gateway whose exchange has a home zone (the registry's home_zone_id, the zone measured nearest the venue) starts
+// only there, on its mode's hosts of that zone; one without starts on its mode's hosts in any zone. A shortage there is
+// an alert, never a move to another zone. A running gateway whose home zone has changed (a person moving the venue)
+// moves at its next start, or at once when it holds nothing: no session linked and no order working on two of its
+// endpoint's writes in a row.
 //
 // An operator may ask for a running gateway to be rolled (the row's roll_requested_at): stopped without cancelling and
 // started again on its host on the release a start would run, its orders taken back from the ownership log there. The
@@ -82,6 +89,8 @@ export interface GatewayRow {
   wanted_at: string | null;
   // When an operator last asked for it to be rolled.
   roll_requested_at?: string | null;
+  // Its exchange's home zone, a zone ID; none when the exchange has none, or the row sits outside its region.
+  home_zone_id?: string | null;
 }
 
 /**
@@ -99,6 +108,8 @@ export interface Activity {
   writtenAtMs?: number;
   canHandOver?: boolean;
   handover?: boolean;
+  // The zone ID its host runs in; absent from releases that don't say.
+  zoneId?: string;
 }
 
 export type Client = { send(command: any): Promise<any> };
@@ -124,12 +135,57 @@ export interface ReconcileDeps {
 
 // 'starting': moved onto a new revision with nothing wanted yet, waiting for the old deployment to drain. 'moving': its
 // row names a new region, and it waits there until it has stopped in the old one.
-// 'rolling': a roll an operator asked for is under way.
+// 'rolling': a roll an operator asked for is under way. 'rehoming': running outside its exchange's home zone with
+// nothing linked or working, stopped so its next start puts it there.
 export type Outcome =
-  'starting' | 'moving' | 'started' | 'created' | 'stopped' | 'running' | 'stopped already' | 'rolling';
+  'starting' | 'moving' | 'started' | 'created' | 'stopped' | 'running' | 'stopped already' | 'rolling' | 'rehoming';
 
 export function serviceName(names: GatewayNames, gatewayKey: string): string {
   return names.servicePrefix + gatewayKey.replace(/:/g, '-');
+}
+
+/** The hosts a gateway starts on: its mode's in its exchange's home zone, else its mode's in any zone. */
+export function capacityProviderFor(mode: ModeNames, row: GatewayRow): string {
+  return row.home_zone_id ? zoneCapacityProvider(mode.capacityProvider, row.home_zone_id) : mode.capacityProvider;
+}
+
+/** The capacity provider a service was created or last updated with. */
+export function serviceProvider(service: any): string | undefined {
+  return service?.capacityProviderStrategy?.[0]?.capacityProvider;
+}
+
+// How often, and how many times in all, a tick re-reads an idle gateway's endpoint for its next write (every 15 s)
+// before moving it to its home zone; and the most re-reads one tick makes across every gateway, so moving several
+// keeps the tick well inside the Lambda's two minutes (the rest wait for the next tick).
+export const IDLE_POLL_MS = 2_000;
+export const IDLE_POLLS = 10;
+export const IDLE_POLLS_PER_TICK = 10;
+
+/** What one tick may still spend re-reading idle gateways' endpoints. */
+export interface IdleBudget {
+  pollsLeft: number;
+}
+
+function holdsNothing(activity: Activity): boolean {
+  return activity.linkedSessions === 0 && activity.workingOrders === 0;
+}
+
+/**
+ * Whether the gateway still holds nothing at its endpoint's next write: a session can link, and order, within the 15 s
+ * between two writes, so one idle write isn't enough to stop it. False when it writes nothing new in time.
+ */
+async function idleThroughNextWrite(
+  deps: ReconcileDeps, gatewayKey: string, first: Activity, budget: IdleBudget,
+): Promise<boolean> {
+  if (!holdsNothing(first)) return false;
+  for (let i = 0; i < IDLE_POLLS && budget.pollsLeft > 0; i++) {
+    budget.pollsLeft--;
+    await deps.sleep(IDLE_POLL_MS);
+    const now = await deps.activity(gatewayKey, deps.nowMs());
+    if (!now || now.expired || !UP_STATES.has(now.state) || !holdsNothing(now)) return false;
+    if ((now.writtenAtMs ?? 0) > (first.writtenAtMs ?? 0)) return true;
+  }
+  return false;
 }
 
 /**
@@ -147,9 +203,10 @@ export function shouldRun(row: GatewayRow, activity: Activity | null, running: b
 export async function reconcile(deps: ReconcileDeps): Promise<Map<string, Outcome>> {
   const outcomes = new Map<string, Outcome>();
   const tick = rollTick();
+  const idle: IdleBudget = { pollsLeft: IDLE_POLLS_PER_TICK };
   for (const row of await deps.gateways()) {
     try {
-      const seen = await reconcileOne(row, deps, tick);
+      const seen = await reconcileOne(row, deps, tick, idle);
       outcomes.set(row.gateway_key, seen.outcome!);
       deps.observed?.(seen);
     } catch (error) {
@@ -162,7 +219,9 @@ export async function reconcile(deps: ReconcileDeps): Promise<Map<string, Outcom
   return outcomes;
 }
 
-async function reconcileOne(row: GatewayRow, deps: ReconcileDeps, tick: RollTick): Promise<Observation> {
+async function reconcileOne(
+  row: GatewayRow, deps: ReconcileDeps, tick: RollTick, idle: IdleBudget,
+): Promise<Observation> {
   if (!platformRegions().includes(row.region)) {
     throw new Error(`${row.gateway_key} trades from ${row.region}, where no gateway can run`);
   }
@@ -177,9 +236,11 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps, tick: RollTick
   const now = deps.nowMs();
   const activity = await deps.activity(row.gateway_key, now);
   let roll = await deps.roll(row.gateway_key);
+  const provider = capacityProviderFor(mode, row);
   const seen = (outcome: Outcome): Observation => ({
     gatewayKey: row.gateway_key, mode: row.mode, region: row.region, outcome, activity,
     serviceEvent: current?.events?.[0]?.message, roll: roll ?? undefined,
+    homeZoneId: row.home_zone_id ?? undefined, capacityProvider: provider,
   });
   if (stoppedElsewhere) {
     roll = await stepRoll({ row, deps, ecs, mode, service, current, running, activity, now, tick }, roll);
@@ -193,10 +254,27 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps, tick: RollTick
   // A running gateway keeps its release: a new pin or release reaches it at its next start.
   if (running) {
     const taskId = await runningTask(ecs, names, service);
-    if (activity && !activity.expired && UP_STATES.has(activity.state)) return { ...seen('running'), taskId };
-    await releaseLostHost(ecs, names, service, current);
-    // Not up: why its last task stopped, for the alert should it stay so.
-    return { ...seen('running'), taskId, stoppedReason: await lastStopped(ecs, names, service) };
+    if (activity && !activity.expired && UP_STATES.has(activity.state)) {
+      const elsewhere = row.home_zone_id && activity.zoneId && activity.zoneId !== row.home_zone_id;
+      if (elsewhere && !(roll && rollUnderWay(roll)) && await idleThroughNextWrite(deps, row.gateway_key, activity, idle)) {
+        await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 0 }));
+        console.log(`Gateway ${row.gateway_key}: runs in ${activity.zoneId}, its home zone is ${row.home_zone_id};`
+          + ' holding nothing, so stopped to start there');
+        return { ...seen('rehoming'), taskId };
+      }
+      if (elsewhere) {
+        console.log(`Gateway ${row.gateway_key}: runs in ${activity.zoneId}, its home zone is ${row.home_zone_id};`
+          + ' moving at its next start');
+      }
+      return { ...seen('running'), taskId };
+    }
+    await releaseLostHost(ecs, names, service, current, provider);
+    // Not up: why its last task stopped, for the alert should it stay so; and, for a gateway held to a zone, since when
+    // its task has waited for a host there.
+    return {
+      ...seen('running'), taskId, stoppedReason: await lastStopped(ecs, names, service),
+      ...(row.home_zone_id && taskId ? { provisioningSinceMs: await provisioningSince(ecs, names, taskId) } : {}),
+    };
   }
   if (!stoppedElsewhere) return seen('moving');
   const version = row.orchestrator_version ?? await deps.latestVersion();
@@ -206,16 +284,19 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps, tick: RollTick
     // Onto a new revision with nothing wanted, and wanted only once the old deployment has drained: while it is still
     // there, ECS starts a task of the previous release on it, which takes sessions until the new one replaces it. A
     // starting session wakes this every 10 s, so the next tick comes soon. A host a roll pinned it to is let go: a
-    // fresh start may go on any host.
-    if (current.taskDefinition !== taskDefinition || (current.placementConstraints ?? []).length > 0) {
+    // fresh start may go on any host of its zone. Hosts of another zone (its exchange's home zone changed) are
+    // swapped the same way; ECS takes a new strategy only with a new deployment.
+    const otherHosts = serviceProvider(current) !== provider;
+    if (current.taskDefinition !== taskDefinition || (current.placementConstraints ?? []).length > 0 || otherHosts) {
       await ecs.send(new UpdateServiceCommand({
         cluster: names.cluster, service, taskDefinition, desiredCount: 0, placementConstraints: [],
+        ...(otherHosts ? { capacityProviderStrategy: [{ capacityProvider: provider, weight: 1 }], forceNewDeployment: true } : {}),
       }));
       return seen('starting');
     }
     if ((current.deployments ?? []).length > 1) return seen('starting');
     await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, desiredCount: 1 }));
-    await ensureHosts(deps, row.region, mode);
+    await ensureHosts(deps, row.region, provider);
     return seen('started');
   }
   await ecs.send(new CreateServiceCommand({
@@ -223,11 +304,11 @@ async function reconcileOne(row: GatewayRow, deps: ReconcileDeps, tick: RollTick
     serviceName: service,
     taskDefinition,
     desiredCount: 1,
-    capacityProviderStrategy: [{ capacityProvider: mode.capacityProvider, weight: 1 }],
+    capacityProviderStrategy: [{ capacityProvider: provider, weight: 1 }],
     // One host per gateway and fixed ports: the old task stops before a new one starts.
     deploymentConfiguration: { minimumHealthyPercent: 0, maximumPercent: 100 },
   }));
-  await ensureHosts(deps, row.region, mode);
+  await ensureHosts(deps, row.region, provider);
   return seen('created');
 }
 
@@ -250,12 +331,17 @@ export async function gatewayEnvironment(row: GatewayRow, deps: ReconcileDeps): 
 /**
  * A running gateway pinned by a roll to a host that has left the cluster (lost, or taken away) can't be placed again:
  * the pin is let go, so ECS starts it on another host, as for any host lost (its orders there are swept and reclaimed
- * through the sessions' hellos).
+ * through the sessions' hellos); a host of its exchange's home zone, when it was on others, since it starts afresh
+ * anyway.
  */
-async function releaseLostHost(ecs: Client, names: GatewayNames, service: string, current: any): Promise<void> {
+async function releaseLostHost(
+  ecs: Client, names: GatewayNames, service: string, current: any, provider: string,
+): Promise<void> {
   const pinned = /ec2InstanceId\s*==\s*(\S+)/.exec(current?.placementConstraints?.[0]?.expression ?? '')?.[1];
   if (!pinned || await hostActive(ecs, names, pinned)) return;
-  await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, placementConstraints: [] }));
+  const rehome = serviceProvider(current) !== provider
+    ? { capacityProviderStrategy: [{ capacityProvider: provider, weight: 1 }], forceNewDeployment: true } : {};
+  await ecs.send(new UpdateServiceCommand({ cluster: names.cluster, service, placementConstraints: [], ...rehome }));
   console.log(`Gateway service ${service}: its host ${pinned} is gone; letting it start on another`);
 }
 
@@ -304,22 +390,23 @@ async function stopElsewhere(row: GatewayRow, deps: ReconcileDeps): Promise<bool
 }
 
 /**
- * Raises the region's hosts of the gateway's mode to one per gateway set to run on them, when fewer are asked for.
+ * Raises the region's hosts of the capacity provider (a mode's, in one zone or any) to one per gateway set to run on
+ * them, when fewer are asked for.
  * Managed scaling would get there too, but only once its alarm has seen the task waiting for a few minutes. Never
  * lowers the count: managed scaling takes empty hosts away. A failure is logged and left to managed scaling, so the
  * start still stands.
  */
-async function ensureHosts(deps: ReconcileDeps, region: string, mode: ModeNames): Promise<void> {
+async function ensureHosts(deps: ReconcileDeps, region: string, capacityProvider: string): Promise<void> {
   const { names } = deps;
   try {
     const ecs = deps.ecs(region);
     const provider = (await ecs.send(new DescribeCapacityProvidersCommand({
-      capacityProviders: [mode.capacityProvider],
+      capacityProviders: [capacityProvider],
     }))).capacityProviders?.[0];
     const groupArn: string | undefined = provider?.autoScalingGroupProvider?.autoScalingGroupArn;
     const group = groupArn?.split('autoScalingGroupName/')[1];
-    if (!group) throw new Error(`capacity provider ${mode.capacityProvider} names no Auto Scaling group`);
-    const needed = await gatewaysSetToRun(ecs, names, mode.capacityProvider);
+    if (!group) throw new Error(`capacity provider ${capacityProvider} names no Auto Scaling group`);
+    const needed = await gatewaysSetToRun(ecs, names, capacityProvider);
     const autoscaling = deps.autoscaling(region);
     const described = (await autoscaling.send(new DescribeAutoScalingGroupsCommand({
       AutoScalingGroupNames: [group],
@@ -333,7 +420,7 @@ async function ensureHosts(deps: ReconcileDeps, region: string, mode: ModeNames)
     console.log(`Gateway hosts ${group} in ${region}: ${described.DesiredCapacity ?? 0} -> ${wanted}`
       + ` for ${needed} gateway(s)`);
   } catch (error) {
-    console.error(`Gateway hosts for ${mode.capacityProvider} in ${region}: couldn't raise them; managed scaling will`,
+    console.error(`Gateway hosts for ${capacityProvider} in ${region}: couldn't raise them; managed scaling will`,
       error);
   }
 }
@@ -372,6 +459,16 @@ export async function runningTasks(ecs: Client, names: GatewayNames, service: st
 }
 
 /** Why the service's most recently stopped task stopped, as ECS and its container say; undefined when none has. */
+/**
+ * When the task was created, while it still waits for a host (PROVISIONING: on a capacity provider ECS holds a task
+ * there until its group launches a host it fits on); undefined once it has one.
+ */
+async function provisioningSince(ecs: Client, names: GatewayNames, taskId: string): Promise<number | undefined> {
+  const task = (await ecs.send(new DescribeTasksCommand({ cluster: names.cluster, tasks: [taskId] }))).tasks?.[0];
+  if (task?.lastStatus !== 'PROVISIONING' || !task.createdAt) return undefined;
+  return new Date(task.createdAt).getTime();
+}
+
 async function lastStopped(ecs: Client, names: GatewayNames, service: string): Promise<string | undefined> {
   const listed = await ecs.send(new ListTasksCommand({
     cluster: names.cluster, serviceName: service, desiredStatus: 'STOPPED', maxResults: 10,
@@ -544,6 +641,7 @@ const lambdaDeps: Omit<ReconcileDeps, 'names'> = {
       writtenAtMs: Number(BigInt(item.written_at_ns?.N ?? '0') / 1_000_000n),
       canHandOver: item.can_hand_over?.BOOL === true,
       handover: item.handover?.BOOL === true,
+      zoneId: item.availability_zone_id?.S,
     };
   },
   async roll(gatewayKey) {

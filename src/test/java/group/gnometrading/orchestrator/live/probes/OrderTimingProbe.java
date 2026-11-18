@@ -49,6 +49,8 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.agrona.concurrent.SystemEpochNanoClock;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
@@ -398,7 +400,7 @@ public final class OrderTimingProbe {
         System.out.println("  time field " + name + " = " + text + offset);
     }
 
-    private static int acquire(final AsyncHTTPConnections connections, final HTTPConnector connector)
+    static int acquire(final AsyncHTTPConnections connections, final HTTPConnector connector)
             throws InterruptedException {
         final long giveUp = System.nanoTime() + CONNECT_TIMEOUT_NANOS;
         while (true) {
@@ -416,7 +418,7 @@ public final class OrderTimingProbe {
 
     // ----- helpers -----
 
-    private static long epochNanos() {
+    static long epochNanos() {
         final Instant now = Instant.now();
         return now.getEpochSecond() * 1_000_000_000L + now.getNano();
     }
@@ -429,11 +431,11 @@ public final class OrderTimingProbe {
         return scaled(System.getProperty("size", fallback), Statics.SIZE_SCALING_FACTOR);
     }
 
-    private static long scaled(final String value, final long scale) {
+    static long scaled(final String value, final long scale) {
         return Math.round(Double.parseDouble(value) * scale);
     }
 
-    private static Listing listing(final String exchange, final String exchangeSecurityId, final String symbol) {
+    static Listing listing(final String exchange, final String exchangeSecurityId, final String symbol) {
         return new Listing(
                 1,
                 new Exchange(EXCHANGE_ID, exchange, exchange, "global"),
@@ -442,7 +444,7 @@ public final class OrderTimingProbe {
                 symbol);
     }
 
-    private static String required(final String property) {
+    static String required(final String property) {
         final String value = System.getProperty(property);
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("-D" + property + " is required");
@@ -450,10 +452,14 @@ public final class OrderTimingProbe {
         return value;
     }
 
-    private static String secret(final String profile, final String secretId) {
+    /** {@code profile} "instance" reads with the host's own role, for a probe run on EC2. */
+    static String secret(final String profile, final String secretId) {
+        final AwsCredentialsProvider credentials = "instance".equals(profile)
+                ? DefaultCredentialsProvider.create()
+                : ProfileCredentialsProvider.create(profile);
         try (SecretsManagerClient secrets = SecretsManagerClient.builder()
                 .region(Region.of(System.getenv().getOrDefault("AWS_REGION", "us-east-1")))
-                .credentialsProvider(ProfileCredentialsProvider.create(profile))
+                .credentialsProvider(credentials)
                 .build()) {
             return secrets.getSecretValue(
                             GetSecretValueRequest.builder().secretId(secretId).build())

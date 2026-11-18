@@ -1,9 +1,10 @@
 import { Observation } from '../lambda/gateway_reconciler/alerts';
 import {
-  Activity, GatewayNames, GatewayRow, reconcile, ReconcileDeps, serviceName as nameOf, shouldRun, WANT_WINDOW_MS,
+  Activity, GatewayNames, GatewayRow, IDLE_POLLS, IDLE_POLLS_PER_TICK, reconcile, ReconcileDeps, serviceName as nameOf,
+  shouldRun, WANT_WINDOW_MS,
 } from '../lambda/gateway_reconciler/reconciler';
 import { MIN_ROLL_VERSION, Roll, ROLL_READY_MS } from '../lambda/gateway_reconciler/roll';
-import { ORDER_GATEWAYS } from '../lib/config';
+import { ORDER_GATEWAYS, zoneCapacityProvider } from '../lib/config';
 
 const NAMES: GatewayNames = ORDER_GATEWAYS;
 const { cluster: CLUSTER, addressTag: ADDRESS_TAG } = NAMES;
@@ -11,9 +12,14 @@ const LIVE = ORDER_GATEWAYS.modes.live;
 const PAPER = ORDER_GATEWAYS.modes.paper;
 const serviceName = (key: string) => nameOf(NAMES, key);
 // Each capacity provider's Auto Scaling group, by its name in the group's ARN.
+const HOME = 'use2-az2';
+const LIVE_HOME = zoneCapacityProvider(LIVE.capacityProvider, HOME);
+const PAPER_HOME = zoneCapacityProvider(PAPER.capacityProvider, HOME);
 const GROUPS: Record<string, string> = {
   [LIVE.capacityProvider]: 'GatewayHostsASG',
   [PAPER.capacityProvider]: 'GatewayPaperHostsASG',
+  [LIVE_HOME]: 'Gatewayuse2az2HostsASG',
+  [PAPER_HOME]: 'GatewayPaperuse2az2HostsASG',
 };
 
 type Service = {
@@ -41,17 +47,22 @@ class FakeRegion {
   stoppedTasks: {
     taskArn: string; stoppedAt: string; stoppedReason: string; containers: { exitCode?: number }[]; createdAt?: string;
   }[] = [];
-  runningTasks: { taskArn: string; containerInstanceArn: string; lastStatus?: string }[] = [];
+  runningTasks: { taskArn: string; containerInstanceArn: string; lastStatus?: string; createdAt?: string }[] = [];
   // The cluster's hosts, by container instance ARN.
   hostsInCluster: { containerInstanceArn: string; ec2InstanceId: string; status: string }[] = [];
   // The live and the paper capacity providers' Auto Scaling groups.
   hosts = { DesiredCapacity: 0, MaxSize: 4 };
   paperHosts = { DesiredCapacity: 0, MaxSize: 4 };
+  // The home zone's live and paper groups.
+  zoneHosts = { DesiredCapacity: 0, MaxSize: 4 };
+  zonePaperHosts = { DesiredCapacity: 0, MaxSize: 4 };
   hostsFail = false;
   // A region whose gateway stack isn't deployed yet.
   noCluster = false;
 
   group(name: string) {
+    if (name === GROUPS[LIVE_HOME]) return this.zoneHosts;
+    if (name === GROUPS[PAPER_HOME]) return this.zonePaperHosts;
     return name === GROUPS[PAPER.capacityProvider] ? this.paperHosts : this.hosts;
   }
 
@@ -117,6 +128,9 @@ class FakeRegion {
         const service = this.services.find((s) => s.serviceName === command.input.service)!;
         if (command.input.desiredCount !== undefined) service.desiredCount = command.input.desiredCount;
         if (command.input.placementConstraints !== undefined) service.placementConstraints = command.input.placementConstraints;
+        if (command.input.capacityProviderStrategy !== undefined) {
+          service.capacityProviderStrategy = command.input.capacityProviderStrategy;
+        }
         if (command.input.taskDefinition && command.input.taskDefinition !== service.taskDefinition) {
           // As ECS does: the old deployment stays until it has drained.
           service.deployments = [{ taskDefinition: command.input.taskDefinition }, { taskDefinition: service.taskDefinition }];
@@ -879,6 +893,48 @@ describe('rolling a gateway', () => {
     expect(east.commands()).not.toContain('DescribeContainerInstancesCommand');
   });
 
+  it('restarts a paper gateway of an exchange with a home zone onto that zone\'s hosts, as it restarts anyway', async () => {
+    const east = new FakeRegion();
+    running(east, PAPER_KALSHI, 'order-gateway-paper-kalshi-main:7');
+    stopsOnWait(east);
+    const paperHome = zoneCapacityProvider(PAPER.capacityProvider, 'use1-az2');
+
+    await reconcile(deps([{ ...asked(PAPER_KALSHI, '1.40.0'), home_zone_id: 'use1-az2' }], { 'us-east-1': east }, {
+      [PAPER_KALSHI]: { ...upOn('1.39.0'), canHandOver: false },
+    }));
+
+    expect(updates(east)[0]).toMatchObject({
+      desiredCount: 0, capacityProviderStrategy: [{ capacityProvider: paperHome, weight: 1 }], forceNewDeployment: true,
+    });
+  });
+
+  it('keeps a live roll on its host, whatever its home zone', async () => {
+    const east = new FakeRegion();
+    running(east);
+    stopsOnWait(east);
+
+    await reconcile(deps([{ ...asked(), home_zone_id: 'use1-az2' }], { 'us-east-1': east }, { [KALSHI]: upOn(FROM) }));
+
+    expect(updates(east)[0]).toEqual(
+      { cluster: CLUSTER, service: serviceName(KALSHI), taskDefinition: NEW_REVISION, desiredCount: 0, placementConstraints: PIN });
+  });
+
+  it('starts a gateway whose host is gone on its home zone\'s hosts once it lets the pin go', async () => {
+    const east = new FakeRegion();
+    running(east, KALSHI, NEW_REVISION);
+    east.services[0].placementConstraints = PIN;
+    east.hostsInCluster = [];
+    rolls.set(KALSHI, underWay('starting', { raisedAtMs: NOW - 30_000 }));
+
+    await reconcile(deps([{ ...asked(), home_zone_id: 'use1-az2' }], { 'us-east-1': east }, { [KALSHI]: null }));
+
+    expect(updates(east)).toEqual([{
+      cluster: CLUSTER, service: serviceName(KALSHI), placementConstraints: [],
+      capacityProviderStrategy: [{ capacityProvider: zoneCapacityProvider(LIVE.capacityProvider, 'use1-az2'), weight: 1 }],
+      forceNewDeployment: true,
+    }]);
+  });
+
   it('says so when the gateway cancelled everything instead of handing over', async () => {
     const east = new FakeRegion();
     running(east);
@@ -895,3 +951,163 @@ describe('rolling a gateway', () => {
     expect(rolls.get(KALSHI)!.reason).toContain('every order was cancelled');
   });
 });
+
+describe('a gateway whose exchange has a home zone', () => {
+  const homed = (key: string, wantedAgoMs: number | null) => ({ ...row(key, 'us-east-2', wantedAgoMs), home_zone_id: HOME });
+  const at = (zoneId: string, writtenAtMs: number, linkedSessions = 0, workingOrders = 0): Activity =>
+    ({ state: 'READY', linkedSessions, workingOrders, zoneId, writtenAtMs });
+
+  /** Deps whose gateway reports these endpoint writes in turn, the last one standing. */
+  function writes(rows: GatewayRow[], region: FakeRegion, sequence: Activity[]): ReconcileDeps {
+    let read = 0;
+    return { ...deps(rows, { 'us-east-2': region }), activity: async () => sequence[Math.min(read++, sequence.length - 1)] };
+  }
+
+  /** A gateway running on the regional hosts, with a task. */
+  function runningAt(region: FakeRegion, key: string) {
+    region.services.push({ ...service(key, 1), taskDefinition: 'x:1', runningCount: 1 });
+    region.runningTasks.push({ taskArn: 'arn:aws:ecs:us-east-2:1:task/order-gateways/t1', containerInstanceArn: 'ci-1' });
+  }
+
+  it('starts a live gateway only on its home zone\'s hosts, and raises those', async () => {
+    const east2 = new FakeRegion();
+
+    const outcomes = await reconcile(deps([homed(KALSHI, 5_000)], { 'us-east-2': east2 }));
+
+    expect(outcomes.get(KALSHI)).toBe('created');
+    expect(east2.sent.find((s) => s.command === 'CreateServiceCommand')!.input.capacityProviderStrategy)
+      .toEqual([{ capacityProvider: LIVE_HOME, weight: 1 }]);
+    expect(east2.zoneHosts.DesiredCapacity).toBe(1);
+    expect(east2.hosts.DesiredCapacity).toBe(0);
+  });
+
+  it('starts a paper gateway on its home zone\'s paper hosts', async () => {
+    const east2 = new FakeRegion();
+
+    await reconcile(deps([homed(PAPER_KALSHI, 5_000)], { 'us-east-2': east2 }));
+
+    expect(east2.services[0].capacityProviderStrategy).toEqual([{ capacityProvider: PAPER_HOME, weight: 1 }]);
+    expect(east2.zonePaperHosts.DesiredCapacity).toBe(1);
+  });
+
+  it('moves a stopped gateway\'s service onto its home zone\'s hosts before it starts it again', async () => {
+    const east2 = new FakeRegion();
+    east2.services.push({ ...service(KALSHI, 0), taskDefinition: 'order-gateway-live-kalshi-main:1' });
+    east2.revisions.set('order-gateway-live-kalshi-main', []);
+    const d = deps([homed(KALSHI, 5_000)], { 'us-east-2': east2 });
+
+    expect((await reconcile(d)).get(KALSHI)).toBe('starting');
+    const moved = east2.sent.find((s) => s.command === 'UpdateServiceCommand')!.input;
+    expect(moved).toMatchObject({
+      desiredCount: 0, capacityProviderStrategy: [{ capacityProvider: LIVE_HOME, weight: 1 }], forceNewDeployment: true,
+    });
+
+    east2.drain();
+    expect((await reconcile(d)).get(KALSHI)).toBe('started');
+    expect(east2.services[0]).toMatchObject({ desiredCount: 1, capacityProviderStrategy: [{ capacityProvider: LIVE_HOME, weight: 1 }] });
+    expect(east2.zoneHosts.DesiredCapacity).toBe(1);
+  });
+
+  it('leaves a gateway already on its home zone\'s hosts where it is', async () => {
+    const east2 = new FakeRegion();
+    east2.services.push({ ...service(KALSHI, 1), capacityProviderStrategy: [{ capacityProvider: LIVE_HOME, weight: 1 }] });
+    east2.runningTasks.push({ taskArn: 'arn:aws:ecs:us-east-2:1:task/order-gateways/t1', containerInstanceArn: 'ci-1' });
+
+    const outcomes = await reconcile(writes([homed(KALSHI, 5_000)], east2, [at(HOME, NOW)]));
+
+    expect(outcomes.get(KALSHI)).toBe('running');
+    expect(east2.commands()).not.toContain('UpdateServiceCommand');
+  });
+
+  it('stops one running in another zone that holds nothing on two writes in a row, so it starts at home', async () => {
+    const east2 = new FakeRegion();
+    runningAt(east2, KALSHI);
+
+    const outcomes = await reconcile(writes([homed(KALSHI, 5_000)], east2, [at('use2-az1', NOW - 10_000), at('use2-az1', NOW)]));
+
+    expect(outcomes.get(KALSHI)).toBe('rehoming');
+    expect(east2.sent.find((s) => s.command === 'UpdateServiceCommand')!.input).toEqual({
+      cluster: CLUSTER, service: serviceName(KALSHI), desiredCount: 0,
+    });
+  });
+
+  it('never stops one running in another zone with a session linked or an order working', async () => {
+    for (const [linked, orders] of [[1, 0], [0, 2]]) {
+      const east2 = new FakeRegion();
+      runningAt(east2, KALSHI);
+
+      const outcomes = await reconcile(writes([homed(KALSHI, 5_000)], east2, [at('use2-az1', NOW, linked, orders)]));
+
+      expect(outcomes.get(KALSHI)).toBe('running');
+      expect(east2.commands()).not.toContain('UpdateServiceCommand');
+    }
+  });
+
+  it('keeps one that takes a session before its next write, or writes nothing new in time', async () => {
+    for (const later of [at('use2-az1', NOW, 1, 0), at('use2-az1', NOW - 10_000)]) {
+      const east2 = new FakeRegion();
+      runningAt(east2, KALSHI);
+      const d = writes([homed(KALSHI, 5_000)], east2, [at('use2-az1', NOW - 10_000), later]);
+      let slept = 0;
+      d.sleep = async () => { slept++; };
+
+      expect((await reconcile(d)).get(KALSHI)).toBe('running');
+      expect(east2.commands()).not.toContain('UpdateServiceCommand');
+      if (later.linkedSessions === 0) expect(slept).toBe(IDLE_POLLS);
+    }
+  });
+
+  it('tells how long its task has waited for a host while it is running but not up', async () => {
+    const east2 = new FakeRegion();
+    east2.services.push({ ...service(KALSHI, 1), capacityProviderStrategy: [{ capacityProvider: LIVE_HOME, weight: 1 }] });
+    east2.runningTasks.push({
+      taskArn: 'arn:aws:ecs:us-east-2:1:task/order-gateways/t1', containerInstanceArn: '',
+      lastStatus: 'PROVISIONING', createdAt: new Date(NOW - 6 * 60_000).toISOString(),
+    });
+    const seen: Observation[] = [];
+
+    await reconcile({ ...deps([homed(KALSHI, 5_000)], { 'us-east-2': east2 }), observed: (o) => seen.push(o) });
+
+    expect(seen[0]).toMatchObject({ outcome: 'running', taskId: 't1', provisioningSinceMs: NOW - 6 * 60_000 });
+  });
+
+  it('spends at most a tick\'s budget of re-reads on idle gateways away from home, leaving the rest to the next tick', async () => {
+    const east2 = new FakeRegion();
+    runningAt(east2, KALSHI);
+    runningAt(east2, PAPER_KALSHI);
+    // Kalshi's endpoint never writes again within the tick: it uses the whole budget waiting.
+    const writesOf: Record<string, Activity[]> = {
+      [KALSHI]: [at('use2-az1', NOW - 10_000)],
+      [PAPER_KALSHI]: [at('use2-az1', NOW - 10_000), at('use2-az1', NOW)],
+    };
+    const reads: Record<string, number> = {};
+    const d = { ...deps([homed(KALSHI, 5_000), homed(PAPER_KALSHI, 5_000)], { 'us-east-2': east2 }),
+      activity: async (key: string) => {
+        const list = writesOf[key];
+        reads[key] = (reads[key] ?? 0) + 1;
+        return list[Math.min(reads[key] - 1, list.length - 1)];
+      } };
+    let slept = 0;
+    d.sleep = async () => { slept++; };
+
+    const outcomes = await reconcile(d);
+
+    expect(outcomes.get(KALSHI)).toBe('running');
+    expect(outcomes.get(PAPER_KALSHI)).toBe('running');
+    expect(slept).toBe(IDLE_POLLS_PER_TICK);
+  });
+
+  it('never moves one whose release doesn\'t say its zone, nor one of an exchange with no home zone', async () => {
+    const east2 = new FakeRegion();
+    runningAt(east2, KALSHI);
+    const unsaid: Activity = { state: 'READY', linkedSessions: 0, workingOrders: 0, writtenAtMs: NOW };
+    expect((await reconcile(writes([homed(KALSHI, 5_000)], east2, [unsaid]))).get(KALSHI)).toBe('running');
+
+    const plain = new FakeRegion();
+    runningAt(plain, KALSHI);
+    const elsewhere = writes([row(KALSHI, 'us-east-2', 5_000)], plain, [at('use2-az1', NOW - 10_000), at('use2-az1', NOW)]);
+    expect((await reconcile(elsewhere)).get(KALSHI)).toBe('running');
+    expect([...east2.commands(), ...plain.commands()]).not.toContain('UpdateServiceCommand');
+  });
+});
+

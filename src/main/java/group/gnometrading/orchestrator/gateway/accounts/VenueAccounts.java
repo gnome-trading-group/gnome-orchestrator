@@ -386,6 +386,7 @@ public final class VenueAccounts {
                 this.context.properties().getIntProperty("gateway.session.max.open.orders"),
                 this.context.properties().getIntProperty("gateway.session.max.new.per.second"),
                 this.context.properties().getIntProperty("gateway.account.max.open.orders")));
+        parts.lane.cancelCopies(this.context.properties().getIntProperty("gateway.cancel.copies"));
         parts.reader =
                 new AccountReader(protocol, this.context.nanoClock(), maxOrders, notices, released, parts.reports);
         final WebSocketClient ws = new WebSocketClientBuilder()

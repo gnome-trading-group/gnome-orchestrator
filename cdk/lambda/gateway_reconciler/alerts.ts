@@ -13,6 +13,11 @@ export const DEGRADED_TICKS = 2;
 export const FAILED_TICKS = 3;
 // How long a restart nobody asked for stays raised, for someone to look at what it left; a failed roll the same.
 export const RESTARTED_HOLD_MS = 15 * 60 * 1000;
+// How long a gateway may wait for a host in its home zone before it is called short of capacity there: a host's launch
+// takes a minute or two, and its group tries each of its instance types first.
+export const UNPLACED_MS = 5 * 60 * 1000;
+// What ECS says of a service whose task no host can take.
+const UNPLACED_EVENT = /unable to place a task/i;
 
 /** What one tick saw of one gateway. */
 export interface Observation {
@@ -33,6 +38,12 @@ export interface Observation {
   taskId?: string;
   // Its roll item: the roll under way, or the last one, ended.
   roll?: Roll;
+  // Its exchange's home zone, and the capacity provider it starts on.
+  homeZoneId?: string;
+  capacityProvider?: string;
+  // When its task was created, while that task still waits for a host (PROVISIONING); looked up only for a gateway
+  // with a home zone that is running but not up.
+  provisioningSinceMs?: number;
 }
 
 /** What is kept of a gateway between ticks. */
@@ -49,6 +60,8 @@ export interface GatewayMemory {
   taskId?: string;
   // When such a restart was seen while orders worked, the task it replaced, and why that one stopped once known.
   restarted?: { atMs: number; fromTask: string; workingOrders: number; reason?: string };
+  // Since when it has been set to run in its home zone with no host there to take it.
+  unplacedSinceMs?: number;
 }
 
 export interface AlertState {
@@ -86,7 +99,11 @@ export function evaluate(observations: Observation[], previous: AlertState, nowM
   const firing = new Map<string, Alert>();
   const gateways: Record<string, GatewayMemory> = {};
   for (const seen of observations) {
-    const memory = next(previous.gateways[seen.gatewayKey], seen, nowMs);
+    const before = previous.gateways[seen.gatewayKey];
+    const memory = next(before, seen, nowMs);
+    memory.unplacedSinceMs = seen.homeZoneId !== undefined && seen.provisioningSinceMs !== undefined
+      ? seen.provisioningSinceMs
+      : unplaced(seen) ? (before?.unplacedSinceMs ?? nowMs) : undefined;
     gateways[seen.gatewayKey] = memory;
     for (const alert of alertsFor(seen, memory, nowMs)) {
       firing.set(`${alert.type}:${seen.gatewayKey}`, { ...alert, mode: seen.mode });
@@ -99,6 +116,18 @@ export function evaluate(observations: Observation[], previous: AlertState, nowM
     modes[key] = alert.mode;
   });
   return { firing, state: { gateways, firing: keys, modes } };
+}
+
+/**
+ * Set to run in its home zone and no host takes it, by ECS's word: it can't place the task and none runs. The usual
+ * sign on a capacity provider is a task left PROVISIONING (`provisioningSinceMs`, counted from the task's creation);
+ * this is the other. A failed tick keeps what was known; without a home zone this is the gateway start's own business
+ * (GATEWAY_START_STUCK).
+ */
+function unplaced(seen: Observation): boolean {
+  if (seen.homeZoneId === undefined || seen.error !== undefined || seen.taskId !== undefined) return false;
+  if (seen.outcome !== 'started' && seen.outcome !== 'created' && seen.outcome !== 'running') return false;
+  return UNPLACED_EVENT.test(seen.serviceEvent ?? '');
 }
 
 function next(before: GatewayMemory | undefined, seen: Observation, nowMs: number): GatewayMemory {
@@ -114,8 +143,9 @@ function next(before: GatewayMemory | undefined, seen: Observation, nowMs: numbe
     // no restart nobody asked for; the roll has its own limit on coming up.
     return { degradedTicks: 0, failedTicks: 0, lastInUse: memory.lastInUse };
   }
-  if (outcome === 'stopped' || outcome === 'stopped already') {
-    // Stopped as asked: its planned stop cancels and tells everyone, so its going is no outage.
+  if (outcome === 'stopped' || outcome === 'stopped already' || outcome === 'rehoming') {
+    // Stopped as asked (or to start it in its home zone, holding nothing): its planned stop cancels and tells everyone,
+    // so its going is no outage.
     return { degradedTicks: 0, failedTicks: 0 };
   }
   if (outcome === 'starting' || outcome === 'moving' || outcome === 'started' || outcome === 'created') {
@@ -220,6 +250,16 @@ function alertsFor(seen: Observation, memory: GatewayMemory, nowMs: number): Omi
       title: `Gateway ${seen.gatewayKey} was replaced without being asked to, with ${workingOrders} order(s) working`
         + (stopped ? `: ${stopped}` : ''),
       labels: labels({ fromTask, workingOrders: String(workingOrders), ...(stopped ? { stoppedReason: stopped } : {}) }),
+    });
+  }
+  if (memory.unplacedSinceMs !== undefined && nowMs - memory.unplacedSinceMs >= UNPLACED_MS) {
+    const minutes = Math.floor((nowMs - memory.unplacedSinceMs) / 60_000);
+    alerts.push({
+      type: 'HOME_ZONE_NO_CAPACITY',
+      title: `Gateway ${seen.gatewayKey} has had no host in its home zone ${seen.homeZoneId} for ${minutes} min${why}`,
+      labels: labels({
+        zoneId: seen.homeZoneId ?? '', capacityProvider: seen.capacityProvider ?? '', minutes: String(minutes),
+      }),
     });
   }
   if (memory.degradedTicks >= DEGRADED_TICKS) {

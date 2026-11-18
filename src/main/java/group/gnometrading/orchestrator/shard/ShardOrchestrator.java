@@ -19,6 +19,7 @@ import group.gnometrading.orchestrator.aeron.AeronPorts;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
+import group.gnometrading.orchestrator.aeron.HostZone;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoint;
 import group.gnometrading.orchestrator.aeron.ServiceEndpoints;
 import group.gnometrading.orchestrator.aws.AwsModule;
@@ -569,7 +570,12 @@ public class ShardOrchestrator extends Orchestrator {
                     identity.version(),
                     wallClock.nanoTime(),
                     0,
-                    0));
+                    0,
+                    false,
+                    false,
+                    0,
+                    null,
+                    HostZone.current()));
         } catch (Exception error) {
             logger.logf(LogMessage.UNKNOWN_ERROR, "Failed to write the shard's endpoint: %s", CauseChain.of(error));
         }
