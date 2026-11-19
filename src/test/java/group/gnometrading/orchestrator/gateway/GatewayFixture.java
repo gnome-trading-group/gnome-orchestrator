@@ -29,6 +29,7 @@ import group.gnometrading.networking.http.HTTPConnector;
 import group.gnometrading.networking.http.HTTPMethod;
 import group.gnometrading.networking.http.HTTPProtocol;
 import group.gnometrading.orchestrator.aeron.AeronChannels;
+import group.gnometrading.orchestrator.aeron.AeronPathIdle;
 import group.gnometrading.orchestrator.aeron.AeronProfile;
 import group.gnometrading.orchestrator.aeron.AeronRuntime;
 import group.gnometrading.orchestrator.aeron.AeronStreamIds;
@@ -129,6 +130,20 @@ public final class GatewayFixture implements AutoCloseable {
                             null));
         }
 
+        /** A running session on several listings of one exchange, all on {@code accountId}. */
+        public void register(
+                final String sessionId,
+                final long slot,
+                final int strategyId,
+                final int exchangeId,
+                final Set<Integer> listingIds,
+                final int accountId) {
+            this.records.put(
+                    sessionId,
+                    new SessionRegistry.SessionRecord(
+                            slot, "RUNNING", strategyId, "live", listingIds, Map.of(exchangeId, accountId), 1, null));
+        }
+
         /** The session as the registry has it once it stopped. */
         public void end(final String sessionId) {
             final SessionRegistry.SessionRecord running = this.records.get(sessionId);
@@ -211,9 +226,14 @@ public final class GatewayFixture implements AutoCloseable {
             boolean journalPaused,
             AccountLane.Admissions tap) {}
 
-    private GatewayFixture(final String name, final String ingressHost, final int ingressPort, final Setup setup)
+    private GatewayFixture(
+            final String name,
+            final String ingressHost,
+            final int ingressPort,
+            final Setup setup,
+            final AeronPathIdle idle)
             throws Exception {
-        this.aeron = AeronRuntime.launch(name, AeronProfile.GATEWAY, Throwable::printStackTrace);
+        this.aeron = AeronRuntime.launch(name, AeronProfile.GATEWAY, idle, Throwable::printStackTrace);
         this.accounts = setup.accounts();
         this.account = this.accounts.get(0);
         final GatewayControl.Listings listings = new GatewayControl.Listings() {
@@ -289,7 +309,7 @@ public final class GatewayFixture implements AutoCloseable {
                                 AeronChannels.gatewayIngress(ingressHost, ingressPort), AeronStreamIds.GATEWAY_INGRESS),
                 this.sessions,
                 status,
-                new GatewayRejects(rejects, new SystemEpochNanoClock()),
+                new GatewayRejects(rejects, SampledEpochNanoClock.INSTANCE),
                 toControl,
                 System::nanoTime,
                 SampledEpochNanoClock.INSTANCE,
@@ -303,7 +323,7 @@ public final class GatewayFixture implements AutoCloseable {
                 toEgress,
                 timings,
                 System::nanoTime,
-                new SystemEpochNanoClock(),
+                SampledEpochNanoClock.INSTANCE,
                 this.journal == null ? JournalRecorder.NONE : this.journal.egress(),
                 this.cross);
         this.killsFile = setup.stateDirectory().resolve("kills.json");
@@ -457,7 +477,18 @@ public final class GatewayFixture implements AutoCloseable {
     /** Starts a gateway taking sessions on {@code ingressHost}, an address other hosts reach this one on. */
     public static GatewayFixture start(
             final String name, final String ingressHost, final int ingressPort, final Setup setup) throws Exception {
-        final GatewayFixture gateway = new GatewayFixture(name, ingressHost, ingressPort, setup);
+        return start(name, ingressHost, ingressPort, setup, AeronPathIdle.DEFAULT);
+    }
+
+    /** As above, its Aeron driver parking at most as long as {@code idle}, as a deployed gateway's does. */
+    public static GatewayFixture start(
+            final String name,
+            final String ingressHost,
+            final int ingressPort,
+            final Setup setup,
+            final AeronPathIdle idle)
+            throws Exception {
+        final GatewayFixture gateway = new GatewayFixture(name, ingressHost, ingressPort, setup, idle);
         for (final GatewayAccount account : gateway.accounts) {
             account.start();
         }
@@ -625,7 +656,7 @@ public final class GatewayFixture implements AutoCloseable {
                 parts.reader,
                 new GatewayConfig.Builder().build(),
                 SystemEpochClock.INSTANCE,
-                new SystemEpochNanoClock(),
+                SampledEpochNanoClock.INSTANCE,
                 ConnectLimiter.UNLIMITED,
                 TimeUnit.MILLISECONDS.toNanos(100));
         return new GatewayAccount(parts);

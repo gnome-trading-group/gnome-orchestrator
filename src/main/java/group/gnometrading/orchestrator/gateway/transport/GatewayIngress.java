@@ -305,6 +305,7 @@ public final class GatewayIngress implements AeronPathAgent {
         command.enqueuedNanos = this.nanoClock.getAsLong();
         this.cross.add(session.slot, counter, listingKey, side, price);
         lane.commit(index);
+        session.account.wakeLane();
         passedOn(this.news, NEW, decoder.timestampSend());
         return true;
     }
@@ -371,6 +372,7 @@ public final class GatewayIngress implements AeronPathAgent {
         command.securityId = decoder.securityId();
         command.enqueuedNanos = this.nanoClock.getAsLong();
         lane.commit(index);
+        session.account.wakeLane();
         passedOn(this.cancels, CANCEL, decoder.timestampSend());
         return true;
     }
@@ -414,6 +416,7 @@ public final class GatewayIngress implements AeronPathAgent {
         command.enqueuedNanos = this.nanoClock.getAsLong();
         this.cross.amend(session.slot, counter, price);
         lane.commit(index);
+        session.account.wakeLane();
         passedOn(this.amends, MODIFY, decoder.timestampSend());
         return true;
     }

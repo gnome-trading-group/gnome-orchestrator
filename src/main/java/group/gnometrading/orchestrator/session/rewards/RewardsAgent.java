@@ -17,11 +17,11 @@ import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.sequencer.LappingPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.simulation.rewards.PriceGrids;
 import group.gnometrading.simulation.rewards.RewardAccrual;
 import group.gnometrading.simulation.rewards.RewardScorer;
 import group.gnometrading.simulation.rewards.venues.RewardVenues;
 import group.gnometrading.sm.Listing;
-import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.incentive.IncentiveProgram;
 import group.gnometrading.sm.incentive.IncentiveTimeline;
 import group.gnometrading.sm.incentive.IncentiveTimelineJson;
@@ -124,7 +124,7 @@ public final class RewardsAgent implements GnomeAgent {
     private RewardsAgent(
             final String sessionId,
             final List<Listing> bound,
-            final List<ListingSpec> specs,
+            final List<PriceGrids> grids,
             final StreamDirectory streams,
             final SequencedRingBuffer<?> marketData,
             final SequencedRingBuffer<?> outboundOrders,
@@ -143,14 +143,13 @@ public final class RewardsAgent implements GnomeAgent {
         for (int i = 0; i < bound.size(); i++) {
             final Listing listing = bound.get(i);
             final RewardVenues.Binding binding = RewardVenues.of(listing);
-            final long tick = specs.get(i).tickSize();
             this.scorer.bind(
                     listing.listingId(),
                     binding.marketKey(),
                     binding.complement(),
                     binding.rule(),
                     IncentiveTimeline.EMPTY,
-                    nanos -> tick);
+                    grids.get(i));
             this.listingIds[i] = listing.listingId();
         }
         for (int i = 0; i < ORDERS; i++) {
@@ -171,13 +170,14 @@ public final class RewardsAgent implements GnomeAgent {
      * The agent for a session's listings whose venue runs a program the scorer estimates, or null when none does.
      * Create it before the session's producers start: its pollers see only what is published after.
      *
-     * @param specs each listing's spec now, in the order of {@code listings}, for its price tick
+     * @param grids each listing's price grid over time, in the order of {@code listings}; null for one with no spec,
+     *     which isn't scored. Read on this agent's thread, so safe to read from any.
      * @param registry a connection of its own: a registry connection serves one thread
      */
     public static RewardsAgent create(
             final String sessionId,
             final List<Listing> listings,
-            final List<ListingSpec> specs,
+            final List<PriceGrids> grids,
             final StreamDirectory streams,
             final SequencedRingBuffer<?> marketData,
             final SequencedRingBuffer<?> outboundOrders,
@@ -188,7 +188,7 @@ public final class RewardsAgent implements GnomeAgent {
             final long postIntervalMs,
             final Logger logger) {
         final List<Integer> scored = java.util.stream.IntStream.range(0, listings.size())
-                .filter(i -> RewardVenues.of(listings.get(i)) != null && specs.get(i) != null)
+                .filter(i -> RewardVenues.of(listings.get(i)) != null && grids.get(i) != null)
                 .boxed()
                 .toList();
         if (scored.isEmpty()) {
@@ -197,7 +197,7 @@ public final class RewardsAgent implements GnomeAgent {
         return new RewardsAgent(
                 sessionId,
                 scored.stream().map(listings::get).toList(),
-                scored.stream().map(specs::get).toList(),
+                scored.stream().map(grids::get).toList(),
                 streams,
                 marketData,
                 outboundOrders,

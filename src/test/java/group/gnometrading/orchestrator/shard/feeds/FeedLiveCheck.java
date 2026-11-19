@@ -85,7 +85,8 @@ public final class FeedLiveCheck {
                         MarketDataCredentials.forShard(
                                 securityMaster,
                                 source -> System.getProperty("account", MarketDataCredentials.DEFAULT_LABEL)),
-                        new SystemEpochNanoClock()),
+                        new SystemEpochNanoClock(),
+                        SpecChanges.NONE),
                 false,
                 (status, cause) -> System.out.println("#### gave up on a connection: " + cause),
                 FeedLiveCheck::rawCaptures,

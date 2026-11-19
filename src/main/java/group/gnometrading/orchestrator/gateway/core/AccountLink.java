@@ -5,9 +5,11 @@ import group.gnometrading.gateways.account.lane.LaneCommand;
 import group.gnometrading.gateways.account.reader.AccountState;
 import group.gnometrading.gateways.orders.recovery.VenueOrderQuery;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.fee.FeeTimeline;
 import java.io.IOException;
 import java.util.List;
+import java.util.function.IntFunction;
 
 /**
  * What the gateway's threads need of an account: where sessions' commands go, whether it takes new orders, how many
@@ -39,6 +41,13 @@ public interface AccountLink {
         default void removeSession(final long slot) {}
 
         /**
+         * Puts each listing loaded on the account on its current price grid, which {@code grids} gives by listing id
+         * (null for one with no spec, which keeps what it has), where order entry prices on the listing's own grid.
+         * Called from a side thread, not the control thread.
+         */
+        default void priceGrids(final IntFunction<PriceGrid> grids) {}
+
+        /**
          * Whether a paper session new to the account fits beside those it serves, judged before its books are built: a
          * simulated venue refuses one that would take it past its caps. True where nothing limits it.
          */
@@ -58,6 +67,9 @@ public interface AccountLink {
     int exchangeId();
 
     ManyToOneRingBuffer<LaneCommand> commands();
+
+    /** After committing a command to {@link #commands()}: wakes the lane if it sleeps when idle and is waiting. */
+    default void wakeLane() {}
 
     AccountState state();
 

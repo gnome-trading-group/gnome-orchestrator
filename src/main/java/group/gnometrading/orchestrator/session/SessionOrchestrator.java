@@ -38,6 +38,7 @@ import group.gnometrading.orchestrator.di.Provides;
 import group.gnometrading.orchestrator.di.Singleton;
 import group.gnometrading.orchestrator.marketdata.ShardMarketData;
 import group.gnometrading.orchestrator.runtime.AgentRuntimeInstaller;
+import group.gnometrading.orchestrator.runtime.ListingSpecRefresh;
 import group.gnometrading.orchestrator.session.journal.SessionJournal;
 import group.gnometrading.orchestrator.session.lifecycle.SessionExit;
 import group.gnometrading.orchestrator.session.lifecycle.SessionFatalHandler;
@@ -51,6 +52,7 @@ import group.gnometrading.orchestrator.session.recovery.StartupRecovery;
 import group.gnometrading.orchestrator.session.rewards.RewardsAgent;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.sequencer.metrics.JournaledMetricRecorder;
+import group.gnometrading.simulation.rewards.PriceGrids;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.strategies.StrategyAgent;
@@ -62,8 +64,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongFunction;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
@@ -98,6 +102,7 @@ public class SessionOrchestrator extends Orchestrator {
     private volatile AeronRuntime aeron;
     private volatile SessionJournal journal = SessionJournal.OFF;
     private volatile GnomeAgentRunner heartbeatRunner;
+    private volatile ScheduledExecutorService specRefresh;
     // Order entry, started ahead of the other agents; closed on its own if the session fails before they start.
     private volatile GnomeAgentRunner orderEntry;
     private volatile Logger logger;
@@ -285,6 +290,7 @@ public class SessionOrchestrator extends Orchestrator {
 
         RewardsAgent rewardsAgent =
                 rewardsAgent(sessionId, properties, listings, securityMaster, streams, buffers, epochClock, logger);
+        this.specRefresh = startSpecRefresh(properties, securityMaster, logger);
 
         SessionAgents started = SessionAgents.start(
                 marketData,
@@ -390,6 +396,10 @@ public class SessionOrchestrator extends Orchestrator {
         logger.logf(LogMessage.DEBUG, "Shutting down: closing agents");
         final long start = System.nanoTime();
         SessionAgents.close(started, journal.runner(), heartbeatRunner, logger);
+        ScheduledExecutorService refresh = this.specRefresh;
+        if (refresh != null) {
+            refresh.shutdownNow();
+        }
         try {
             orders.close();
         } catch (InterruptedException e) {
@@ -501,13 +511,13 @@ public class SessionOrchestrator extends Orchestrator {
                 || !properties.getBooleanProperty("rewards.enabled")) {
             return null;
         }
-        List<ListingSpec> specs = listings.stream()
-                .map(listing -> securityMaster.getListingSpec(listing.listingId()))
+        List<PriceGrids> grids = listings.stream()
+                .map(listing -> priceGrids(securityMaster, listing.listingId()))
                 .toList();
         return RewardsAgent.create(
                 sessionId,
                 listings,
-                specs,
+                grids,
                 streams,
                 buffers.marketData(),
                 buffers.orders(),
@@ -561,6 +571,31 @@ public class SessionOrchestrator extends Orchestrator {
                 listings,
                 this::close,
                 System::exit);
+    }
+
+    private ScheduledExecutorService startSpecRefresh(
+            Properties properties, SecurityMaster securityMaster, Logger logger) {
+        return ListingSpecRefresh.start(
+                logger,
+                securityMaster.listingSpecRefresher(getInstance(RegistryConnection.class)),
+                properties.getLongProperty("spec.refresh.interval.ms"),
+                () -> {});
+    }
+
+    /**
+     * The listing's grid at each time, from the spec then in force, or its current one before its first; null with no
+     * spec at all. The rewards agent reads it on its own thread, so through the security master's shareable history.
+     */
+    private static PriceGrids priceGrids(SecurityMaster securityMaster, int listingId) {
+        ListingSpec current = securityMaster.getListingSpec(listingId);
+        if (current == null) {
+            return null;
+        }
+        LongFunction<ListingSpec> history = securityMaster.listingSpecHistory(listingId);
+        return nanos -> {
+            ListingSpec spec = history.apply(nanos);
+            return (spec != null ? spec : current).grid();
+        };
     }
 
     private List<Listing> resolveListings(Properties properties, SecurityMaster securityMaster) {

@@ -24,11 +24,13 @@ import group.gnometrading.orchestrator.runtime.GatewayErrorHandler;
 import group.gnometrading.orchestrator.runtime.GatewayRunners;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.utils.CauseChain;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntFunction;
 import org.agrona.ErrorHandler;
 
 /**
@@ -133,6 +135,11 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
             public void removeSession(final long slot) {
                 venue.removeSession(slot);
             }
+
+            @Override
+            public void priceGrids(final IntFunction<PriceGrid> grids) {
+                venue.priceGrids(grids);
+            }
         };
     }
 
@@ -192,6 +199,11 @@ public final class GatewayAccount implements AccountLink, AutoCloseable {
     @Override
     public ManyToOneRingBuffer<LaneCommand> commands() {
         return this.commands;
+    }
+
+    @Override
+    public void wakeLane() {
+        this.lane.wake();
     }
 
     /** Every report on the account, each tagged with its session's slot; one reader. */

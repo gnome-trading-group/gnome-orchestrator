@@ -40,14 +40,16 @@ public final class FeedVenues {
 
     /**
      * What a source's connections and probe are built from. {@code credentials} names the secret a signed source's
-     * connections sign in with: a shard's bound market-data account, or a session's per-exchange key.
+     * connections sign in with: a shard's bound market-data account, or a session's per-exchange key. {@code
+     * specChanges} takes the listings a venue's feed says changed their tick.
      */
     public record Context(
             Logger logger,
             Properties properties,
             SecretCache secrets,
             MarketDataCredentials credentials,
-            EpochNanoClock clock) {}
+            EpochNanoClock clock,
+            SpecChanges specChanges) {}
 
     /** The protocol for one new connection, speaking on its channel and finding markets in its table. */
     @FunctionalInterface
@@ -82,7 +84,8 @@ public final class FeedVenues {
             new Venue(
                     PolymarketIntlVenue.FEED,
                     false,
-                    (context, table, channel) -> new PolymarketIntlProtocol(table),
+                    (context, table, channel) -> new PolymarketIntlProtocol(
+                            table, context.specChanges().notices("POLYMARKET_INTL")),
                     (http, properties) ->
                             new PolymarketIntlBookProbe(http, hostOf(properties, "polymarket.intl.clob.url"))),
             "POLYMARKET_US",

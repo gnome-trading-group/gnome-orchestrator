@@ -1,6 +1,7 @@
 package group.gnometrading.orchestrator.shard;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.gateways.feed.Feeds;
@@ -43,6 +44,7 @@ import group.gnometrading.orchestrator.shard.feeds.DynamoAssignment;
 import group.gnometrading.orchestrator.shard.feeds.FeedSources;
 import group.gnometrading.orchestrator.shard.feeds.FeedVenues;
 import group.gnometrading.orchestrator.shard.feeds.MarketDataCredentials;
+import group.gnometrading.orchestrator.shard.feeds.SpecChanges;
 import group.gnometrading.orchestrator.shard.feeds.WebSocketFeedOpener;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Mbp10Schema;
@@ -84,6 +86,9 @@ public class ShardOrchestrator extends Orchestrator {
     // 45 after.
     private static final long STOP_TIMEOUT_SECONDS = 60;
     private static final long TICK_MILLIS = 1_000;
+    // A venue announces a tick change once, so a full queue loses it until the registry's next regular pass.
+    private static final int SPEC_CHANGE_QUEUE = 1_024;
+    private static final long SPEC_CHANGE_POST_MILLIS = 1_000;
     // Samples: posted every 30 s (each post a billed request), aggregates once a minute, and a buffer for about ten
     // minutes of a large shard's samples through a samples API outage.
     private static final long SAMPLES_POST_MILLIS = 30_000;
@@ -189,6 +194,7 @@ public class ShardOrchestrator extends Orchestrator {
                 new BookProber(logger, getInstance(EpochNanoClock.class), BookProber.Settings.DEFAULT);
         final Feeds feeds = new Feeds(logger, prober);
         final RawCaptureAgent rawCapture = rawCapture(logger, properties);
+        final SpecChanges specChanges = specChanges(logger, wallClock);
         final FeedSources sources = feedSources(
                 logger,
                 properties,
@@ -201,7 +207,8 @@ public class ShardOrchestrator extends Orchestrator {
                 pool,
                 rawCapture,
                 shard,
-                rawBucket);
+                rawBucket,
+                specChanges);
 
         final ShardLatency latency = shardLatency(wallClock, securityMaster);
         final MarketDataCollectorAgent agent =
@@ -320,6 +327,27 @@ public class ShardOrchestrator extends Orchestrator {
                 TimeUnit.MICROSECONDS.toNanos(properties.getLongProperty("shard.raw.capture.max.wait.micros")));
     }
 
+    private SpecChanges specChanges(final Logger logger, final EpochNanoClock wallClock) {
+        final SpecChanges specChanges =
+                new SpecChanges(logger, getInstance(RegistryConnection.class), SPEC_CHANGE_QUEUE, wallClock);
+        DaemonThreads.scheduler("shard-spec-changes")
+                .scheduleWithFixedDelay(
+                        () -> postSpecChanges(logger, specChanges),
+                        SPEC_CHANGE_POST_MILLIS,
+                        SPEC_CHANGE_POST_MILLIS,
+                        TimeUnit.MILLISECONDS);
+        return specChanges;
+    }
+
+    // A failure that escaped would cancel the schedule, and with it every later notice.
+    private static void postSpecChanges(final Logger logger, final SpecChanges specChanges) {
+        try {
+            specChanges.post();
+        } catch (RuntimeException e) {
+            logger.logf(LogMessage.UNKNOWN_ERROR, "Spec change notices failed: %s", CauseChain.of(e));
+        }
+    }
+
     private FeedSources feedSources(
             final Logger logger,
             final Properties properties,
@@ -332,7 +360,8 @@ public class ShardOrchestrator extends Orchestrator {
             final DirectBufferPool pool,
             final RawCaptureAgent rawCapture,
             final String shard,
-            final String rawBucket) {
+            final String rawBucket,
+            final SpecChanges specChanges) {
         return new FeedSources(
                 feeds,
                 new FeedVenues.Context(
@@ -340,7 +369,8 @@ public class ShardOrchestrator extends Orchestrator {
                         properties,
                         getInstance(SecretCache.class),
                         MarketDataCredentials.forShard(securityMaster, accounts::label),
-                        wallClock),
+                        wallClock,
+                        specChanges),
                 false,
                 // GatewayErrorHandler has logged it; the connection's supervisor keeps trying, its markets flagged
                 // meanwhile, and replacing the task would cut every other connection.

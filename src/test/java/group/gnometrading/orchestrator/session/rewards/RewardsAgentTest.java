@@ -24,10 +24,11 @@ import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.schemas.book.Mbp10Decoder;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.simulation.rewards.PriceGrids;
 import group.gnometrading.simulation.rewards.RewardAccrual;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
-import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.incentive.IncentiveProgram;
 import group.gnometrading.sm.incentive.IncentiveTimeline;
@@ -46,6 +47,7 @@ class RewardsAgentTest {
     private static final long SECOND = 1_000_000_000L;
     private static final long CENT = 10_000_000L;
     private static final long DOLLAR = 100 * CENT;
+    private static final PriceGrid CENTS = PriceGrid.single(CENT, DOLLAR);
     private static final long CONTRACT = 1_000_000L;
     static final long T0 = 1_790_000_000L * SECOND;
     private static final long PERIOD = 10_000 * SECOND;
@@ -94,7 +96,7 @@ class RewardsAgentTest {
         this.agent = RewardsAgent.create(
                 "paper-1",
                 List.of(listing),
-                List.of(new ListingSpec(LISTING_ID, CENT, CONTRACT, 0, 1, 0)),
+                List.<PriceGrids>of(nanos -> CENTS),
                 streams,
                 marketData,
                 orders,
@@ -362,7 +364,7 @@ class RewardsAgentTest {
         assertNull(RewardsAgent.create(
                 "paper-1",
                 List.of(hyperliquid),
-                List.of(new ListingSpec(9, CENT, CONTRACT, 0, 1, 0)),
+                List.<PriceGrids>of(nanos -> CENTS),
                 new StreamDirectory(),
                 marketData,
                 orders,

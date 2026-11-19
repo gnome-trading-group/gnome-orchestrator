@@ -68,6 +68,7 @@ import group.gnometrading.orchestrator.runtime.BoundedCalls;
 import group.gnometrading.orchestrator.runtime.ClockReadings;
 import group.gnometrading.orchestrator.runtime.DaemonThreads;
 import group.gnometrading.orchestrator.runtime.HealthCheckServer;
+import group.gnometrading.orchestrator.runtime.ListingSpecRefresh;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.orchestrator.runtime.SamplePoster;
 import group.gnometrading.orchestrator.runtime.SamplesApi;
@@ -77,6 +78,8 @@ import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.utils.CauseChain;
 import group.gnometrading.utils.SampledEpochNanoClock;
@@ -97,6 +100,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.IntFunction;
 import java.util.function.LongFunction;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.EpochClock;
@@ -293,10 +297,11 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final GnomeAgentRunner controlRunner = startControl(logger, control);
         logger.logf(LogMessage.DEBUG, "Gateway %s: taking sessions on %s:%d", settings.key(), ip, port);
         reportAdmissions(logger, alerts, accounts, admissions, sessions, minutes);
-        pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class));
+        pollKills(logger, alerts, properties, kills, sessions, getInstance(SecurityMaster.class), registryCalls);
         reportDrops(logger, ingress, egress, sessions, cross);
         reportSelfTrades(logger, cross);
         sweepAtStartup(logger, alerts, accounts, restart, startedMillis, registryCalls);
+        followListingSpecs(logger, properties, accounts, registryCalls);
         final SimulatedAccount simulated = paper == null ? null : paper.account();
         final Thread watchdog = watchdog(
                         logger, properties, exit, ingressRunner, egressRunner, control, accounts, simulated)
@@ -731,7 +736,8 @@ public class OrderGatewayOrchestrator extends Orchestrator {
             final Properties properties,
             final Kills kills,
             final SessionTable sessions,
-            final SecurityMaster securityMaster) {
+            final SecurityMaster securityMaster,
+            final BoundedCalls registryCalls) {
         final KillSource source = properties.hasProperty("gateway.kills.file")
                 ? KillSource.file(Path.of(properties.getStringProperty("gateway.kills.file")))
                 : KillSource.over(getInstance(RegistryConnection.class));
@@ -741,15 +747,17 @@ public class OrderGatewayOrchestrator extends Orchestrator {
                 source,
                 kills,
                 sessions,
+                // Through registryCalls, the security master's one thread: it isn't safe to share.
                 listingId -> {
                     try {
-                        final Listing listing = securityMaster.getListing(listingId);
+                        final Listing listing =
+                                registryCalls.call(() -> securityMaster.getListing(listingId), REGISTRY_TIMEOUT_MILLIS);
                         return listing == null
                                 ? 0
                                 : PublishedMap.listingKey(
                                         listing.exchange().exchangeId(),
                                         listing.security().securityId());
-                    } catch (RuntimeException e) {
+                    } catch (Exception e) {
                         return 0;
                     }
                 },
@@ -977,6 +985,41 @@ public class OrderGatewayOrchestrator extends Orchestrator {
         final SessionRegistry.Source source = SessionRegistry.over(getInstance(RegistryConnection.class));
         return new SessionRegistry(
                 sessionId -> registryCalls.call(() -> source.fetch(sessionId), REGISTRY_TIMEOUT_MILLIS));
+    }
+
+    /**
+     * Keeps every loaded market on its listing's grid in the registry, where order entry prices on it. The security
+     * master is read only through {@code registryCalls}, its one thread; the refresh has a connection of its own.
+     */
+    private void followListingSpecs(
+            final Logger logger,
+            final Properties properties,
+            final List<GatewayAccount> accounts,
+            final BoundedCalls registryCalls) {
+        if (accounts.isEmpty()) {
+            return;
+        }
+        final SecurityMaster securityMaster = getInstance(SecurityMaster.class);
+        final IntFunction<PriceGrid> grids = listingId -> {
+            try {
+                final ListingSpec spec =
+                        registryCalls.call(() -> securityMaster.getListingSpec(listingId), REGISTRY_TIMEOUT_MILLIS);
+                return spec == null ? null : spec.grid();
+            } catch (Exception e) {
+                // The market keeps its grid; the next pass asks again.
+                logger.logf(LogMessage.DEBUG, "No spec read for listing %d: %s", listingId, e.getMessage());
+                return null;
+            }
+        };
+        ListingSpecRefresh.start(
+                logger,
+                securityMaster.listingSpecRefresher(getInstance(RegistryConnection.class)),
+                properties.getLongProperty("spec.refresh.interval.ms"),
+                () -> {
+                    for (final GatewayAccount account : accounts) {
+                        account.markets().priceGrids(grids);
+                    }
+                });
     }
 
     /**

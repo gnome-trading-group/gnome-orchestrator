@@ -35,6 +35,7 @@ import group.gnometrading.orchestrator.shard.feeds.Assignment;
 import group.gnometrading.orchestrator.shard.feeds.FeedSources;
 import group.gnometrading.orchestrator.shard.feeds.FeedVenues;
 import group.gnometrading.orchestrator.shard.feeds.MarketDataCredentials;
+import group.gnometrading.orchestrator.shard.feeds.SpecChanges;
 import group.gnometrading.orchestrator.shard.feeds.WebSocketFeedOpener;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.schemas.Mbp10Schema;
@@ -422,7 +423,8 @@ public final class StandaloneShard extends Orchestrator {
                         properties,
                         getInstance(SecretCache.class),
                         MarketDataCredentials.forShard(securityMaster, accounts::label),
-                        wallClock),
+                        wallClock,
+                        SpecChanges.NONE),
                 false,
                 (status, cause) -> {},
                 source -> (connection, maxFrameBytes) -> rawCapture.open(

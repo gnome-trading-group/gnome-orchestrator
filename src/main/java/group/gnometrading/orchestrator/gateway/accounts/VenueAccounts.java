@@ -47,6 +47,7 @@ import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.http.HTTPClientBuilder;
 import group.gnometrading.networking.http.HTTPConnector;
 import group.gnometrading.networking.http.HTTPProtocol;
+import group.gnometrading.networking.sockets.SocketWaker;
 import group.gnometrading.networking.sockets.factory.NativeSSLSocketFactory;
 import group.gnometrading.networking.websockets.WebSocketClient;
 import group.gnometrading.networking.websockets.WebSocketClientBuilder;
@@ -59,6 +60,7 @@ import group.gnometrading.orchestrator.gateway.core.CrossKeys;
 import group.gnometrading.orchestrator.runtime.ProcessExit;
 import group.gnometrading.resources.Properties;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.fee.FeeTimeline;
 import java.io.IOException;
 import java.net.URI;
@@ -68,6 +70,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
+import java.util.function.IntFunction;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.SystemNanoClock;
@@ -227,14 +230,25 @@ public final class VenueAccounts {
         // The public market API, keyed by nothing of the account's, so not drawn on its budget. One for every listing
         // loaded: loads come one at a time, from the control thread.
         final HTTPClient loadClient = new HTTPClient();
-        final AccountLink.Markets markets = (listing, fees) -> {
-            final PolymarketUsMarketInfo info =
-                    PolymarketUsMarketInfo.load(loadClient, gatewayHost, new PolymarketUsListing(listing).marketSlug());
-            final int exchangeId = listing.exchange().exchangeId();
-            final long securityId = listing.security().securityId();
-            venue.addMarket(exchangeId, securityId, new PolymarketUsMarket(listing, info));
-            protocol.addMarket(exchangeId, securityId, listing);
-            return CrossKey.of(exchangeId, PolymarketUsVenue.crossMarketOf(listing.exchangeSecurityId()));
+        final GriddedMarkets gridded = new GriddedMarkets(this.context.logger(), name(account));
+        final AccountLink.Markets markets = new AccountLink.Markets() {
+            @Override
+            public CrossKey load(final Listing listing, final FeeTimeline fees) throws IOException {
+                final PolymarketUsMarketInfo info = PolymarketUsMarketInfo.load(
+                        loadClient, gatewayHost, new PolymarketUsListing(listing).marketSlug());
+                final int exchangeId = listing.exchange().exchangeId();
+                final long securityId = listing.security().securityId();
+                final PolymarketUsMarket market = new PolymarketUsMarket(listing, info);
+                venue.addMarket(exchangeId, securityId, market);
+                protocol.addMarket(exchangeId, securityId, listing);
+                gridded.add(listing.listingId(), market::priceGrid);
+                return CrossKey.of(exchangeId, PolymarketUsVenue.crossMarketOf(listing.exchangeSecurityId()));
+            }
+
+            @Override
+            public void priceGrids(final IntFunction<PriceGrid> grids) {
+                gridded.apply(grids);
+            }
         };
         return assemble(
                 account,
@@ -281,16 +295,27 @@ public final class VenueAccounts {
                 this.context.nanoClock());
         // One for every listing loaded: loads come one at a time, from the control thread.
         final HTTPClient loadClient = budget.client(RequestClass.BACKGROUND);
-        final AccountLink.Markets markets = (listing, fees) -> {
-            final String exchangeSecurityId = listing.exchangeSecurityId();
-            final int colon = exchangeSecurityId.indexOf(':');
-            final PolymarketIntlMarketInfo info =
-                    PolymarketIntlMarketInfo.load(loadClient, clobHost, exchangeSecurityId.substring(0, colon));
-            final int exchangeId = listing.exchange().exchangeId();
-            final long securityId = listing.security().securityId();
-            venue.addMarket(exchangeId, securityId, PolymarketIntlMarket.of(listing, info));
-            protocol.addMarket(exchangeId, securityId, exchangeSecurityId.substring(colon + 1), fees);
-            return CrossKey.of(exchangeId, PolymarketIntlVenue.crossMarketOf(exchangeSecurityId, info));
+        final GriddedMarkets gridded = new GriddedMarkets(this.context.logger(), name(account));
+        final AccountLink.Markets markets = new AccountLink.Markets() {
+            @Override
+            public CrossKey load(final Listing listing, final FeeTimeline fees) throws IOException {
+                final String exchangeSecurityId = listing.exchangeSecurityId();
+                final int colon = exchangeSecurityId.indexOf(':');
+                final PolymarketIntlMarketInfo info =
+                        PolymarketIntlMarketInfo.load(loadClient, clobHost, exchangeSecurityId.substring(0, colon));
+                final int exchangeId = listing.exchange().exchangeId();
+                final long securityId = listing.security().securityId();
+                final PolymarketIntlMarket market = PolymarketIntlMarket.of(listing, info);
+                venue.addMarket(exchangeId, securityId, market);
+                protocol.addMarket(exchangeId, securityId, exchangeSecurityId.substring(colon + 1), fees);
+                gridded.add(listing.listingId(), market::priceGrid);
+                return CrossKey.of(exchangeId, PolymarketIntlVenue.crossMarketOf(exchangeSecurityId, info));
+            }
+
+            @Override
+            public void priceGrids(final IntFunction<PriceGrid> grids) {
+                gridded.apply(grids);
+            }
         };
         final String name = name(account);
         final AsyncHTTPConnections heartbeatConnections = AsyncHTTPConnections.builder(HTTPProtocol.HTTPS, clobHost)
@@ -405,6 +430,7 @@ public final class VenueAccounts {
                 this.context.nanoClock(),
                 ConnectLimiter.UNLIMITED,
                 READ_SETTLE_NANOS);
+        wakeups(parts);
         if (heartbeats != null) {
             final GatewayAccount[] built = new GatewayAccount[1];
             final PolymarketIntlHeartbeats keeper = heartbeats.apply(new LaneLiveness(
@@ -415,6 +441,27 @@ public final class VenueAccounts {
             return built[0];
         }
         return new GatewayAccount(parts);
+    }
+
+    /**
+     * Wakes the reader for the lane's report notices ({@code gateway.reader.wake}), and lets the lane sleep when idle
+     * until an answer or a command ({@code gateway.lane.sleep.max.micros}); ingress wakes it for each command. Each
+     * waker is one descriptor, held for the process.
+     */
+    private void wakeups(final GatewayAccount.Parts parts) throws IOException {
+        final Properties properties = this.context.properties();
+        if (properties.getBooleanProperty("gateway.reader.wake")) {
+            final SocketWaker readerWaker = SocketWaker.create();
+            parts.lane.wakeReader(readerWaker);
+            parts.connection.wakeReaderWith(readerWaker);
+        }
+        final long sleepMicros = properties.getLongProperty("gateway.lane.sleep.max.micros");
+        if (sleepMicros > 0) {
+            parts.lane.sleepWhenIdle(
+                    SocketWaker.create(),
+                    TimeUnit.MICROSECONDS.toNanos(sleepMicros),
+                    properties.getLongProperty("gateway.lane.timer.slack.nanos"));
+        }
     }
 
     /** The venue's limits with this stage's overrides under {@code prefix}, and a budget over them. */
