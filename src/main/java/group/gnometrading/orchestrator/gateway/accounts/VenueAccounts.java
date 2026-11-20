@@ -105,9 +105,11 @@ public final class VenueAccounts {
     private static final int SOCKET_READ_BUFFER = 1 << 20;
     private static final int SOCKET_WRITE_BUFFER = 1 << 14;
     private static final long READ_SETTLE_NANOS = TimeUnit.SECONDS.toNanos(2);
-    // Polymarket US lists every open order in one unpaged answer, about 1 KB each, so the default 32 KB holds only
-    // some 30: room for the account's most in-flight orders. Only for that listing: each client holds it twice over.
-    private static final int LISTING_READ_BUFFER = 1 << 23;
+    // Room for a venue's largest single answer, which the default 32 KB can't hold: Polymarket US lists every open
+    // order in one unpaged answer (about 1 KB each), and a page of Polymarket International's trades holds up to 300
+    // (a trade naming many of our resting orders runs to 17 KB; a quiet account's day was 600 KB). Only for those
+    // reads: each client holds it twice over.
+    private static final int LARGE_READ_BUFFER = 1 << 23;
     // How long a read beside the lane waits for the account's budget before it fails, as a request with no answer
     // would: catch-up tries again, a session's listing is answered FAILED.
     private static final long GATED_MAX_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
@@ -123,9 +125,9 @@ public final class VenueAccounts {
             return builder(type).build();
         }
 
-        /** As {@link #client}, with room to read a venue's unpaged listing of every open order on the account. */
-        HTTPClient listingClient(final RequestClass type) {
-            return builder(type).withReadBufferSize(LISTING_READ_BUFFER).build();
+        /** As {@link #client}, with room for a venue's largest answer: an unpaged listing, or a full page of trades. */
+        HTTPClient largeReadClient(final RequestClass type) {
+            return builder(type).withReadBufferSize(LARGE_READ_BUFFER).build();
         }
 
         private HTTPClientBuilder builder(final RequestClass type) {
@@ -216,7 +218,7 @@ public final class VenueAccounts {
         for (int i = 0; i < PM_US_CATCH_UP_QUERIES; i++) {
             // The first lists the account's open orders; the rest only look orders up one by one.
             catchUpQueries.add(new PolymarketUsVenueOrderQuery(
-                    i == 0 ? budget.listingClient(RequestClass.CATCH_UP) : budget.client(RequestClass.CATCH_UP),
+                    i == 0 ? budget.largeReadClient(RequestClass.CATCH_UP) : budget.client(RequestClass.CATCH_UP),
                     apiHost,
                     new PolymarketUsAuthSigner(creds.apiKey(), creds.privateKey()),
                     System::currentTimeMillis));
@@ -262,7 +264,7 @@ public final class VenueAccounts {
                 null,
                 null,
                 new PolymarketUsVenueOrderQuery(
-                        budget.listingClient(RequestClass.BACKGROUND),
+                        budget.largeReadClient(RequestClass.BACKGROUND),
                         apiHost,
                         new PolymarketUsAuthSigner(creds.apiKey(), creds.privateKey()),
                         System::currentTimeMillis));
@@ -291,7 +293,8 @@ public final class VenueAccounts {
                 creds.apiKey(),
                 creds.secret(),
                 creds.passphrase(),
-                new PolymarketIntlVenueOrderQuery(budget.client(RequestClass.CATCH_UP), clobHost, authHeaders(creds)),
+                new PolymarketIntlVenueOrderQuery(
+                        budget.largeReadClient(RequestClass.CATCH_UP), clobHost, authHeaders(creds)),
                 this.context.nanoClock());
         // One for every listing loaded: loads come one at a time, from the control thread.
         final HTTPClient loadClient = budget.client(RequestClass.BACKGROUND);
@@ -348,7 +351,7 @@ public final class VenueAccounts {
                 heartbeats,
                 heartbeatConnections,
                 new PolymarketIntlVenueOrderQuery(
-                        budget.client(RequestClass.BACKGROUND), clobHost, authHeaders(creds)));
+                        budget.largeReadClient(RequestClass.BACKGROUND), clobHost, authHeaders(creds)));
     }
 
     /** POLY_ADDRESS is the address the API key was derived from: the signing EOA, not the funder. One per thread. */

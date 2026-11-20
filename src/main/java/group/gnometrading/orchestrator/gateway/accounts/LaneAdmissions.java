@@ -262,6 +262,11 @@ public final class LaneAdmissions implements AccountLane.Admissions {
         this.expiredWithoutConnection++;
     }
 
+    @Override
+    public void tick() {
+        rollMinute();
+    }
+
     private void rollMinute() {
         final long now = this.nanoClock.getAsLong();
         if (now - this.minuteEndsNanos >= 0) {

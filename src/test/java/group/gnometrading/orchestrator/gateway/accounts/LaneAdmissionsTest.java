@@ -48,6 +48,17 @@ class LaneAdmissionsTest {
     }
 
     @Test
+    void aBurstFollowedBySilenceIsStillReported() {
+        this.admissions.decided(11, 1, RequestClass.CANCEL, AdmissionAction.SENT, 0, 10);
+        this.admissions.decided(11, 2, RequestClass.CANCEL, AdmissionAction.SENT, 0, 10);
+        this.now[0] += LaneAdmissions.MINUTE_NANOS + 1;
+        this.admissions.tick();
+
+        final String line = this.admissions.lastMinute(this.now[0]);
+        assertTrue(line != null && line.startsWith("2 cancels sent"), String.valueOf(line));
+    }
+
+    @Test
     void aLaneQuietForOverTwoMinutesHasNoMinute() {
         this.admissions.decided(11, 1, RequestClass.NEW, AdmissionAction.SENT, 0, 10);
         endMinute();
@@ -93,6 +104,6 @@ class LaneAdmissionsTest {
     /** Moves past the minute's end; the next thing the lane tells ends it. */
     private void endMinute() {
         this.now[0] += LaneAdmissions.MINUTE_NANOS;
-        this.admissions.connectionsBusy();
+        this.admissions.tick();
     }
 }
