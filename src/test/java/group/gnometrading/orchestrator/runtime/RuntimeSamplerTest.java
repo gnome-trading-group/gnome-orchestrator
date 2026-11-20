@@ -64,6 +64,12 @@ class RuntimeSamplerTest {
                 "written_ms 1\nsource PHC\nstratum 1\noffset_ns 12\nerror_bound_ns 34\nphc_error_bound_ns 20\n");
         agent = new GnomeAgentRunner(new Spinner(), Throwable::printStackTrace);
         GnomeAgentRunner.startOnThread(agent);
+        // The agent learns its kernel thread id before its first pass; a sample taken sooner has no CPU time to
+        // take a change from.
+        final long deadline = System.nanoTime() + 5_000_000_000L;
+        while (agent.cycles() == 0 && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
         host = HostReadings.ofThisProcess(dir.toFile());
     }
 
