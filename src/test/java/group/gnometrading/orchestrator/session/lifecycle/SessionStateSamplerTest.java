@@ -33,7 +33,7 @@ class SessionStateSamplerTest {
     private final DefaultPositionTracker positions = new DefaultPositionTracker(new SharedPositionBuffer(4));
     private final SharedPriceBuffer prices = new SharedPriceBuffer(1);
     private final PriceSlotRegistry slots = new PriceSlotRegistry(1);
-    private final LedgerRing ledgerRing = new LedgerRing(16, 4, Long.MAX_VALUE, positions);
+    private final LedgerRing ledgerRing = new LedgerRing(16, 4, Long.MAX_VALUE, positions, System::nanoTime);
     private long resyncs;
     private long held;
     private long heldNanos;

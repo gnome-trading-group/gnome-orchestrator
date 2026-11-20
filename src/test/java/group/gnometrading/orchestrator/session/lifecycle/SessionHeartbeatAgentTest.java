@@ -112,7 +112,8 @@ class SessionHeartbeatAgentTest {
         prices = new SharedPriceBuffer(1);
         slots = new PriceSlotRegistry(1);
         slots.register(100);
-        ledgerRing = new LedgerRing(16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)));
+        ledgerRing = new LedgerRing(
+                16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)), System::nanoTime);
         ledger = new LedgerAgent(
                 ledgerRing,
                 mock(RegistryConnection.class),

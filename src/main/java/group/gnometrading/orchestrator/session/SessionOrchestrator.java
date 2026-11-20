@@ -204,7 +204,8 @@ public class SessionOrchestrator extends Orchestrator {
                         properties.getIntProperty("ledger.ring.capacity"),
                         LedgerAgent.MAX_EVENTS_PER_BATCH,
                         TimeUnit.MILLISECONDS.toNanos(properties.getLongProperty("ledger.max.lag.ms")),
-                        positionTracker);
+                        positionTracker,
+                        nanoClock);
         SharedPriceBuffer priceBuffer = new SharedPriceBuffer(listings.size());
         PriceSlotRegistry priceSlotRegistry = new PriceSlotRegistry(listings.size());
         for (Listing listing : listings) {
