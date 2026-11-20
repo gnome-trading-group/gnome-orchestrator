@@ -47,6 +47,7 @@ import java.util.List;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -495,6 +496,7 @@ class SessionHeartbeatAgentTest {
         throw new AssertionError("no column " + name);
     }
 
+    @Tag("allocation")
     @Test
     void samplingAllocatesNothing() throws Exception {
         final SessionHeartbeatAgent agent = new SessionHeartbeatAgent(
@@ -646,6 +648,7 @@ class SessionHeartbeatAgentTest {
         assertEquals(-1, body.get("host").get("memTotalBytes").asLong(), "this test's host has no /proc");
     }
 
+    @Tag("allocation")
     @Test
     void writingTheHeartbeatAllocatesNothing() throws Exception {
         final JournalSegmentSealer journal = sealed(3);

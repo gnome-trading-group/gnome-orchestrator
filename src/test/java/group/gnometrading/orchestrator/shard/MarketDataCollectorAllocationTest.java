@@ -20,6 +20,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -30,6 +31,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
  * Recording books into minute files is the shard's busiest path, run once per record on the collector's thread.
  * Measured with a real clock and a hand-written S3 client: a Mockito mock's invocations allocate.
  */
+@Tag("allocation")
 class MarketDataCollectorAllocationTest {
 
     private static final long SECOND = TimeUnit.SECONDS.toNanos(1);

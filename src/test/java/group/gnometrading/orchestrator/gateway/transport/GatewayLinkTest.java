@@ -55,10 +55,12 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import org.agrona.CloseHelper;
 import org.agrona.collections.LongHashSet;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /** Ingress and egress over a real media driver: what a session sends reaches its account's lane, and back. */
@@ -71,22 +73,11 @@ class GatewayLinkTest {
     private static final long LEASED = 7;
     private static final long NOT_LEASED = 8;
 
-    private final AeronRuntime gatewayAeron =
-            AeronRuntime.launch("link-gateway", AeronProfile.GATEWAY, Throwable::printStackTrace);
-    private final AeronRuntime sessionAeron =
-            AeronRuntime.launch("link-session", AeronProfile.GATEWAY, Throwable::printStackTrace);
-    private final Subscription ingressSubscription = this.gatewayAeron
-            .aeron()
-            .addSubscription(AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
-    private final Publication toGateway = this.sessionAeron
-            .aeron()
-            .addPublication(AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
-    private final Subscription replies = this.sessionAeron
-            .aeron()
-            .addSubscription(AeronChannels.gatewayReply("localhost", REPLY_PORT), AeronStreamIds.GATEWAY_REPLY);
-    private final Publication replyPublication = this.gatewayAeron
-            .aeron()
-            .addPublication(AeronChannels.gatewayReply("localhost", REPLY_PORT), AeronStreamIds.GATEWAY_REPLY);
+    private AeronRuntime gatewayAeron;
+    private AeronRuntime sessionAeron;
+    private Publication toGateway;
+    private Subscription replies;
+    private Publication replyPublication;
 
     private final TestAccount account = new TestAccount();
     private final SessionTable sessions = new SessionTable();
@@ -100,29 +91,10 @@ class GatewayLinkTest {
     private final ManyToOneRingBuffer<GatewayMessage> fromControl =
             new ManyToOneRingBuffer<>(GatewayMessage[]::new, GatewayMessage::new, 16);
     private final CrossIndex cross = new CrossIndex(new CrossKeys(), CrossIndex.Mode.ENFORCE, 1024, 1024);
-    private final GatewayIngress ingress = new GatewayIngress(
-            this.ingressSubscription,
-            this.sessions,
-            this.status,
-            new GatewayRejects(this.rejectRing, new SystemEpochNanoClock()),
-            this.toControl,
-            System::nanoTime,
-            SampledEpochNanoClock.INSTANCE,
-            JournalRecorder.NONE,
-            this.cross,
-            Kills.none());
+    private GatewayIngress ingress;
     private final ManyToOneRingBuffer<TimingMessage> timings =
             new ManyToOneRingBuffer<>(TimingMessage[]::new, TimingMessage::new, 256);
-    private final GatewayEgress egress = new GatewayEgress(
-            this.sessions,
-            this.status,
-            List.of(this.accountReports, this.rejectRing),
-            this.fromControl,
-            this.timings,
-            System::nanoTime,
-            new SystemEpochNanoClock(),
-            JournalRecorder.NONE,
-            this.cross);
+    private GatewayEgress egress;
     private final List<Received> received = new ArrayList<>();
     private final FragmentHandler replyHandler = (buffer, offset, length, header) -> {
         final UnsafeBuffer copy = new UnsafeBuffer(new byte[length]);
@@ -175,10 +147,52 @@ class GatewayLinkTest {
         }
     }
 
+    // Opened here rather than in field initializers: a constructor that throws gets no @AfterEach, and the drivers it
+    // had launched would hold their ports for every later test.
+    @BeforeEach
+    void open() {
+        this.gatewayAeron = AeronRuntime.launch("link-gateway", AeronProfile.GATEWAY, Throwable::printStackTrace);
+        this.sessionAeron = AeronRuntime.launch("link-session", AeronProfile.GATEWAY, Throwable::printStackTrace);
+        final Subscription ingressSubscription = this.gatewayAeron
+                .aeron()
+                .addSubscription(
+                        AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
+        this.toGateway = this.sessionAeron
+                .aeron()
+                .addPublication(
+                        AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
+        this.replies = this.sessionAeron
+                .aeron()
+                .addSubscription(AeronChannels.gatewayReply("localhost", REPLY_PORT), AeronStreamIds.GATEWAY_REPLY);
+        this.replyPublication = this.gatewayAeron
+                .aeron()
+                .addPublication(AeronChannels.gatewayReply("localhost", REPLY_PORT), AeronStreamIds.GATEWAY_REPLY);
+        this.ingress = new GatewayIngress(
+                ingressSubscription,
+                this.sessions,
+                this.status,
+                new GatewayRejects(this.rejectRing, new SystemEpochNanoClock()),
+                this.toControl,
+                System::nanoTime,
+                SampledEpochNanoClock.INSTANCE,
+                JournalRecorder.NONE,
+                this.cross,
+                Kills.none());
+        this.egress = new GatewayEgress(
+                this.sessions,
+                this.status,
+                List.of(this.accountReports, this.rejectRing),
+                this.fromControl,
+                this.timings,
+                System::nanoTime,
+                new SystemEpochNanoClock(),
+                JournalRecorder.NONE,
+                this.cross);
+    }
+
     @AfterEach
     void close() {
-        this.sessionAeron.close();
-        this.gatewayAeron.close();
+        CloseHelper.closeAll(this.sessionAeron, this.gatewayAeron);
     }
 
     @Test

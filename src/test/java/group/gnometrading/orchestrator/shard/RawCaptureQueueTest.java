@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -246,6 +247,7 @@ class RawCaptureQueueTest {
                 log.lines.toString());
     }
 
+    @Tag("allocation")
     @Test
     void capturingAllocatesNothingOnTheReaderForSmallOrSplitFrames() {
         RawCaptureAgent agent = agent(16 << 20, TimeUnit.SECONDS.toNanos(5));

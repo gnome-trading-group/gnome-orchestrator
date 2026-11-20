@@ -19,6 +19,10 @@ add-apt-repository -y ppa:deadsnakes/ppa
 apt-get update
 apt-get install -y python3.13 python3.13-venv
 
+# Aeron binds 40000-40999 explicitly (AeronPorts); left in the ephemeral range, a socket bound to port 0 can take one
+# of them first. Applied at boot; a container has its own network namespace and ignores it.
+echo 'net.ipv4.ip_local_reserved_ports=40000-40999' > /etc/sysctl.d/98-gnome-aeron-ports.conf
+
 install -d -m 0755 /opt/gnome /etc/gnome /var/log/gnome /var/lib/gnome
 python3.13 -m venv /opt/gnome/venv
 /opt/gnome/venv/bin/pip install --quiet --upgrade pip

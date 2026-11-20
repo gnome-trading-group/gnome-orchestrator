@@ -75,6 +75,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import org.agrona.CloseHelper;
 import org.agrona.concurrent.SystemEpochNanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
@@ -95,20 +96,15 @@ class GatewayControlTest {
     private static final long SECURITY_ID = 7;
     private static final int LISTING_ID = 70;
     private static final long COD_MILLIS = 300;
+    // How long a test waits for a session to be cut. It is cut after COD_MILLIS, and the wait ends as soon as it is;
+    // the rest is room for a slow, shared CI runner, where each reconnect alone can take a good part of a second.
+    private static final long CUT_WAIT_MILLIS = 10_000;
 
-    private final AeronRuntime gatewayAeron =
-            AeronRuntime.launch("control-gateway", AeronProfile.GATEWAY, Throwable::printStackTrace);
-    private final AeronRuntime sessionAeron =
-            AeronRuntime.launch("control-session", AeronProfile.GATEWAY, Throwable::printStackTrace);
-    private final Subscription ingressSubscription = this.gatewayAeron
-            .aeron()
-            .addSubscription(AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
-    private Publication toGateway = this.sessionAeron
-            .aeron()
-            .addPublication(AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
-    private final Subscription replies = this.sessionAeron
-            .aeron()
-            .addSubscription(AeronChannels.gatewayReply("localhost", REPLY_PORT), AeronStreamIds.GATEWAY_REPLY);
+    private AeronRuntime gatewayAeron;
+    private AeronRuntime sessionAeron;
+    private Subscription ingressSubscription;
+    private Publication toGateway;
+    private Subscription replies;
 
     private final RecordingAlerts alerts = new RecordingAlerts();
     private final TestAccount account = new TestAccount();
@@ -215,8 +211,23 @@ class GatewayControlTest {
         }
     }
 
+    // Opened here rather than in field initializers: a constructor that throws gets no @AfterEach, and the drivers it
+    // had launched would hold their ports for every later test.
     @BeforeEach
     void setUp() throws Exception {
+        this.gatewayAeron = AeronRuntime.launch("control-gateway", AeronProfile.GATEWAY, Throwable::printStackTrace);
+        this.sessionAeron = AeronRuntime.launch("control-session", AeronProfile.GATEWAY, Throwable::printStackTrace);
+        this.ingressSubscription = this.gatewayAeron
+                .aeron()
+                .addSubscription(
+                        AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
+        this.toGateway = this.sessionAeron
+                .aeron()
+                .addPublication(
+                        AeronChannels.gatewayIngress("localhost", INGRESS_PORT), AeronStreamIds.GATEWAY_INGRESS);
+        this.replies = this.sessionAeron
+                .aeron()
+                .addSubscription(AeronChannels.gatewayReply("localhost", REPLY_PORT), AeronStreamIds.GATEWAY_REPLY);
         this.sessionsFile = SessionsFile.open(
                 this.stateDirectory.resolve("sessions.jsonl"), System.currentTimeMillis(), new ArrayList<>());
         this.cross = new CrossIndex(new CrossKeys(), CrossIndex.Mode.ENFORCE, 1024, 1024);
@@ -297,8 +308,7 @@ class GatewayControlTest {
 
     @AfterEach
     void close() {
-        this.sessionAeron.close();
-        this.gatewayAeron.close();
+        CloseHelper.closeAll(this.sessionAeron, this.gatewayAeron);
     }
 
     @Test
@@ -499,7 +509,7 @@ class GatewayControlTest {
         hello(0, 0);
         awaitWelcome();
         // Heartbeats keep arriving, but always echo the same gateway heartbeat: ours aren't reaching it.
-        final long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COD_MILLIS * 3);
+        final long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CUT_WAIT_MILLIS);
         while (System.nanoTime() < until && this.sessions.bySlot(SLOT).state == GatewaySession.ACTIVE) {
             heartbeat(1);
             runFor(20);
@@ -515,7 +525,7 @@ class GatewayControlTest {
         awaitWelcome();
         // As a session whose replies never arrive behaves: it drops its link, reconnects and says hello again, well
         // inside its timeout each time, heartbeating meanwhile with an echo that never moves.
-        final long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COD_MILLIS * 3);
+        final long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CUT_WAIT_MILLIS);
         while (System.nanoTime() < until && this.sessions.bySlot(SLOT).state == GatewaySession.ACTIVE) {
             reconnect();
             hello(0, 0);

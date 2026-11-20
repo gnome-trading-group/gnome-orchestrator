@@ -4,6 +4,7 @@ import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.concurrent.GnomeAgentRunner;
 import group.gnometrading.host.HostReadings;
 import group.gnometrading.host.JvmReadings;
+import group.gnometrading.host.ThreadCpuReadings;
 import group.gnometrading.metrics.SampleBuffer;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import java.util.List;
@@ -97,6 +98,7 @@ public final class RuntimeSampler {
     private final SampleBuffer samples;
     private final HostReadings host;
     private final JvmReadings jvm;
+    private final ThreadCpuReadings threadCpu;
     private final ClockReadings clock;
     private final SchedulingLatencyProbe probe;
     private final CountersReader aeron;
@@ -143,6 +145,7 @@ public final class RuntimeSampler {
         this.previousCollectionMs = new long[jvm.collectors()];
         this.previousCycles = new long[this.agents.length];
         this.previousCpu = new long[this.agents.length];
+        this.threadCpu = ThreadCpuReadings.ofThisProcess(this.agents.length);
     }
 
     /** Takes a sample if one is due at {@code nowMs}; @return whether it did */
@@ -290,8 +293,8 @@ public final class RuntimeSampler {
             final long cycles = agents[i].cycles();
             final Thread thread = agents[i].getThread();
             final long cpu = thread == null || thread == GnomeAgentRunner.TOMBSTONE
-                    ? UNAVAILABLE
-                    : jvm.threadCpuNanos(thread.getId());
+                    ? threadCpu.cpuNanos(i, ThreadCpuReadings.UNAVAILABLE)
+                    : threadCpu.cpuNanos(i, agents[i].nativeThreadId());
             if (i > 0) {
                 json.writeComma();
             }

@@ -23,6 +23,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.CountersManager;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -116,7 +117,11 @@ class RuntimeSamplerTest {
         JsonNode thread = data.get("threads").get(0);
         assertEquals("spinner", thread.get("name").asText());
         assertTrue(thread.get("cycles").asLong() > 0, "a running agent's loop moved");
-        assertTrue(thread.get("cpuNanos").asLong() > 0, "a spinning agent used CPU");
+        if (Files.exists(Path.of("/proc/thread-self"))) {
+            assertTrue(thread.get("cpuNanos").asLong() > 0, "a spinning agent used CPU");
+        } else {
+            assertEquals(-1, thread.get("cpuNanos").asLong(), "off Linux a thread's CPU time is unread");
+        }
         assertEquals(7, data.get("aeron").get("naksSent").asLong());
         assertEquals(250_000, data.get("aeron").get("senderMaxCycleNs").asLong());
         assertTrue(data.get("jvm").get("heapUsedBytes").asLong() > 0);
@@ -143,6 +148,7 @@ class RuntimeSamplerTest {
         assertTrue(sent(0).get("data").get("scheduling").isNull(), "no window finished yet");
     }
 
+    @Tag("allocation")
     @Test
     void samplingAllocatesNothing() {
         RuntimeSampler sampler = sampler(null);

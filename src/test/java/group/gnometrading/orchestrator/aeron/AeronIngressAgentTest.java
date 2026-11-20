@@ -15,31 +15,40 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import org.agrona.CloseHelper;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class AeronIngressAgentTest {
 
     private static final int STREAM_ID = 101;
 
-    private final AeronRuntime shard =
-            AeronRuntime.launch("ingress-shard", AeronProfile.STANDARD, Throwable::printStackTrace);
-    private final AeronRuntime session =
-            AeronRuntime.launch("ingress-session", AeronProfile.STANDARD, Throwable::printStackTrace);
-    private final Publication publication =
-            this.shard.aeron().addPublication(AeronChannels.shardPublication("localhost", 40060), STREAM_ID);
-    // Two hosts on one machine would hand out the same receive port, so the session names one here.
-    private final Subscription subscription = this.session
-            .aeron()
-            .addSubscription(
-                    "aeron:udp?endpoint=localhost:40980|control=localhost:40060|control-mode=dynamic", STREAM_ID);
+    private AeronRuntime shard;
+    private AeronRuntime session;
+    private Publication publication;
+    private Subscription subscription;
     private final AeronIngressAgent agent = new AeronIngressAgent();
     private final Mbp10Schema message = new Mbp10Schema();
 
+    // Opened here rather than in field initializers: a constructor that throws gets no @AfterEach, and the drivers it
+    // had launched would hold their ports for every later test.
+    @BeforeEach
+    void open() {
+        this.shard = AeronRuntime.launch("ingress-shard", AeronProfile.STANDARD, Throwable::printStackTrace);
+        this.session = AeronRuntime.launch("ingress-session", AeronProfile.STANDARD, Throwable::printStackTrace);
+        this.publication =
+                this.shard.aeron().addPublication(AeronChannels.shardPublication("localhost", 40060), STREAM_ID);
+        // Two hosts on one machine would hand out the same receive port, so the session names one here.
+        this.subscription = this.session
+                .aeron()
+                .addSubscription(
+                        "aeron:udp?endpoint=localhost:40980|control=localhost:40060|control-mode=dynamic", STREAM_ID);
+    }
+
     @AfterEach
     void close() {
-        this.session.close();
-        this.shard.close();
+        CloseHelper.closeAll(this.session, this.shard);
     }
 
     private void publish(final int sequence) throws InterruptedException {

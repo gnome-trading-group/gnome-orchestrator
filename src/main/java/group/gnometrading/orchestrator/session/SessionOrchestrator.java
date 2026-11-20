@@ -94,6 +94,9 @@ public class SessionOrchestrator extends Orchestrator {
 
     private static final int LEDGER_CONNECT_TIMEOUT_MS = 1_000;
     private static final int LEDGER_RESPONSE_TIMEOUT_MS = 2_000;
+    // The response timeout is only checked between reads, so with the 10 s default read timeout a request that gets
+    // no answer blocks the writer past ledger.max.lag.ms and halts trading before the agent can retry.
+    private static final int LEDGER_READ_TIMEOUT_MS = 250;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     // Set once configure() has started them; read by onClose(), which may run on a shutdown hook thread.
@@ -534,6 +537,7 @@ public class SessionOrchestrator extends Orchestrator {
     private static HTTPClientBuilder registryWriterClient() {
         return HTTPClient.builder()
                 .withConnectTimeout(LEDGER_CONNECT_TIMEOUT_MS)
+                .withReadTimeout(LEDGER_READ_TIMEOUT_MS)
                 .withResponseTimeout(LEDGER_RESPONSE_TIMEOUT_MS);
     }
 

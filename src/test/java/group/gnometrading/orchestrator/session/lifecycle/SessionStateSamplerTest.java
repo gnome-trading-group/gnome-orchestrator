@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 class SessionStateSamplerTest {
@@ -221,6 +222,7 @@ class SessionStateSamplerTest {
         tiny.commit();
     }
 
+    @Tag("allocation")
     @Test
     void samplingAllocatesNothing() {
         SessionStateSampler sampler = sampler();

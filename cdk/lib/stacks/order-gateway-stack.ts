@@ -164,6 +164,12 @@ export class OrderGatewayStack extends cdk.Stack {
   ) {
     const userData = ec2.UserData.forLinux();
     userData.addCommands(...hostClockUserData());
+    // Gateways run on the host's network and bind Aeron ports (40000-40999) explicitly: keep the kernel from handing
+    // them out to sockets bound to port 0 first.
+    userData.addCommands(
+      "echo 'net.ipv4.ip_local_reserved_ports=40000-40999' > /etc/sysctl.d/98-gnome-aeron-ports.conf",
+      'sysctl -w net.ipv4.ip_local_reserved_ports=40000-40999',
+    );
     const launchTemplate = new ec2.LaunchTemplate(this, `${id}HostTemplate`, {
       instanceType: new ec2.InstanceType(instanceTypes[0]),
       machineImage: ecs.EcsOptimizedImage.amazonLinux2023(),
